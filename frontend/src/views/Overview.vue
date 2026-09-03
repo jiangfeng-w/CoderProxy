@@ -109,6 +109,14 @@ onUnmounted(() => {
   <div>
     <h2 class="page-title">中转概览</h2>
 
+    <!-- 合规警示（M5：开发计划 §10 风险 1） -->
+    <div class="warn-banner">
+      <span class="warn-icon">⚠</span>
+      <span>
+        本工具通过非官方方式接入牛码，存在<strong>封号风险</strong>。请务必使用<strong>小号</strong>登录验证，谨慎对待生产账号；使用本工具导致的账号风控/封禁由使用者自行承担。
+      </span>
+    </div>
+
     <!-- 服务概要 -->
     <div class="card">
       <div class="card-title">服务概要</div>
@@ -220,6 +228,26 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.warn-banner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: rgba(234, 179, 8, 0.1);
+  border: 1px solid rgba(234, 179, 8, 0.4);
+  color: #fde68a;
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.warn-icon {
+  color: var(--cp-yellow);
+  flex-shrink: 0;
+}
+.warn-banner strong {
+  color: var(--cp-yellow);
+}
 .card {
   background: var(--cp-panel);
   border: 1px solid var(--cp-border);

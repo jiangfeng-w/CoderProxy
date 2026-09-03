@@ -13,6 +13,8 @@ relay/data/
 # Rust / Tauri
 src-tauri/target/
 src-tauri/gen/
+# M5 打包产物（sidecar exe，可经 relay/build_sidecar.py 再生成）
+src-tauri/binaries/
 
 # Node / Vue
 frontend/node_modules/

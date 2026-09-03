@@ -9,7 +9,10 @@
       "cwd": "../frontend"
     },
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": {
+      "script": "npm run build",
+      "cwd": "../frontend"
+    },
     "frontendDist": "../frontend/dist"
   },
   "app": {
@@ -28,7 +31,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "externalBin": [
+      "binaries/relay-sidecar"
+    ],
+    "windows": {
+      "nsis": {
+        "languages": ["English", "SimpChinese"]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

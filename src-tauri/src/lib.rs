@@ -1,8 +1,8 @@
 //! CoderProxy 桌面壳（Tauri 2）。
 //!
 //! 职责（M4 spec §6.3）：
-//! 1. spawn Python relay sidecar（`python run.py run --port <期望端口>`），解析 stdout 的
-//!    `[relay-ready]` 行拿到实际端口与 API Key；
+//! 1. spawn relay sidecar（PyInstaller 打包的 `relay-sidecar`，经 `bundle.externalBin`
+//!    随壳分发），解析 stdout 的 `[relay-ready]` 行拿到实际端口与 API Key；
 //! 2. 向前端暴露 invoke 命令：
 //!    - `relay`：通用代理，GUI → Rust → HTTP(localhost:port) 转发 `/v1/*`；
 //!    - `relay_status`：当前 sidecar 就绪状态（端口 / key / 工具模式）；
@@ -10,10 +10,9 @@
 //!    - `relay_restart`：按指定端口重启 sidecar（后台线程，前端轮询就绪）。
 //! 3. 应用退出时杀掉 sidecar。
 //!
-//! 开发期 sidecar 用本机 python 跑 `relay/run.py`；M5 再切 PyInstaller 单文件 exe。
+//! M5：sidecar 用 PyInstaller onefile exe（`binaries/relay-sidecar-<triple>.exe`），
+//! 数据目录固定为 `app_data_dir`（打包态 `__file__` 指向解包目录，不可落数据）。
 
-use std::io::BufRead;
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::Mutex;
@@ -21,6 +20,8 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{Manager, State};
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::ShellExt;
 
 /// sidecar 就绪信息（`[relay-ready]` 行解析结果）。
 #[derive(Clone, Serialize)]
@@ -31,11 +32,10 @@ struct ReadyInfo {
 }
 
 struct AppState {
-    sidecar: Mutex<Option<Child>>,
+    sidecar: Mutex<Option<CommandChild>>,
     ready: Mutex<Option<ReadyInfo>>,
     /// GUI 配置页期望的端口；0 = 随机端口。重启时按此值 spawn。
     requested_port: AtomicU16,
-    relay_dir: String,
     client: reqwest::Client,
 }
 
@@ -62,54 +62,57 @@ fn parse_ready(line: &str) -> Option<ReadyInfo> {
     Some(ReadyInfo { port, api_key, tool_mode })
 }
 
-fn resolve_python() -> String {
-    if let Ok(p) = std::env::var("CODERPROXY_PYTHON") {
-        if !p.trim().is_empty() {
-            return p;
-        }
-    }
-    "python".to_string()
-}
-
-/// 开发期 relay 目录：exe 在 `src-tauri/target/<profile>/` 下，relay 在其 ../../../relay。
-/// （打包期 M5 再切为「exe 同目录」的捆绑布局。）
-fn relay_dir(exe_dir: &std::path::Path) -> std::path::PathBuf {
-    exe_dir.join("..").join("..").join("..").join("relay")
-}
-
 fn spawn_sidecar(app: &tauri::AppHandle) -> Result<ReadyInfo, String> {
     let state = app.state::<AppState>();
     let port = state.requested_port.load(Ordering::SeqCst);
-    spawn_with_port(&state, port)
+    spawn_with_port(app, &state, port)
 }
 
-/// 按指定端口 spawn 并等待 `[relay-ready]`；成功后将 child/ready 写入 AppState。
-fn spawn_with_port(state: &AppState, port: u16) -> Result<ReadyInfo, String> {
-    let mut child = Command::new(resolve_python())
-        .args(["run.py", "run", "--port", &port.to_string()])
-        .current_dir(&state.relay_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit()) // 开发期控制台可见；打包后走 M5 日志落盘
-        .spawn()
-        .map_err(|e| format!("spawn sidecar 失败（python 与 relay 依赖就绪？）: {e}"))?;
+/// 按指定端口 spawn 打包 sidecar 并等待 `[relay-ready]`；成功后将 child/ready 写入 AppState。
+fn spawn_with_port(app: &tauri::AppHandle, state: &AppState, port: u16) -> Result<ReadyInfo, String> {
+    // 数据目录：%APPDATA%/com.coderproxy.desktop（打包态不可用 exe 解包目录）
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("解析 app_data_dir 失败: {e}"))?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "无法获取 sidecar stdout".to_string())?;
+    let (mut rx, child) = app
+        .shell()
+        .sidecar("relay-sidecar")
+        .map_err(|e| format!("解析 sidecar 失败: {e}"))?
+        .args(["run", "--port", &port.to_string()])
+        .env("RELAY_DATA_DIR", data_dir.to_string_lossy().as_ref())
+        .spawn()
+        .map_err(|e| format!("spawn sidecar 失败（打包 exe 与依赖就绪？）: {e}"))?;
 
     // 读线程：逐行扫 stdout，命中 [relay-ready] 即通知主线程
-    let (tx, rx) = channel();
+    let (tx, ready_rx) = channel();
     std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Some(info) = parse_ready(&line) {
-                let _ = tx.send(info);
-                break;
+        let mut buf = Vec::new();
+        while let Some(ev) = rx.blocking_recv() {
+            match ev {
+                CommandEvent::Stdout(bytes) => {
+                    for b in bytes {
+                        if b == b'\n' {
+                            let line = String::from_utf8_lossy(&buf).trim().to_string();
+                            buf.clear();
+                            if let Some(info) = parse_ready(&line) {
+                                let _ = tx.send(info);
+                                return;
+                            }
+                        } else {
+                            buf.push(b);
+                        }
+                    }
+                }
+                CommandEvent::Terminated(_) => return,
+                _ => {}
             }
         }
     });
 
-    match rx.recv_timeout(Duration::from_secs(30)) {
+    match ready_rx.recv_timeout(Duration::from_secs(60)) {
         Ok(info) => {
             *state.sidecar.lock().unwrap() = Some(child);
             *state.ready.lock().unwrap() = Some(info.clone());
@@ -118,7 +121,7 @@ fn spawn_with_port(state: &AppState, port: u16) -> Result<ReadyInfo, String> {
         }
         Err(RecvTimeoutError::Timeout) => {
             let _ = child.kill();
-            Err("sidecar 30s 内未就绪（检查 python 与 relay 依赖）".to_string())
+            Err("sidecar 60s 内未就绪（检查打包 exe）".to_string())
         }
         Err(RecvTimeoutError::Disconnected) => {
             let _ = child.kill();
@@ -130,9 +133,8 @@ fn spawn_with_port(state: &AppState, port: u16) -> Result<ReadyInfo, String> {
 /// 停掉当前 sidecar 并清空就绪状态。
 fn stop_sidecar(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    if let Some(mut child) = state.sidecar.lock().unwrap().take() {
+    if let Some(child) = state.sidecar.lock().unwrap().take() {
         let _ = child.kill();
-        let _ = child.wait();
     }
     *state.ready.lock().unwrap() = None;
     println!("[shell] sidecar 已停止");
@@ -227,19 +229,13 @@ async fn relay_restart(app: tauri::AppHandle, port: Option<u16>) -> Result<serde
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_default();
-    let relay_dir = relay_dir(&exe_dir);
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             sidecar: Mutex::new(None),
             ready: Mutex::new(None),
             requested_port: AtomicU16::new(0),
-            relay_dir: relay_dir.to_string_lossy().into_owned(),
             client: reqwest::Client::new(),
         })
         .invoke_handler(tauri::generate_handler![relay, relay_status, relay_stop, relay_restart])
@@ -258,9 +254,8 @@ pub fn run() {
         .run(|app_handle, event| {
             // 退出时杀掉 sidecar
             if let tauri::RunEvent::Exit = event {
-                if let Some(mut child) = app_handle.state::<AppState>().sidecar.lock().unwrap().take() {
+                if let Some(child) = app_handle.state::<AppState>().sidecar.lock().unwrap().take() {
                     let _ = child.kill();
-                    let _ = child.wait();
                 }
             }
         });
