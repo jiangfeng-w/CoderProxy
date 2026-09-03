@@ -28,7 +28,10 @@ use tauri_plugin_shell::ShellExt;
 /// 避免 `child.kill()` 只杀 bootloader 而残留 uvicorn 子进程占住端口。
 #[cfg(windows)]
 mod job {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -47,7 +50,7 @@ mod job {
     unsafe impl Sync for JobObject {}
 
     impl JobObject {
-        /// 创建带 KILL_ON_CLOSE 的匿名作业对象；失败返回 None（调用方降级为仅 kill 直子）。
+        /// 创建带 KILL_ON_JOB_CLOSE 的匿名作业对象；失败返回 None（调用方降级为仅 kill 直子）。
         pub fn new() -> Option<JobObject> {
             // SAFETY: 匿名作业对象，无需 SECURITY_ATTRIBUTES / 名称
             let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -73,7 +76,7 @@ mod job {
             Some(JobObject(handle))
         }
 
-        /// 把 pid 进程纳入作业；其子进程默认继承作业成员，故一次 assign 覆盖整棵进程树。
+        /// 把 pid 进程纳入作业。注意：只影响该进程本身，不追溯已存在的子孙。
         pub fn assign(&self, pid: u32) -> bool {
             // SAFETY: 按 pid 打开进程句柄（设置配额 + 终止权限）
             let h = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
@@ -90,10 +93,49 @@ mod job {
 
     impl Drop for JobObject {
         fn drop(&mut self) {
-            // 关闭作业句柄 → KILL_ON_CLOSE 终止作业内全部进程
+            // 关闭作业句柄 → KILL_ON_JOB_CLOSE 终止作业内全部进程
             // SAFETY: 关闭作业句柄
             unsafe { CloseHandle(self.0) };
         }
+    }
+
+    /// 枚举 root 的整棵子孙进程（含 root 自身）。
+    /// 用于把 PyInstaller onefile 的 bootloader + 实际 relay 子进程全部纳入作业——
+    /// 只 assign 父进程不会追溯已存在的子进程，必须逐个 assign。
+    pub fn descendants_of(root: u32) -> Vec<u32> {
+        let mut all = vec![root];
+        let mut grown = true;
+        while grown {
+            grown = false;
+            // SAFETY: 创建当前进程表快照
+            let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+            if snap == INVALID_HANDLE_VALUE {
+                break;
+            }
+            let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            // SAFETY: 取快照首项
+            if unsafe { Process32FirstW(snap, &mut entry) } == 0 {
+                // SAFETY: 关闭快照句柄
+                unsafe { CloseHandle(snap) };
+                break;
+            }
+            loop {
+                let parent = entry.th32ParentProcessID;
+                let pid = entry.th32ProcessID;
+                if all.contains(&parent) && !all.contains(&pid) {
+                    all.push(pid);
+                    grown = true;
+                }
+                // SAFETY: 取快照下一项
+                if unsafe { Process32NextW(snap, &mut entry) } == 0 {
+                    break;
+                }
+            }
+            // SAFETY: 关闭快照句柄
+            unsafe { CloseHandle(snap) };
+        }
+        all
     }
 }
 
@@ -204,10 +246,13 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState, port: u16) -> Resul
 
     match ready_rx.recv_timeout(Duration::from_secs(60)) {
         Ok(info) => {
-            // 把 sidecar 整棵进程树（bootloader + 实际 relay）纳入作业对象，
-            // 退出（含强杀）时统一回收，避免 onefile 子进程残留占住端口。
+            // 把 sidecar 整棵进程树（bootloader + 实际 relay 子进程）纳入作业对象。
+            // ready 是子进程打印的，说明子进程已存在；assign 父进程不会追溯已有子进程，
+            // 故须枚举全部子孙逐个 assign，确保退出（含强杀）时全量回收。
             if let Some(j) = job::JobObject::new() {
-                j.assign(child.pid());
+                for pid in job::descendants_of(child.pid()) {
+                    j.assign(pid);
+                }
                 *state.job.lock().unwrap() = Some(j);
             }
             *state.sidecar.lock().unwrap() = Some(child);
