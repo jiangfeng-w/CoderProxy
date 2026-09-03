@@ -123,6 +123,40 @@ def relay_api_key() -> str:
     return key
 
 
+async def save_api_key(key: str) -> None:
+    """持久化静态 API Key（GUI/CLI 设置固定 key 用）。"""
+    async with _asyncio_lock:
+        state = await _io(_load_state)
+        state.setdefault("config", {})["api_key"] = key
+        await _io(_save_state, state)
+        settings.relay_api_key = key
+
+
+# ─────────────────────────── 模型白名单（M4）───────────────────────────
+
+async def get_model_whitelist() -> list[str]:
+    """已启用的模型名列表；空列表 = 全部启用（默认，兼容 M2/M3）。"""
+    state = await _io(_load_state)
+    wl = (state.get("config") or {}).get("model_whitelist") or []
+    return wl if isinstance(wl, list) else []
+
+
+async def set_model_whitelist(names: list[str]) -> list[str]:
+    """写入白名单（GUI 模型页勾选结果）。传 [] 表示全部启用。"""
+    clean = [str(n) for n in names if str(n).strip()]
+    async with _asyncio_lock:
+        state = await _io(_load_state)
+        state.setdefault("config", {})["model_whitelist"] = clean
+        await _io(_save_state, state)
+    return clean
+
+
+async def is_model_enabled(name: str) -> bool:
+    """白名单为空 → 全部启用；否则只放行列表内模型。"""
+    wl = await get_model_whitelist()
+    return not wl or name in wl
+
+
 # ─────────────────────────── ta3 登录态 ───────────────────────────
 
 def _auth_from_state(state: dict, provider_id: int) -> AuthRow | None:

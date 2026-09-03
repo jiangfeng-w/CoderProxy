@@ -92,6 +92,10 @@ class DisguiseContext:
     args_to_ta3: dict[str, dict[str, str | None]] = field(default_factory=dict)
     args_from_ta3: dict[str, dict[str, str | None]] = field(default_factory=dict)
     tools_pre_disguised: bool = True
+    # M4 监控：工具映射命中 / 长尾透传 / 丢弃 计数（GUI 日志面板用）
+    tool_map_hits: int = 0
+    tool_longtail_passthrough: int = 0
+    tool_dropped: int = 0
 
 
 def _normalize_mode(mode: str) -> str:
@@ -108,13 +112,17 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
     tools = list(tools or [])
     if mode == MODE_PASSTHROUGH:
         # 原样透传：不重命名/不降级/不还原（provider 的 passthrough 分支接管）
-        return DisguiseContext(mode=mode, outbound_tools=tools)
+        return DisguiseContext(mode=mode, outbound_tools=tools,
+                               tool_longtail_passthrough=len(tools))
 
     disguise_map = {**TO_TA3, **EXT_TO_TA3}
     args_to = {**ARGS_TO_TA3, **EXT_ARGS_TO_TA3}
     args_from = {**ARGS_FROM_TA3}  # 基础：vendored ta3→agent；下面按请求覆盖
     outbound: list[dict] = []
     restore_map: dict[str, str] = {}
+    map_hits = 0
+    longtail = 0
+    dropped = 0
     for schema in tools:
         function = schema.get("function") or {}
         agent_name = str(function.get("name") or "")
@@ -124,16 +132,21 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
         if alias is None:
             # 无映射长尾：strict 丢弃；hybrid 透传保留（M1 确认网关容忍）
             if mode == MODE_STRICT:
+                dropped += 1
                 continue
+            longtail += 1
             outbound.append(schema)
             continue
         native = TA3_NATIVE_SCHEMAS.get(alias)
         if native is None:
             # 映射到 ta3 名但无原生 schema（理论不可达）：按长尾处理
             if mode == MODE_STRICT:
+                dropped += 1
                 continue
+            longtail += 1
             outbound.append(schema)
             continue
+        map_hits += 1
         restore_map[alias] = agent_name  # 请求级：入站按 agent 实际名精确还原
         outbound.append(native)
         # 该 agent 工具的参数键逆映射 → 入站参数还原表（请求内同一 agent 约定）
@@ -150,4 +163,7 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
         restore_map=restore_map,
         args_to_ta3=args_to,
         args_from_ta3=args_from,
+        tool_map_hits=map_hits,
+        tool_longtail_passthrough=longtail,
+        tool_dropped=dropped,
     )

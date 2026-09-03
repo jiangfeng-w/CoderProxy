@@ -1,7 +1,8 @@
-"""CLI 入口：`python -m relay run [--port 8786] [--api-base ...]`。
+"""CLI 入口：`python -m relay run [--port 8786] [--api-base ...] [--api-key ...]`。
 
 子命令：
   run          启动 FastAPI relay 服务（默认 127.0.0.1:8786）
+               --port 0 随机端口；端口占用自动顺延；--api-key 设置并持久化 key
   login        触发登录（IM 静默优先，降级浏览器 PKCE 并自动打开），轮询至完成
   logout       清除本地登录态
   sync         同步模型目录（需已登录）
@@ -36,6 +37,33 @@ def _setup_logging(level: int = logging.INFO) -> None:
     )
 
 
+def _pick_port(host: str, port: int) -> int:
+    """端口分配（M4：sidecar 被 Tauri 壳 spawn 场景）。
+    - --port 0 → 随机空闲端口；
+    - 目标端口被占用 → 自动顺延到下一个空闲端口（最多探测 100 个）。
+    """
+    import socket
+
+    if port == 0:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, 0))
+            return int(s.getsockname()[1])
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return port
+        except OSError:
+            pass
+    for p in range(port + 1, port + 100):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, p))
+                return p
+            except OSError:
+                continue
+    return port  # 兜底：交给 uvicorn 抛错
+
+
 def _cmd_run(args) -> int:
     from relay.config import settings
     from relay.storage import ensure_initialized
@@ -48,17 +76,29 @@ def _cmd_run(args) -> int:
         settings.relay_host = args.host
     if args.tool_mode is not None:
         settings.tool_mode = args.tool_mode
+    if args.api_key is not None:
+        settings.relay_api_key = args.api_key
 
     # 首次启动：生成并持久化 RELAY_API_KEY（agent 里填这个）
     asyncio.run(ensure_initialized())
 
+    # CLI 显式 --api-key：覆盖并持久化（GUI 配置页「生成/复制」等价物）
+    if args.api_key is not None:
+        from relay.storage import save_api_key
+
+        asyncio.run(save_api_key(args.api_key))
+
+    # M4：端口冲突自动顺延 / --port 0 随机端口
+    settings.relay_port = _pick_port(settings.relay_host, settings.relay_port)
+
     import uvicorn
 
-    print(f"* Relay 已就绪: http://{settings.relay_host}:{settings.relay_port}/v1")
-    print(f"* API Key   : {settings.relay_api_key or '(环境变量 RELAY_API_KEY)'}")
-    print("* 模型列表  : GET  /v1/models")
-    print("* 聊天      : POST /v1/chat/completions")
-    print("* 登录       : POST /v1/auth/login/start（或 CLI: python -m relay login）")
+    # flush=True：被 GUI sidecar spawn 时 stdout 是管道，块缓冲会吞掉 banner
+    print(f"* Relay 已就绪: http://{settings.relay_host}:{settings.relay_port}/v1", flush=True)
+    print(f"* API Key   : {settings.relay_api_key or '(环境变量 RELAY_API_KEY)'}", flush=True)
+    print("* 模型列表  : GET  /v1/models", flush=True)
+    print("* 聊天      : POST /v1/chat/completions", flush=True)
+    print("* 登录       : POST /v1/auth/login/start（或 CLI: python -m relay login）", flush=True)
     uvicorn.run("relay.routes:app", host=settings.relay_host,
                 port=settings.relay_port, log_level="info")
 
@@ -139,6 +179,7 @@ def main(argv=None) -> int:
     p_run.add_argument("--api-base", help="牛码 API 基址（默认 TA3_API_BASE）")
     p_run.add_argument("--tool-mode", choices=["hybrid", "strict", "passthrough"],
                        help="工具伪装模式（默认 TOOL_MODE / hybrid）")
+    p_run.add_argument("--api-key", help="设置并持久化 RELAY API Key（GUI 配置页等价物）")
 
     sub.add_parser("login", help="触发登录并等待完成")
     sub.add_parser("logout", help="退出登录")
