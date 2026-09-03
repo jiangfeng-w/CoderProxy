@@ -5,6 +5,8 @@ relay/*.egg-info/
 relay/.pytest_cache/
 relay/dist/
 relay/build/
+relay/_deps/
+relay/data/
 **/__pycache__/
 *.pyc
 
