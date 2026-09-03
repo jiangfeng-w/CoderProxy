@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // 模型页：列表 + 搜索 + 白名单启用开关 + 全部启用/禁用。
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useMessage } from "naive-ui";
-import { getModels, getConfig, updateConfig, type OaiModel, type Config } from "../api";
+import { getModels, getConfig, updateConfig, authSync, type OaiModel, type Config } from "../api";
 
 const message = useMessage();
 const DISABLE_ALL = "__none__";
@@ -10,6 +10,8 @@ const DISABLE_ALL = "__none__";
 const models = ref<OaiModel[]>([]);
 const config = ref<Config | null>(null);
 const search = ref("");
+const syncing = ref(false);
+let timer: number | undefined;
 
 const wl = computed(() => config.value?.model_whitelist ?? []);
 
@@ -69,7 +71,22 @@ async function onAllDisable() {
   message.success("已全部禁用");
 }
 
-onMounted(async () => {
+/** 同步模型目录并刷新列表（需已登录）。 */
+async function onSync() {
+  if (syncing.value) return;
+  syncing.value = true;
+  try {
+    const res = await authSync();
+    message.success(`同步完成：${res.models.length} 个模型`);
+    models.value = (await getModels()).data;
+  } catch (e) {
+    message.error(String(e));
+  } finally {
+    syncing.value = false;
+  }
+}
+
+async function load() {
   try {
     models.value = (await getModels()).data;
   } catch (e) {
@@ -80,7 +97,16 @@ onMounted(async () => {
   } catch (e) {
     message.error(String(e));
   }
+}
+
+onMounted(() => {
+  load();
+  // 空列表时轮询，感知 Shell 登录后自动同步的结果
+  timer = window.setInterval(() => {
+    if (models.value.length === 0) load();
+  }, 3000);
 });
+onUnmounted(() => clearInterval(timer));
 </script>
 
 <template>
@@ -94,6 +120,7 @@ onMounted(async () => {
           class="search"
           placeholder="搜索模型名 / 显示名"
         />
+        <button class="btn primary" :disabled="syncing" @click="onSync">同步模型</button>
         <button class="btn primary" @click="onAllEnable">全部启用</button>
         <button class="btn danger" @click="onAllDisable">全部禁用</button>
         <span class="count mono">已启用 {{ models.filter((m) => isEnabled(m.id)).length }}/{{ models.length }}</span>

@@ -2,7 +2,7 @@
 // 顶栏（服务状态/启停/登录态）+ 左侧导航 + 四页内容区。深色主题，全局轮询服务与登录态。
 import { onMounted, onUnmounted, ref } from "vue";
 import { useMessage } from "naive-ui";
-import { relayStatus, relayStop, relayRestart, authStatus, authLoginStart, authLogout, openAuthorizeUrl } from "./api";
+import { relayStatus, relayStop, relayRestart, authStatus, authLoginStart, authLogout, authSync, openAuthorizeUrl } from "./api";
 import { store } from "./store";
 import Overview from "./views/Overview.vue";
 import Config from "./views/Config.vue";
@@ -20,6 +20,20 @@ const views: Record<string, { name: string; comp: any }> = {
 
 const busy = ref(false);
 let timer: number | undefined;
+let lastAuthStatus = "not_logged_in";
+let syncing = false;
+
+async function syncModels() {
+  if (syncing) return;
+  syncing = true;
+  try {
+    await authSync();
+  } catch {
+    /* 同步失败不打扰：模型页可手动重试 */
+  } finally {
+    syncing = false;
+  }
+}
 
 async function pollStatus() {
   try {
@@ -32,6 +46,11 @@ async function pollStatus() {
   } catch {
     /* 忽略 */
   }
+  // 登录态由「未登录 → 已登录」转变（含浏览器授权完成后轮询到）：自动同步一次模型目录
+  if (store.auth.status === "logged_in" && lastAuthStatus !== "logged_in") {
+    syncModels();
+  }
+  lastAuthStatus = store.auth.status;
 }
 
 async function onStop() {
