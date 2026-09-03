@@ -1,0 +1,105 @@
+/* CoderProxy 桌面壳全局样式（深色控制台风格，配合 Naive UI darkTheme） */
+:root {
+  --cp-bg: #0f172a;
+  --cp-panel: #1e293b;
+  --cp-panel-2: #111827;
+  --cp-border: #334155;
+  --cp-text: #e2e8f0;
+  --cp-dim: #94a3b8;
+  --cp-cyan: #22d3ee;
+  --cp-green: #22c55e;
+  --cp-red: #ef4444;
+  --cp-orange: #f97316;
+  --cp-yellow: #eab308;
+  --cp-mono: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--cp-bg);
+  color: var(--cp-text);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono {
+  font-family: var(--cp-mono);
+}
+
+/* KPI 大数字 */
+.kpi-num {
+  font-family: var(--cp-mono);
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+/* 状态色小圆点 */
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+/* 自定义标签（非 Naive） */
+.cp-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  border: 1px solid transparent;
+}
+
+.cp-tag.cyan {
+  color: var(--cp-cyan);
+  background: rgba(34, 211, 238, 0.12);
+  border-color: rgba(34, 211, 238, 0.35);
+}
+.cp-tag.green {
+  color: var(--cp-green);
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.35);
+}
+.cp-tag.red {
+  color: var(--cp-red);
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.cp-tag.yellow {
+  color: var(--cp-yellow);
+  background: rgba(234, 179, 8, 0.12);
+  border-color: rgba(234, 179, 8, 0.35);
+}
+.cp-tag.orange {
+  color: var(--cp-orange);
+  background: rgba(249, 115, 22, 0.12);
+  border-color: rgba(249, 115, 22, 0.35);
+}
+.cp-tag.gray {
+  color: var(--cp-dim);
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.35);
+}
+
+/* 页面标题 */
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 14px;
+}

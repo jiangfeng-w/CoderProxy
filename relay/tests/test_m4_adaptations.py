@@ -44,6 +44,18 @@ def test_empty_whitelist_all_enabled(tmp_path, monkeypatch):
     assert _run(storage.is_model_enabled("anything")) is True
 
 
+def test_disable_all_sentinel(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    _run(storage.set_model_whitelist([storage.DISABLE_ALL]))
+    assert _run(storage.get_model_whitelist()) == [storage.DISABLE_ALL]
+    # 哨兵：全部禁用（区别于 [] 的全部启用）
+    assert _run(storage.is_model_enabled("anything")) is False
+    # 再启用单个 → 白名单回退为显式列表
+    _run(storage.set_model_whitelist(["glm-x"]))
+    assert _run(storage.is_model_enabled("glm-x")) is True
+    assert _run(storage.is_model_enabled("other")) is False
+
+
 def test_save_api_key_persists(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
     monkeypatch.setattr(settings, "relay_api_key", "")
@@ -81,6 +93,28 @@ def test_monitor_events_limit():
     for i in range(10):
         m.emit("chat_request", model=f"m{i}")
     assert [e["id"] for e in m.events(limit=3)["events"]] == [8, 9, 10]
+
+
+def test_monitor_tool_aggregation():
+    m = monitor_mod.Monitor(capacity=50)
+    m.emit("tool_disguise", mode="hybrid", map_hits=1, longtail_passthrough=2, dropped=0)
+    m.emit("tool_disguise", mode="strict", map_hits=0, longtail_passthrough=0, dropped=3)
+    s = m.stats()
+    assert s["tool_disguise"] == 2
+    assert s["tool_map_hits"] == 1
+    assert s["tool_longtail_passthrough"] == 2
+    assert s["tool_dropped"] == 3
+
+
+def test_monitor_clear():
+    m = monitor_mod.Monitor(capacity=50)
+    m.emit("chat_request", model="m")
+    m.clear()
+    assert m.stats() == {}
+    assert m.events()["events"] == []
+    # 清空后 id 从 1 重新计数
+    m.emit("chat_request", model="m2")
+    assert [e["id"] for e in m.events()["events"]] == [1]
 
 
 # ─────────────────────────── cli：端口分配 ───────────────────────────
@@ -196,6 +230,18 @@ def test_config_post_invalid(client):
     assert client.post("/v1/auth/config", json={"api_key": "  "}, headers=_auth()).status_code == 400
 
 
+def test_config_regenerate_api_key(client):
+    before = client.get("/v1/auth/config", headers=_auth()).json()["api_key"]
+    r = client.post("/v1/auth/config", json={"regenerate_api_key": True}, headers=_auth())
+    assert r.status_code == 200
+    new_key = r.json()["api_key"]
+    assert new_key and new_key != before
+    # 新 key 生效并持久化
+    assert settings.relay_api_key == new_key
+    assert client.get("/v1/models", headers={"Authorization": f"Bearer {new_key}"}).status_code == 200
+    assert client.get("/v1/models", headers=_auth()).status_code == 401  # 旧 key 已作废
+
+
 def test_monitor_endpoints_auth_and_incremental(client):
     assert client.get("/v1/monitor/stats").status_code == 401
     assert client.get("/v1/monitor/events").status_code == 401
@@ -210,6 +256,14 @@ def test_monitor_endpoints_auth_and_incremental(client):
     after = client.get("/v1/monitor/events", headers=_auth(),
                        params={"after_id": last_id}).json()
     assert [e["kind"] for e in after["events"]] == ["chat_request"]
+
+
+def test_monitor_clear_endpoint(client):
+    assert client.post("/v1/monitor/clear").status_code == 401
+    monitor_mod.monitor.emit("chat_request", model="t")
+    assert client.post("/v1/monitor/clear", headers=_auth()).status_code == 200
+    body = client.get("/v1/monitor/events", headers=_auth()).json()
+    assert body["events"] == [] and body["stats"] == {}
 
 
 def test_ensure_model_whitelist(tmp_path, monkeypatch):

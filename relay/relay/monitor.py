@@ -46,6 +46,12 @@ class Monitor:
             self._counter += 1
             self._events.append(MonitorEvent(self._counter, _now(), kind, data))
             self._stats[kind] = self._stats.get(kind, 0) + 1
+            # 工具映射聚合：把每次 tool_disguise 事件的增量累加到独立计数，供 /v1/monitor/stats 汇总
+            if kind == "tool_disguise":
+                for k in ("map_hits", "longtail_passthrough", "dropped"):
+                    v = data.get(k, 0)
+                    if v:
+                        self._stats["tool_" + k] = self._stats.get("tool_" + k, 0) + v
 
     def stats(self) -> dict[str, int]:
         with self._lock:
@@ -57,6 +63,13 @@ class Monitor:
             items = [e.as_dict() for e in self._events if e.id > after_id]
             items = items[-max(1, min(limit, 1000)):]
             return {"events": items, "stats": dict(self._stats)}
+
+    def clear(self) -> None:
+        """清空事件缓冲与统计计数（GUI 日志页「清空」按钮）。"""
+        with self._lock:
+            self._events.clear()
+            self._stats = {}
+            self._counter = 0
 
 
 monitor = Monitor()

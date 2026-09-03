@@ -8,6 +8,11 @@
 - POST   /v1/auth/login/cancel   取消进行中的浏览器登录
 - POST   /v1/auth/logout         退出登录
 - POST   /v1/auth/sync           同步模型目录
+- GET    /v1/auth/config         中转配置展示（GUI）
+- POST   /v1/auth/config         写入 api_key / tool_mode / model_whitelist / regenerate_api_key
+- GET    /v1/monitor/stats        统计计数快照（含工具映射聚合 tool_*）
+- GET    /v1/monitor/events       增量事件拉取（after_id）
+- POST   /v1/monitor/clear        清空事件与统计（GUI 日志页）
 
 聊天流程：
 1. 解析 OpenAI 请求 → ChatRequest
@@ -160,7 +165,12 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
 async def list_models():
     models = await storage.load_models()
     wl = await storage.get_model_whitelist()
-    data = models if not wl else [m for m in models if m.get("name") in wl]
+    if wl == [storage.DISABLE_ALL]:
+        data = []
+    elif wl:
+        data = [m for m in models if m.get("name") in wl]
+    else:
+        data = models
     return {
         "object": "list",
         "data": [oai_adapter.model_to_openai(m) for m in data],
@@ -309,6 +319,10 @@ async def auth_config_update(request: Request):
             raise HTTPException(status_code=400, detail="api_key 不能为空")
         await storage.save_api_key(api_key.strip())
 
+    if body.get("regenerate_api_key") is True:
+        # 重置密钥：生成新 key 落盘（作废旧值；已连接的 agent 需改用新 key）
+        await storage.regenerate_api_key()
+
     tool_mode = body.get("tool_mode")
     if tool_mode is not None:
         if tool_mode not in tool_disguise.VALID_MODES:
@@ -337,3 +351,10 @@ async def monitor_stats():
 async def monitor_events(limit: int = 200, after_id: int = 0):
     """增量事件拉取：after_id 之后的 events + stats 快照。"""
     return monitor.events(limit=limit, after_id=after_id)
+
+
+@app.post("/v1/monitor/clear", dependencies=[Depends(require_api_key)])
+async def monitor_clear():
+    """清空事件缓冲与统计计数（GUI 日志页「清空」按钮）。"""
+    monitor.clear()
+    return {"status": "cleared"}

@@ -132,7 +132,22 @@ async def save_api_key(key: str) -> None:
         settings.relay_api_key = key
 
 
+async def regenerate_api_key() -> str:
+    """重置 API Key：生成新 key 落盘并回填 settings（GUI「重置密钥」按钮）。"""
+    async with _asyncio_lock:
+        key = secrets.token_urlsafe(24)
+        state = await _io(_load_state)
+        state.setdefault("config", {})["api_key"] = key
+        await _io(_save_state, state)
+        settings.relay_api_key = key
+        return key
+
+
 # ─────────────────────────── 模型白名单（M4）───────────────────────────
+
+# 哨兵：白名单为 [DISABLE_ALL] 表示「全部禁用」（区别于 [] 的全部启用）。
+DISABLE_ALL = "__none__"
+
 
 async def get_model_whitelist() -> list[str]:
     """已启用的模型名列表；空列表 = 全部启用（默认，兼容 M2/M3）。"""
@@ -142,7 +157,7 @@ async def get_model_whitelist() -> list[str]:
 
 
 async def set_model_whitelist(names: list[str]) -> list[str]:
-    """写入白名单（GUI 模型页勾选结果）。传 [] 表示全部启用。"""
+    """写入白名单（GUI 模型页勾选结果）。传 [] 表示全部启用；[DISABLE_ALL] 表示全部禁用。"""
     clean = [str(n) for n in names if str(n).strip()]
     async with _asyncio_lock:
         state = await _io(_load_state)
@@ -152,9 +167,13 @@ async def set_model_whitelist(names: list[str]) -> list[str]:
 
 
 async def is_model_enabled(name: str) -> bool:
-    """白名单为空 → 全部启用；否则只放行列表内模型。"""
+    """白名单为空 → 全部启用；[DISABLE_ALL] → 全部禁用；否则只放行列表内模型。"""
     wl = await get_model_whitelist()
-    return not wl or name in wl
+    if not wl:
+        return True
+    if wl == [DISABLE_ALL]:
+        return False
+    return name in wl
 
 
 # ─────────────────────────── ta3 登录态 ───────────────────────────
