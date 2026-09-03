@@ -23,6 +23,94 @@ use tauri::{Manager, State};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
+/// Windows 作业对象：把 PyInstaller onefile 的整个进程树（bootloader + 实际 relay）
+/// 纳入统一回收。句柄关闭（含宿主进程被强杀时内核自动关句柄）即终止作业内全部进程，
+/// 避免 `child.kill()` 只杀 bootloader 而残留 uvicorn 子进程占住端口。
+#[cfg(windows)]
+mod job {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    pub struct JobObject(HANDLE);
+
+    // HANDLE 在 windows-sys 里是 `*mut c_void`，非 Send/Sync；
+    // 句柄由 Mutex 保护、仅持有者 Drop，跨线程共享安全。
+    // SAFETY: JobObject 只包一个进程句柄，赋值/关闭操作本身线程安全。
+    unsafe impl Send for JobObject {}
+    unsafe impl Sync for JobObject {}
+
+    impl JobObject {
+        /// 创建带 KILL_ON_CLOSE 的匿名作业对象；失败返回 None（调用方降级为仅 kill 直子）。
+        pub fn new() -> Option<JobObject> {
+            // SAFETY: 匿名作业对象，无需 SECURITY_ATTRIBUTES / 名称
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: info 指向已初始化的有效内存
+            let ok = unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if ok == 0 {
+                // SAFETY: 关闭作业句柄
+                unsafe { CloseHandle(handle) };
+                return None;
+            }
+            Some(JobObject(handle))
+        }
+
+        /// 把 pid 进程纳入作业；其子进程默认继承作业成员，故一次 assign 覆盖整棵进程树。
+        pub fn assign(&self, pid: u32) -> bool {
+            // SAFETY: 按 pid 打开进程句柄（设置配额 + 终止权限）
+            let h = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+            if h.is_null() {
+                return false;
+            }
+            // SAFETY: 分配进程到作业（Windows 8+ 支持嵌套作业，普通双击启动无冲突）
+            let ok = unsafe { AssignProcessToJobObject(self.0, h) };
+            // SAFETY: 关闭进程句柄
+            unsafe { CloseHandle(h) };
+            ok != 0
+        }
+    }
+
+    impl Drop for JobObject {
+        fn drop(&mut self) {
+            // 关闭作业句柄 → KILL_ON_CLOSE 终止作业内全部进程
+            // SAFETY: 关闭作业句柄
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+/// 非 Windows 占位（本项目仅 Windows 分发，保编译完整）。
+#[cfg(not(windows))]
+mod job {
+    pub struct JobObject;
+    impl JobObject {
+        pub fn new() -> Option<JobObject> {
+            None
+        }
+        pub fn assign(&self, _pid: u32) -> bool {
+            false
+        }
+    }
+}
+
 /// sidecar 就绪信息（`[relay-ready]` 行解析结果）。
 #[derive(Clone, Serialize)]
 struct ReadyInfo {
@@ -33,6 +121,8 @@ struct ReadyInfo {
 
 struct AppState {
     sidecar: Mutex<Option<CommandChild>>,
+    /// 回收 sidecar 整棵进程树的作业对象（PyInstaller onefile 两层结构防残留）。
+    job: Mutex<Option<job::JobObject>>,
     ready: Mutex<Option<ReadyInfo>>,
     /// GUI 配置页期望的端口；0 = 随机端口。重启时按此值 spawn。
     requested_port: AtomicU16,
@@ -114,6 +204,12 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState, port: u16) -> Resul
 
     match ready_rx.recv_timeout(Duration::from_secs(60)) {
         Ok(info) => {
+            // 把 sidecar 整棵进程树（bootloader + 实际 relay）纳入作业对象，
+            // 退出（含强杀）时统一回收，避免 onefile 子进程残留占住端口。
+            if let Some(j) = job::JobObject::new() {
+                j.assign(child.pid());
+                *state.job.lock().unwrap() = Some(j);
+            }
             *state.sidecar.lock().unwrap() = Some(child);
             *state.ready.lock().unwrap() = Some(info.clone());
             println!("[shell] sidecar 就绪 port={} tool_mode={}", info.port, info.tool_mode);
@@ -135,6 +231,10 @@ fn stop_sidecar(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     if let Some(child) = state.sidecar.lock().unwrap().take() {
         let _ = child.kill();
+    }
+    // 关闭作业对象句柄 → 终止作业内全部进程（兜底 onefile 子进程）
+    if let Some(job) = state.job.lock().unwrap().take() {
+        drop(job);
     }
     *state.ready.lock().unwrap() = None;
     println!("[shell] sidecar 已停止");
@@ -234,6 +334,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             sidecar: Mutex::new(None),
+            job: Mutex::new(None),
             ready: Mutex::new(None),
             requested_port: AtomicU16::new(0),
             client: reqwest::Client::new(),
@@ -252,10 +353,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // 退出时杀掉 sidecar
+            // 退出时回收 sidecar：kill 直子 + 关作业对象句柄杀整棵进程树。
+            // 强杀（任务管理器/崩溃）场景由内核关句柄自动触发 KILL_ON_CLOSE 兜底。
             if let tauri::RunEvent::Exit = event {
                 if let Some(child) = app_handle.state::<AppState>().sidecar.lock().unwrap().take() {
                     let _ = child.kill();
+                }
+                if let Some(job) = app_handle.state::<AppState>().job.lock().unwrap().take() {
+                    drop(job);
                 }
             }
         });
