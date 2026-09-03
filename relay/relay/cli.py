@@ -46,6 +46,8 @@ def _cmd_run(args) -> int:
         settings.ta3_api_base = args.api_base
     if args.host is not None:
         settings.relay_host = args.host
+    if args.tool_mode is not None:
+        settings.tool_mode = args.tool_mode
 
     # 首次启动：生成并持久化 RELAY_API_KEY（agent 里填这个）
     asyncio.run(ensure_initialized())
@@ -135,6 +137,8 @@ def main(argv=None) -> int:
     p_run.add_argument("--host", help="监听地址（默认 RELAY_HOST / 127.0.0.1）")
     p_run.add_argument("--port", type=int, help="监听端口（默认 RELAY_PORT / 8786）")
     p_run.add_argument("--api-base", help="牛码 API 基址（默认 TA3_API_BASE）")
+    p_run.add_argument("--tool-mode", choices=["hybrid", "strict", "passthrough"],
+                       help="工具伪装模式（默认 TOOL_MODE / hybrid）")
 
     sub.add_parser("login", help="触发登录并等待完成")
     sub.add_parser("logout", help="退出登录")

@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.models.providers.ta3 import Ta3Provider
 from app.models.schemas import ChatRequest
 
-from relay import auth_flow, oai_adapter, storage
+from relay import auth_flow, oai_adapter, storage, tool_disguise
 from relay.config import settings
 from relay.middleware import require_api_key
 
@@ -38,8 +38,13 @@ app = FastAPI(title="CoderProxy Relay", version="0.1.0")
 
 # ─────────────────────────── provider 构造 ───────────────────────────
 
-def build_provider(model: dict, model_name: str) -> Ta3Provider:
-    """按目录模型条目构造 Ta3Provider（meta 对齐 vendored ta3.py 期望字段）。"""
+def build_provider(model: dict, model_name: str,
+                   ctx: tool_disguise.DisguiseContext | None = None) -> Ta3Provider:
+    """按目录模型条目构造 Ta3Provider（meta 对齐 vendored ta3.py 期望字段）。
+
+    M3：传入 DisguiseContext → provider 按请求级映射做历史伪装与入站还原，
+    tools 已预伪装（tools_pre_disguised），不再二次 disguise_tools。
+    """
     meta = {
         "anthropic": bool(model.get("anthropic")),
         "completionOptions": model.get("completion_options") or {},
@@ -52,6 +57,12 @@ def build_provider(model: dict, model_name: str) -> Ta3Provider:
         base_url=model.get("base_url") or settings.ta3_api_base,
         model=model_name,
         meta=meta,
+        tool_mode=ctx.mode if ctx else settings.tool_mode,
+        disguise_map=ctx.disguise_map if ctx else None,
+        restore_map=ctx.restore_map if ctx else None,
+        args_to_ta3=ctx.args_to_ta3 if ctx else None,
+        args_from_ta3=ctx.args_from_ta3 if ctx else None,
+        tools_pre_disguised=bool(ctx),
     )
 
 
@@ -78,10 +89,11 @@ async def _ensure_model(model_name: str) -> dict:
 
 
 async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
-                          include_usage: bool) -> AsyncIterator[str]:
+                          include_usage: bool,
+                          ctx: tool_disguise.DisguiseContext) -> AsyncIterator[str]:
     """流式转发；上游 401 时重新同步目录（刷新 llm- key）后重试一次。"""
     model = await _ensure_model(model_name)
-    provider = build_provider(model, model_name)
+    provider = build_provider(model, model_name, ctx)
     for attempt in range(2):
         try:
             async for chunk in oai_adapter.stream_openai_sse(provider, chat_request, include_usage):
@@ -97,15 +109,16 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
                 model = await storage.find_model(model_name)
                 if model is None:
                     raise
-                provider = build_provider(model, model_name)
+                provider = build_provider(model, model_name, ctx)
                 continue
             raise
 
 
-async def _chat_with_retry(model_name: str, chat_request: ChatRequest):
+async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
+                           ctx: tool_disguise.DisguiseContext):
     """非流式；上游 401 时重试一次（同 _sse_with_retry）。"""
     model = await _ensure_model(model_name)
-    provider = build_provider(model, model_name)
+    provider = build_provider(model, model_name, ctx)
     for attempt in range(2):
         try:
             return await provider.chat(chat_request)
@@ -119,7 +132,7 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest):
                 model = await storage.find_model(model_name)
                 if model is None:
                     raise
-                provider = build_provider(model, model_name)
+                provider = build_provider(model, model_name, ctx)
                 continue
             raise
 
@@ -156,19 +169,23 @@ async def chat_completions(request: Request):
     if not chat_request.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
 
+    # M3：按模式编排出站 tools schema，并把请求级映射表交给 provider
+    ctx = tool_disguise.build_disguise_context(chat_request.tools, settings.tool_mode)
+    chat_request.tools = ctx.outbound_tools
+
     stream = bool(body.get("stream", False))
     include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
 
     if stream:
         async def gen():
-            async for chunk in _sse_with_retry(chat_request.model, chat_request, include_usage):
+            async for chunk in _sse_with_retry(chat_request.model, chat_request, include_usage, ctx):
                 yield chunk
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
-    response = await _chat_with_retry(chat_request.model, chat_request)
+    response = await _chat_with_retry(chat_request.model, chat_request, ctx)
     model = await storage.find_model(chat_request.model)
-    provider = build_provider(model, chat_request.model) if model else None
+    provider = build_provider(model, chat_request.model, ctx) if model else None
     return JSONResponse(oai_adapter.chat_response_to_openai(provider, chat_request, response))
 
 

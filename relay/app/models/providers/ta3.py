@@ -26,7 +26,13 @@ import httpx
 
 from app.core.config import settings
 from app.models.base import ModelProvider
-from app.models.providers.ta3_tool_aliases import FROM_TA3, TO_TA3, disguise_args, restore_args
+from app.models.providers.ta3_tool_aliases import (
+    ARGS_FROM_TA3,
+    ARGS_TO_TA3,
+    FROM_TA3,
+    SPAWN_FORCED_ARGS,
+    TO_TA3,
+)
 from app.models.providers.ta3_tool_schemas import disguise_tools
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
@@ -75,7 +81,17 @@ def _identity(model_name: str, meta: dict) -> str:
 class Ta3Provider(ModelProvider):
     name = "ta3"
 
-    def __init__(self, *, api_key: str, base_url: str, model: str, meta: dict | None = None):
+    def __init__(self, *, api_key: str, base_url: str, model: str, meta: dict | None = None,
+                 tool_mode: str = "strict", disguise_map: dict | None = None,
+                 restore_map: dict | None = None, args_to_ta3: dict | None = None,
+                 args_from_ta3: dict | None = None, tools_pre_disguised: bool = False):
+        """M3 工具伪装参数（默认与 M2 完全一致，仅 relay 传入时启用）：
+        - tool_mode: strict|hybrid|passthrough，控制历史消息伪装与入站还原策略；
+        - disguise_map / restore_map / args_to_ta3 / args_from_ta3：请求级双向映射表
+          （relay/tool_disguise.py 产出），缺省回退 vendored 表；
+        - tools_pre_disguised: relay 已按模式编排出站 tools schema，原样透传不再
+          disguise_tools（避免 ta3 名被二次处理丢弃）。
+        """
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model_name = model
@@ -83,6 +99,12 @@ class Ta3Provider(ModelProvider):
         self._anthropic = bool(self._meta.get("anthropic"))
         self._completion_opts = self._meta.get("completionOptions") or {}
         self._request_headers = self._meta.get("requestHeaders") or {}
+        self._tool_mode = tool_mode
+        self._disguise_map = disguise_map if disguise_map is not None else TO_TA3
+        self._restore_map = restore_map if restore_map is not None else FROM_TA3
+        self._args_to_ta3 = args_to_ta3 if args_to_ta3 is not None else ARGS_TO_TA3
+        self._args_from_ta3 = args_from_ta3 if args_from_ta3 is not None else ARGS_FROM_TA3
+        self._tools_pre_disguised = tools_pre_disguised
         self._ua = getattr(settings, "ta3_user_agent", "") or _DEFAULT_TA3_UA
         # v28: SSE 空闲超时改读配置——kimi-k3/grok-4.6 长思考时 30s 硬编码会误杀流
         self._stream_idle_timeout = float(getattr(settings, "ta3_stream_idle_timeout", 180) or 180)
@@ -160,11 +182,53 @@ class Ta3Provider(ModelProvider):
 
     # ─────────────────────────── 消息转换 ───────────────────────────
 
+    def _disguise_args(self, real_name: str, args: dict) -> dict:
+        """出站：真实参数 → ta3 参数（按请求级映射表；键名一致的原样保留）。"""
+        mapping = self._args_to_ta3.get(real_name)
+        if not mapping:
+            return dict(args)
+        out: dict = {}
+        for k, v in args.items():
+            target = mapping.get(k, k)
+            if target is None:
+                continue
+            out[target] = v
+        return out
+
+    def _restore_name(self, name: str) -> str:
+        """入站：ta3 名 → agent 真实名；passthrough 或未知名原样保留。"""
+        if self._tool_mode == "passthrough":
+            return name
+        return self._restore_map.get(name) or FROM_TA3.get(name) or name
+
+    def _restore_args(self, ta3_name: str, args: dict) -> dict:
+        """入站：ta3 参数 → agent 参数（按请求级映射表）。"""
+        mapping = self._args_from_ta3.get(ta3_name)
+        out: dict = {}
+        for k, v in args.items():
+            target = (mapping or {}).get(k, k)
+            if target is None:
+                continue
+            out[target] = v
+        if ta3_name == "SubAgent":
+            out.update(SPAWN_FORCED_ARGS)
+        return out
+
+    def _prepare_tools(self, request: ChatRequest) -> list[dict]:
+        """出站 tools schema 终态：relay 预伪装后原样透传；直接使用时 strict 丢弃长尾。"""
+        tools = request.tools or []
+        if self._tools_pre_disguised or self._tool_mode == "passthrough":
+            return tools
+        return disguise_tools(tools)
+
     def _disguise_message(self, m: ChatMessage) -> dict:
         """出站：ChatMessage → OpenAI dict，工具名/参数伪装 + reasoning 策略。
 
         对齐参考项目 applyPlainTurnReasoningPolicy：工具调用轮次回传
         reasoning_content，普通回复轮次剥离。
+
+        M3：伪装/还原按请求级映射表（self._disguise_map / self._args_to_ta3），
+        passthrough 模式历史调用原样透传（不重命名/不降级）。
         """
         out: dict = {"role": m.role, "content": m.content or ""}
         if m.role in ("system", "developer"):
@@ -183,9 +247,20 @@ class Ta3Provider(ModelProvider):
                             args = json.loads(args)
                         except (json.JSONDecodeError, TypeError):
                             args = {}
-                    alias = TO_TA3.get(name)
+                    if not isinstance(args, dict):
+                        args = {"_raw": str(args)}
+                    if self._tool_mode == "passthrough":
+                        # 原样透传：不重命名、不降级（relay 只管转发）
+                        tc_list.append({
+                            "id": str(tc.get("id") or f"call_{len(tc_list):02d}"),
+                            "type": "function",
+                            "function": {"name": name,
+                                         "arguments": json.dumps(args, ensure_ascii=False)},
+                        })
+                        continue
+                    alias = self._disguise_map.get(name)
                     if alias is None:
-                        # 未映射的历史调用（如 collect_results）→ 转普通文本，避免协议断裂
+                        # 未映射的历史调用（如 apply_patch / 长尾）→ 转普通文本，避免协议断裂
                         out.pop("tool_calls", None)
                         out["content"] = (m.content or "") + (
                             f"\n\n（历史工具调用 {name} 在当前环境不可用，结果已略）"
@@ -196,7 +271,7 @@ class Ta3Provider(ModelProvider):
                         "type": "function",
                         "function": {
                             "name": alias,
-                            "arguments": json.dumps(disguise_args(name, args), ensure_ascii=False),
+                            "arguments": json.dumps(self._disguise_args(name, args), ensure_ascii=False),
                         },
                     })
                 out["tool_calls"] = tc_list
@@ -225,12 +300,12 @@ class Ta3Provider(ModelProvider):
                     args = {"_raw": args}
             if not isinstance(args, dict):
                 args = {"_raw": str(args)}
-            real = FROM_TA3.get(name)
-            if real is not None:
-                args = restore_args(name, args)
+            real = self._restore_name(name)
+            if real is not name:
+                args = self._restore_args(name, args)
             out.append({
                 "id": str(tc.get("id") or ""),
-                "name": real or name,
+                "name": real,
                 "arguments": args,
             })
         return out
@@ -381,20 +456,33 @@ class Ta3Provider(ModelProvider):
                 if has_tool_calls:
                     for tc in m.tool_calls or []:
                         name = str(tc.get("name") or "")
-                        alias = TO_TA3.get(name)
-                        if alias is None:
-                            continue
                         args = tc.get("arguments") or {}
                         if isinstance(args, str):
                             try:
                                 args = json.loads(args)
                             except (json.JSONDecodeError, TypeError):
                                 args = {}
+                        if not isinstance(args, dict):
+                            args = {}
+                        if self._tool_mode == "passthrough":
+                            blocks.append({
+                                "type": "tool_use",
+                                "id": str(tc.get("id") or ""),
+                                "name": name,
+                                "input": args,
+                            })
+                            continue
+                        alias = self._disguise_map.get(name)
+                        if alias is None:
+                            # 未映射历史调用 → 文本占位（对齐 OpenAI 侧降级，避免协议断裂）
+                            blocks.append({"type": "text",
+                                           "text": f"（历史工具调用 {name} 在当前环境不可用，结果已略）"})
+                            continue
                         blocks.append({
                             "type": "tool_use",
                             "id": str(tc.get("id") or ""),
                             "name": alias,
-                            "input": disguise_args(name, args if isinstance(args, dict) else {}),
+                            "input": self._disguise_args(name, args),
                         })
                 if blocks:
                     converted.append({"role": "assistant", "content": blocks})
@@ -533,10 +621,10 @@ class Ta3Provider(ModelProvider):
             if not isinstance(args, dict):
                 args = {"_raw": str(args)}
             name = slot["name"]
-            real = FROM_TA3.get(name)
-            if real is not None:
-                args = restore_args(name, args)
-            out.append({"id": slot["id"], "name": real or name, "arguments": args})
+            real = self._restore_name(name)
+            if real is not name:
+                args = self._restore_args(name, args)
+            out.append({"id": slot["id"], "name": real, "arguments": args})
         return out
 
     # ─────────────────────────── 流式主流程 ───────────────────────────
@@ -556,7 +644,8 @@ class Ta3Provider(ModelProvider):
     async def _stream_llm(self, request: ChatRequest,
                           parse_fn) -> AsyncIterator[dict]:
         """发起请求并按事件格式产出 thinking/content/done。"""
-        disguised = disguise_tools(request.tools or [])
+        # M3：relay 已按模式编排出站 tools schema（_prepare_tools 原样透传）
+        disguised = self._prepare_tools(request)
         if self._anthropic:
             url = f"{self._base_url}/v1/messages"
             body = self._build_anthropic_body(request, disguised)
@@ -646,10 +735,10 @@ class Ta3Provider(ModelProvider):
                 if not isinstance(args, dict):
                     args = {"_raw": str(args)}
                 name = slot["name"]
-                real = FROM_TA3.get(name)
-                if real is not None:
-                    args = restore_args(name, args)
-                tool_calls.append({"id": slot["id"], "name": real or name, "arguments": args})
+                real = self._restore_name(name)
+                if real is not name:
+                    args = self._restore_args(name, args)
+                tool_calls.append({"id": slot["id"], "name": real, "arguments": args})
 
         # v28: 流式耗时/产出统计 + 空响应兜底日志（诊断"突然停止"现场）
         _usage_desc = (
