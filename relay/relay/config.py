@@ -5,6 +5,7 @@
        TA3_KIMI_THINKING_EFFORT / TA3_THINKING_WATCHDOG
 - 工具：TOOL_MODE（hybrid|strict|passthrough，M3 生效，M2 仅占位）
 - 数据：RELAY_DATA_DIR（token/模型/config 落盘目录）
+- 日志：RELAY_LOG_MAX_ROWS（logs 保留行数上限，默认 100000）
 
 RELAY_API_KEY 未显式设置时由 relay.storage 首次启动生成并持久化
 （settings 仅暴露环境变量或空串，真正的 key 经 storage.ensure_api_key 回填）。
@@ -41,6 +42,8 @@ class Settings:
     tool_mode: str = "hybrid"
     # 数据目录
     data_dir: str = field(default_factory=lambda: str(_RELAY_ROOT / "data"))
+    # 日志保留行数上限（超出滚动删除最旧，防磁盘膨胀）
+    relay_log_max_rows: int = 100000
 
     @classmethod
     def from_env(cls) -> "Settings":

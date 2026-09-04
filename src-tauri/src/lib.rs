@@ -12,6 +12,10 @@
 //!
 //! M5：sidecar 用 PyInstaller onefile exe（`binaries/relay-sidecar-<triple>.exe`），
 //! 数据目录固定为 `app_data_dir`（打包态 `__file__` 指向解包目录，不可落数据）。
+//!
+//! M6：数据目录改「共享指针」——AppData 内只存 `data_path.txt` 指针（内容 = 真实数据
+//! 目录绝对路径），任意版本（便携 / 安装）启动命中同一真实数据目录；`coderproxy.db`
+//! 随 `settings.data_dir` 走，Python 侧无需感知具体位置。
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, RecvTimeoutError};
@@ -201,29 +205,70 @@ fn spawn_sidecar(app: &tauri::AppHandle) -> Result<ReadyInfo, String> {
     spawn_with_port(app, state.inner())
 }
 
-/// 解析数据目录：优先 exe 旁 `data/` 子目录（便携/绿色），无写权限时回退 AppData。
+/// 数据目录共享指针文件名（M6）：AppData 内只保存该指针文件，内容 = 真实数据目录绝对路径。
 ///
-/// 规则（M6）：
-/// - 首选 `<exe 所在目录>/data`：安装版装到用户可写目录即可持久化到安装子目录，
-///   便携版解压到哪都自带数据；
-/// - 装到 Program Files 等无写权限路径时，写入探测失败 → 回退 `%APPDATA%/com.coderproxy.desktop`。
+/// 共享模式：任意版本（便携 / 安装）启动都先读该指针 → 命中同一真实数据目录，
+/// 登录态 / 模型白名单 / 端口 / 日志全部共享。M6 只做「解析 + 默认目录 + 首次写指针」，
+/// 「查看 / 修改数据位置」归 M9 设置页。
+const DATA_POINTER_FILENAME: &str = "data_path.txt";
+
+/// 解析真实数据目录（M6 共享指针底座）。壳入口：取 AppData 目录后交纯函数决策。
 fn resolve_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    // 候选 1：exe 旁的 data/ 子目录
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(base) = exe.parent() {
-            let candidate = base.join("data");
-            if writable_dir(&candidate) {
-                return Ok(candidate);
-            }
-        }
-    }
-    // 候选 2：AppData（回退）
-    let fallback = app
+    let app_data_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("无法确定数据目录: {e}"))?;
-    std::fs::create_dir_all(&fallback).map_err(|e| format!("创建数据目录失败: {e}"))?;
-    Ok(fallback)
+        .map_err(|e| format!("无法确定应用数据目录: {e}"))?;
+    std::fs::create_dir_all(&app_data_dir)
+        .map_err(|e| format!("创建应用数据目录失败: {e}"))?;
+    Ok(resolve_data_dir_from(&app_data_dir))
+}
+
+/// 纯决策（无 tauri 依赖，可单测）：
+///
+/// 规则（M6 spec §2.6）：
+/// 1. 指针文件存在 → 校验所指目录可写 / 可建；可用则返回它（所有版本共享）；
+/// 2. 不存在（首次启动）→ 用默认 `app_data_dir/data`，创建并写入指针文件；
+/// 3. 指针所指目录失效 → 提示并降级用默认 `app_data_dir/data` 起服（不覆写指针，
+///    保留原设置供 M9 重选展示）；废弃「exe 旁 data/ 优先」的旧规则。
+fn resolve_data_dir_from(app_data_dir: &Path) -> PathBuf {
+    let pointer = app_data_dir.join(DATA_POINTER_FILENAME);
+    let default_dir = app_data_dir.join("data");
+
+    // 规则 1：指针存在且指向的目录可用 → 直接命中（共享）
+    if let Ok(target_raw) = std::fs::read_to_string(&pointer) {
+        let target = PathBuf::from(target_raw.trim());
+        if !target.as_os_str().is_empty() && writable_dir(&target) {
+            return target;
+        }
+        // 规则 3：指针失效 —— 降级默认目录起服，避免不可用；不覆写指针（M9 重选）
+        eprintln!(
+            "[shell] 数据目录不可访问，本次以隔离默认目录起服: {}（请在设置页重选数据位置）",
+            target.display()
+        );
+    }
+
+    // 规则 2：首次启动（或指针失效降级）→ 默认 `app_data_dir/data`；首次写指针
+    let _ = writable_dir(&default_dir);
+    if !pointer.exists() {
+        write_data_pointer(&pointer, &default_dir);
+    }
+    default_dir
+}
+
+/// 原子写指针文件：写 tmp + rename（内容为数据目录绝对路径 + 换行）。
+fn write_data_pointer(pointer: &Path, target: &Path) {
+    if let Some(parent) = pointer.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = pointer.with_extension("tmp");
+    let content = format!("{}\n", target.display());
+    let ok = std::fs::write(&tmp, content).is_ok()
+        && std::fs::rename(&tmp, pointer).is_ok();
+    if ok {
+        println!("[shell] 已写入数据目录指针 {} -> {}", pointer.display(), target.display());
+    } else {
+        eprintln!("[shell] 写数据目录指针失败: {}", pointer.display());
+    }
 }
 
 /// 探测目录是否可写：创建并尝试写入一个探针文件；成功删掉返回 true。
@@ -243,15 +288,20 @@ fn writable_dir(dir: &Path) -> bool {
     }
 }
 
-/// 首次切换数据目录时迁移旧数据：目标目录没有 relay_state.json 但 AppData 有则复制。
+/// 旧版数据一次性迁移（M6 共享指针模式）。壳入口：取 AppData 目录后交纯逻辑。
 ///
-/// 仅在「选了 exe 旁 data/ 且它里面还没有状态文件」时触发，避免重复迁移与覆盖。
+/// 仅首次：AppData 有旧版遗留 `relay_state.json` 而指针目录还没有该文件时复制一次；
+/// 后续版本数据均在指针目录，不再出现「从 AppData 迁出」的场景（避免重复迁移/覆盖）。
 fn migrate_legacy_data(app: &tauri::AppHandle, target: &Path) {
+    if let Ok(d) = app.path().app_data_dir() {
+        migrate_legacy_data_dir(&d, target);
+    }
+}
+
+/// 纯逻辑（无 tauri 依赖，可单测）：从 AppData 目录迁移旧 `relay_state.json` 一次。
+fn migrate_legacy_data_dir(app_data_dir: &Path, target: &Path) {
     if !target.join("relay_state.json").exists() {
-        let legacy = match app.path().app_data_dir() {
-            Ok(d) => d.join("relay_state.json"),
-            Err(_) => return,
-        };
+        let legacy = app_data_dir.join("relay_state.json");
         if legacy.exists() {
             if let Err(e) = std::fs::copy(&legacy, target.join("relay_state.json")) {
                 eprintln!("[shell] 迁移旧数据失败: {e}");
@@ -267,9 +317,9 @@ fn migrate_legacy_data(app: &tauri::AppHandle, target: &Path) {
 /// 端口由 relay 侧持久化（config.port，跨启动一致），壳不再传 `--port`，
 /// 只从 `[relay-ready]` 行解析实际端口供转发使用。
 fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo, String> {
-    // 数据目录：优先 exe 旁 data/；无写权限回退 %APPDATA%（M6）。
+    // 数据目录：AppData 内 data_path.txt 共享指针定位（M6）；任一版本命中同一真实数据目录
     let data_dir = resolve_data_dir(app)?;
-    // 便携版首次切换：把 AppData 旧状态复制过来，保留登录态/白名单/端口
+    // 旧版遗留 relay_state.json 一次性迁移进指针目录（登录态/白名单/端口不丢）
     migrate_legacy_data(app, &data_dir);
 
     let (mut rx, child) = app
@@ -551,4 +601,83 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("cp-m6-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn read_pointer(app_data_dir: &Path) -> String {
+        fs::read_to_string(app_data_dir.join(DATA_POINTER_FILENAME))
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn first_run_writes_pointer_and_returns_default_data() {
+        // 验收 13（决策层）：首次启动 → 返回默认 app_data_dir/data 并写指针
+        let app = tmp("first");
+        let got = resolve_data_dir_from(&app);
+        let expected = app.join("data");
+        assert_eq!(got, expected);
+        assert_eq!(read_pointer(&app), expected.display().to_string());
+        assert!(expected.exists());
+        fs::remove_dir_all(&app).unwrap();
+    }
+
+    #[test]
+    fn valid_pointer_is_hit_for_shared_dir() {
+        // 验收 14（决策层）：指针指向可用目录 → 命中共享目录（任意版本同数据）
+        let app = tmp("share");
+        let shared = tmp("sharedir");
+        write_data_pointer(&app.join(DATA_POINTER_FILENAME), &shared);
+        assert_eq!(resolve_data_dir_from(&app), shared);
+        fs::remove_dir_all(&app).unwrap();
+        fs::remove_dir_all(&shared).unwrap();
+    }
+
+    #[test]
+    fn broken_pointer_falls_back_and_is_not_overwritten() {
+        // 验收 15（决策层）：指针目标不可用（被文件占位）→ 降级默认目录、不覆写指针
+        let app = tmp("broken");
+        let blocker = tmp("blocker");
+        let bad_target = blocker.join("data");
+        fs::write(&bad_target, "occupied by file").unwrap(); // 该路径是文件 → 不可建目录
+        write_data_pointer(&app.join(DATA_POINTER_FILENAME), &bad_target);
+        let before = read_pointer(&app);
+
+        let got = resolve_data_dir_from(&app);
+        assert_eq!(got, app.join("data")); // 降级默认目录起服
+        assert_eq!(read_pointer(&app), before); // 指针保留原目标（不覆写）
+        fs::remove_dir_all(&app).unwrap();
+        fs::remove_dir_all(&blocker).unwrap();
+    }
+
+    #[test]
+    fn legacy_state_migrates_once_and_never_overwrites() {
+        // 验收 15（迁移决策层）：AppData 旧 relay_state.json 复制一次；目标已有则不覆盖
+        let app = tmp("mig");
+        let target = tmp("mig-target");
+        fs::write(app.join("relay_state.json"), "legacy").unwrap();
+
+        migrate_legacy_data_dir(&app, &target);
+        assert_eq!(fs::read_to_string(target.join("relay_state.json")).unwrap(), "legacy");
+
+        // 已存在 → 不覆盖（保留目标侧新值）
+        fs::write(target.join("relay_state.json"), "newer").unwrap();
+        migrate_legacy_data_dir(&app, &target);
+        assert_eq!(fs::read_to_string(target.join("relay_state.json")).unwrap(), "newer");
+
+        fs::remove_dir_all(&app).unwrap();
+        fs::remove_dir_all(&target).unwrap();
+    }
 }

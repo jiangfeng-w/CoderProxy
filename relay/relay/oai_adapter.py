@@ -140,8 +140,37 @@ def _usage_to_openai(usage: Usage) -> dict:
     }
 
 
+class UsageCollector:
+    """流式 usage 传出通道（M6 日志落库用）。
+
+    provider 的 done 事件处由 adapter 回调 record()：既收集 usage（agent 不传
+    include_usage 时没有 SSE usage 帧，只有经此通道能拿到），也把 done 到达时刻与
+    请求起点之差换算为 duration_ms（口径：上游完成即止，不含 SSE 下行至 agent 耗时）。
+
+    401 重试：每次 attempt 前 reset()（起点不变），重试成功后只保留最后那次 usage。
+    """
+
+    def __init__(self, started: float | None = None) -> None:
+        self.started = started if started is not None else time.monotonic()
+        self.usages: list[Usage] = []
+        self.duration_ms: int | None = None
+
+    @property
+    def usage(self) -> Usage | None:
+        return self.usages[-1] if self.usages else None
+
+    def record(self, usage: Usage | None = None) -> None:
+        self.usages.append(usage or Usage())
+        self.duration_ms = max(0, int((time.monotonic() - self.started) * 1000))
+
+    def reset(self) -> None:
+        self.usages.clear()
+        self.duration_ms = None
+
+
 async def stream_openai_sse(provider: Ta3Provider, request: ChatRequest,
-                            include_usage: bool = False) -> AsyncIterator[str]:
+                            include_usage: bool = False,
+                            usage_collector: UsageCollector | None = None) -> AsyncIterator[str]:
     """把 provider 的流式事件翻译为 OpenAI SSE 帧（含 [DONE]）。"""
     model = request.model or provider._model_name  # noqa: SLF001（vendored 内部字段）
     # 首帧声明 role，兼容多数 agent 对 assistant 角色帧的要求
@@ -177,6 +206,9 @@ async def stream_openai_sse(provider: Ta3Provider, request: ChatRequest,
                     yield _sse_chunk(model=model, delta=delta)
             finish_reason = event.get("finish_reason")
             usage = event.get("usage")
+            # M6：落库通道——无论 include_usage 与否都收集 usage，并打点 done 时刻
+            if usage_collector is not None:
+                usage_collector.record(usage)
 
     yield _sse_chunk(model=model, delta={}, finish_reason=finish_reason or "stop")
     if include_usage and usage is not None:

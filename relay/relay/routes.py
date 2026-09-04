@@ -13,6 +13,10 @@
 - GET    /v1/monitor/stats        统计计数快照（含工具映射聚合 tool_*）
 - GET    /v1/monitor/events       增量事件拉取（after_id）
 - POST   /v1/monitor/clear        清空事件与统计（GUI 日志页）
+- GET    /v1/logs                 日志分页 + 多条件筛选（M6 SQLite 数据底座）
+- GET    /v1/logs/kinds           日志类型 distinct（筛选项）
+- GET    /v1/logs/models          日志模型 distinct（筛选项）
+- DELETE /v1/logs                 按条件清空（无参数 = 全清）
 
 聊天流程：
 1. 解析 OpenAI 请求 → ChatRequest
@@ -24,6 +28,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -32,7 +37,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.models.providers.ta3 import Ta3Provider
 from app.models.schemas import ChatRequest
 
-from relay import auth_flow, oai_adapter, storage, tool_disguise
+from relay import auth_flow, db, oai_adapter, storage, tool_disguise
 from relay.config import settings
 from relay.middleware import require_api_key
 from relay.monitor import monitor
@@ -49,6 +54,10 @@ async def _on_startup() -> None:
     flush=True：sidecar 场景 stdout 是管道（非 tty），块缓冲会吞掉就绪行，
     必须显式刷新，否则 Tauri 壳解析不到端口。
     """
+    try:
+        await db.ensure_initialized()  # M6：建库 + schema 自省补列（落 settings.data_dir）
+    except Exception as exc:  # noqa: BLE001（日志库故障不阻断起服，仅告警）
+        logger.warning("[relay] 日志库初始化失败: %s", exc)
     print(f"[relay-ready] port={settings.relay_port} "
           f"api_key={settings.relay_api_key or storage.relay_api_key()} "
           f"tool_mode={settings.tool_mode}", flush=True)
@@ -89,6 +98,25 @@ def _is_upstream_401(exc: Exception) -> bool:
     return isinstance(exc, RuntimeError) and "401" in str(exc)
 
 
+async def _log_db(kind: str, **fields) -> None:
+    """落库旁路：失败只告警，不影响 chat 主链路（monitor.emit 的持久化镜像）。"""
+    try:
+        await db.log_event(kind=kind, **fields)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[relay] 日志落库失败 kind=%s: %s", kind, exc)
+
+
+def _usage_log_fields(usage) -> dict:
+    """Usage → logs 各 token 列（cached/reasoning 对齐 vendored Usage 字段）。"""
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "cached_tokens": usage.cached_input_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "total_tokens": usage.total_tokens,
+    }
+
+
 async def _ensure_model(model_name: str) -> dict:
     """查本地模型；未找到时先同步一次目录；白名单外模型视为不可用（M4）。"""
     model = await storage.find_model(model_name)
@@ -111,19 +139,26 @@ async def _ensure_model(model_name: str) -> dict:
 
 async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
                           include_usage: bool,
-                          ctx: tool_disguise.DisguiseContext) -> AsyncIterator[str]:
+                          ctx: tool_disguise.DisguiseContext,
+                          usage_collector: oai_adapter.UsageCollector | None = None,
+                          ) -> AsyncIterator[str]:
     """流式转发；上游 401 时重新同步目录（刷新 llm- key）后重试一次。"""
     model = await _ensure_model(model_name)
     provider = build_provider(model, model_name, ctx)
     for attempt in range(2):
+        if usage_collector is not None:
+            usage_collector.reset()  # 每次 attempt 独立计 usage/duration，成功后取最后一次
         try:
-            async for chunk in oai_adapter.stream_openai_sse(provider, chat_request, include_usage):
+            async for chunk in oai_adapter.stream_openai_sse(
+                    provider, chat_request, include_usage,
+                    usage_collector=usage_collector):
                 yield chunk
             return
         except RuntimeError as exc:
             if attempt == 0 and _is_upstream_401(exc):
                 logger.warning("[relay] 上游 401，重新同步目录后重试一次: %s", model_name)
                 monitor.emit("auth_401_refresh", model=model_name)
+                await _log_db("auth_401_refresh", model=model_name)
                 try:
                     await auth_flow.sync_models()
                 except Exception:  # noqa: BLE001
@@ -148,6 +183,7 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
             if attempt == 0 and _is_upstream_401(exc):
                 logger.warning("[relay] 上游 401，重新同步目录后重试一次: %s", model_name)
                 monitor.emit("auth_401_refresh", model=model_name)
+                await _log_db("auth_401_refresh", model=model_name)
                 try:
                     await auth_flow.sync_models()
                 except Exception:  # noqa: BLE001
@@ -199,6 +235,9 @@ async def chat_completions(request: Request):
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
 
+    # M6 duration 起点：chat_completions 收到请求时刻（monotonic，与 chat_request 落库同点）
+    started_at = time.monotonic()
+
     chat_request = oai_adapter.oai_request_to_chat_request(body)
     if not chat_request.model:
         raise HTTPException(status_code=400, detail="缺少 model 字段")
@@ -215,23 +254,36 @@ async def chat_completions(request: Request):
     # M4 监控：记录请求与工具伪装统计（GUI 日志面板数据源）
     monitor.emit("chat_request", model=chat_request.model, stream=stream,
                  tools=len(ctx.outbound_tools))
+    # M6：chat_request 落库（tools 数走 detail 兜底，不建独立列，不入统计口径）
+    await _log_db("chat_request", model=chat_request.model, stream=1 if stream else 0,
+                  detail={"tools": len(ctx.outbound_tools)})
     monitor.emit("tool_disguise", mode=ctx.mode,
                  map_hits=ctx.tool_map_hits,
                  longtail_passthrough=ctx.tool_longtail_passthrough,
                  dropped=ctx.tool_dropped)
 
     if stream:
+        collector = oai_adapter.UsageCollector(started_at)
+
         async def gen():
             try:
-                async for chunk in _sse_with_retry(chat_request.model, chat_request, include_usage, ctx):
+                async for chunk in _sse_with_retry(chat_request.model, chat_request,
+                                                   include_usage, ctx,
+                                                   usage_collector=collector):
                     yield chunk
                 monitor.emit("chat_done", model=chat_request.model, stream=True,
                              map_hits=ctx.tool_map_hits,
                              longtail=ctx.tool_longtail_passthrough,
                              dropped=ctx.tool_dropped)
+                usage = collector.usage
+                await _log_db("chat_done", model=chat_request.model, stream=1,
+                              duration_ms=collector.duration_ms,
+                              **(_usage_log_fields(usage) if usage else {}))
             except Exception as exc:  # noqa: BLE001（流中途断开也要记录）
                 monitor.emit("chat_error", model=chat_request.model,
                              error=str(exc)[:200])
+                await _log_db("chat_error", model=chat_request.model, stream=1,
+                              detail={"error": str(exc)[:500]})
                 raise
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
@@ -240,11 +292,16 @@ async def chat_completions(request: Request):
         response = await _chat_with_retry(chat_request.model, chat_request, ctx)
     except Exception as exc:  # noqa: BLE001
         monitor.emit("chat_error", model=chat_request.model, error=str(exc)[:200])
+        await _log_db("chat_error", model=chat_request.model, stream=0,
+                      detail={"error": str(exc)[:500]})
         raise
+    duration_ms = max(0, int((time.monotonic() - started_at) * 1000))
     monitor.emit("chat_done", model=chat_request.model, stream=False,
                  map_hits=ctx.tool_map_hits,
                  longtail=ctx.tool_longtail_passthrough,
                  dropped=ctx.tool_dropped)
+    await _log_db("chat_done", model=chat_request.model, stream=0,
+                  duration_ms=duration_ms, **_usage_log_fields(response.usage))
     model = await storage.find_model(chat_request.model)
     provider = build_provider(model, chat_request.model, ctx) if model else None
     return JSONResponse(oai_adapter.chat_response_to_openai(provider, chat_request, response))
@@ -371,3 +428,44 @@ async def monitor_clear():
     """清空事件缓冲与统计计数（GUI 日志页「清空」按钮）。"""
     monitor.clear()
     return {"status": "cleared"}
+
+
+# ─────────────────────────── /v1/logs/*（M6 数据底座：SQLite 持久化日志）───────────────────────────
+
+@app.get("/v1/logs", dependencies=[Depends(require_api_key)])
+async def logs_list(limit: int = 50, offset: int = 0, kind: str | None = None,
+                    model: str | None = None, time_from: str | None = None,
+                    time_to: str | None = None):
+    """分页 + 多条件筛选（kind/model/time_from/time_to 可组合）。
+
+    返回 { rows, total, kinds, models }；rows 按 id 倒序（最新在前），
+    kinds/models 供前端筛选项下拉（与 /v1/logs/kinds|models 同源）。
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    rows, total = await db.query_logs(
+        limit=limit, offset=offset, kind=kind, model=model,
+        time_from=time_from, time_to=time_to)
+    kinds, models = await db.distinct_kinds(), await db.distinct_models()
+    return {"rows": rows, "total": total, "kinds": kinds, "models": models}
+
+
+@app.get("/v1/logs/kinds", dependencies=[Depends(require_api_key)])
+async def logs_kinds():
+    """日志类型 distinct 列表（筛选项下拉）。"""
+    return {"kinds": await db.distinct_kinds()}
+
+
+@app.get("/v1/logs/models", dependencies=[Depends(require_api_key)])
+async def logs_models():
+    """出现过日志的模型 distinct 列表（筛选项下拉）。"""
+    return {"models": await db.distinct_models()}
+
+
+@app.delete("/v1/logs", dependencies=[Depends(require_api_key)])
+async def logs_clear(kind: str | None = None, model: str | None = None,
+                     time_from: str | None = None, time_to: str | None = None):
+    """按条件清空日志（无参数 = 全清）；返回删除行数。"""
+    deleted = await db.clear_logs(kind=kind, model=model,
+                                  time_from=time_from, time_to=time_to)
+    return {"status": "cleared", "deleted": deleted}
