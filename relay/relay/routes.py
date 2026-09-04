@@ -130,17 +130,22 @@ def _usage_log_fields(usage) -> dict:
     }
 
 
-async def _ensure_model(model_name: str) -> dict:
-    """查本地模型；未找到时先同步一次目录；白名单外模型视为不可用（M4）。"""
+async def _ensure_model(model_name: str, probe: bool = False) -> dict:
+    """查本地模型；未找到时先同步一次目录；白名单外模型视为不可用（M4）。
+
+    probe=True（GUI 连通性探测，请求 body 带 `probe: true`）：跳过白名单启用判定，
+    只要求模型存在于目录——探测请求必须真实到达上游，否则「先测后启用」对未启用
+    模型永远 404、无法经 GUI 开关启用（需求：连通性测试-白名单豁免）。
+    """
     model = await storage.find_model(model_name)
-    if model is not None and await storage.is_model_enabled(model_name):
+    if model is not None and (probe or await storage.is_model_enabled(model_name)):
         return model
     try:
         await auth_flow.sync_models()
     except Exception:  # noqa: BLE001（同步失败以 404 提示为准）
         pass
     model = await storage.find_model(model_name)
-    if model is None or not await storage.is_model_enabled(model_name):
+    if model is None or (not probe and not await storage.is_model_enabled(model_name)):
         raise HTTPException(
             status_code=404,
             detail=f"未知或未启用的模型: {model_name}"
@@ -154,9 +159,10 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
                           include_usage: bool,
                           ctx: tool_disguise.DisguiseContext,
                           usage_collector: oai_adapter.UsageCollector | None = None,
+                          *, probe: bool = False,
                           ) -> AsyncIterator[str]:
     """流式转发；上游 401 时重新同步目录（刷新 llm- key）后重试一次。"""
-    model = await _ensure_model(model_name)
+    model = await _ensure_model(model_name, probe=probe)
     provider = build_provider(model, model_name, ctx)
     for attempt in range(2):
         if usage_collector is not None:
@@ -185,9 +191,10 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
 
 
 async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
-                           ctx: tool_disguise.DisguiseContext):
+                           ctx: tool_disguise.DisguiseContext, *,
+                           probe: bool = False):
     """非流式；上游 401 时重试一次（同 _sse_with_retry）。"""
-    model = await _ensure_model(model_name)
+    model = await _ensure_model(model_name, probe=probe)
     provider = build_provider(model, model_name, ctx)
     for attempt in range(2):
         try:
@@ -255,6 +262,10 @@ async def chat_completions(request: Request):
     # M6 duration 起点：chat_completions 收到请求时刻（monotonic，与 chat_request 落库同点）
     started_at = time.monotonic()
 
+    # probe：GUI 连通性探测标记（body `probe: true`）。仅本地消费、不进入 ChatRequest /
+    # 上游 body（oai_request_to_chat_request 手写挑字段）；语义见 _ensure_model(probe=...)。
+    probe = bool(body.get("probe", False))
+
     chat_request = oai_adapter.oai_request_to_chat_request(body)
     if not chat_request.model:
         raise HTTPException(status_code=400, detail="缺少 model 字段")
@@ -286,7 +297,8 @@ async def chat_completions(request: Request):
             try:
                 async for chunk in _sse_with_retry(chat_request.model, chat_request,
                                                    include_usage, ctx,
-                                                   usage_collector=collector):
+                                                   usage_collector=collector,
+                                                   probe=probe):
                     yield chunk
                 monitor.emit("chat_done", model=chat_request.model, stream=True,
                              map_hits=ctx.tool_map_hits,
@@ -306,7 +318,8 @@ async def chat_completions(request: Request):
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
     try:
-        response = await _chat_with_retry(chat_request.model, chat_request, ctx)
+        response = await _chat_with_retry(chat_request.model, chat_request, ctx,
+                                          probe=probe)
     except Exception as exc:  # noqa: BLE001
         monitor.emit("chat_error", model=chat_request.model, error=str(exc)[:200])
         await _log_db("chat_error", model=chat_request.model, stream=0,

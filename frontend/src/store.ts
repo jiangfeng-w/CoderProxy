@@ -8,7 +8,8 @@ export const store = reactive({
   /** 对 agent 的 OpenAI /v1 服务是否可用（relay 侧：已登录 且 未手动停止）。 */
   serviceEnabled: false,
   view: "overview" as string,
-  /** 模型可用状态：available / unavailable / testing。跨页面共享，不持久化。 */
+  /** 模型连通状态：success / failure / testing（无记录 = 未测试）。跨页面共享，
+   * 不持久化；与白名单启用无关——启用与否看 model_whitelist（isEnabled）。 */
   modelStatus: {} as Record<string, string>,
   /** 会话级标记：本轮登录后是否已跑过批量测试，跨组件挂载保持，登出时重置。 */
   batchTested: false,

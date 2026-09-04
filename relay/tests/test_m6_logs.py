@@ -270,7 +270,7 @@ def test_logs_delete_endpoint(client):
 # ─────────────────────────── chat 落库：非流式（含 usage/duration）───────────────────────────
 
 def test_chat_non_stream_logs_request_done(client, monkeypatch):
-    async def _fake_chat(model_name, chat_request, ctx):
+    async def _fake_chat(model_name, chat_request, ctx, *, probe=False):
         return ChatResponse(content="ok", finish_reason="stop",
                             usage=Usage(prompt_tokens=11, completion_tokens=22,
                                         total_tokens=33, cached_input_tokens=4,
@@ -296,7 +296,7 @@ def test_chat_non_stream_logs_request_done(client, monkeypatch):
 
 
 def test_chat_error_logged(client, monkeypatch):
-    async def _boom(model_name, chat_request, ctx):
+    async def _boom(model_name, chat_request, ctx, *, probe=False):
         raise RuntimeError("boom upstream")
 
     monkeypatch.setattr(routes_mod, "_chat_with_retry", _boom)
@@ -366,7 +366,7 @@ def test_usage_collector_reset_semantics():
 def test_chat_stream_logs_done_usage(client, monkeypatch):
     """流式 chat_done 落库 usage；agent 不传 include_usage 也能落非全 0 token。"""
     async def _fake_sse(model_name, chat_request, include_usage, ctx,
-                        usage_collector=None):
+                        usage_collector=None, *, probe=False):
         assert usage_collector is not None
         usage_collector.record(Usage(prompt_tokens=1, completion_tokens=2,
                                      total_tokens=3, cached_input_tokens=0,

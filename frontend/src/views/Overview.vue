@@ -23,13 +23,6 @@ const drop = computed(() => n("tool_dropped"));
 const toolTotal = computed(() => hit.value + longtail.value + drop.value || 1);
 const pct = (v: number) => Math.round((v / toolTotal.value) * 1000) / 10;
 
-function isEnabled(id: string): boolean {
-  const wl = config.value?.model_whitelist ?? [];
-  if (wl.length === 0) return true;
-  if (wl.length === 1 && wl[0] === "__none__") return false;
-  return wl.includes(id);
-}
-
 let timer: number | undefined;
 let configTimer: number | undefined;
 let modelTimer: number | undefined;
@@ -58,7 +51,7 @@ async function loadModels() {
       store.batchTested = true;
       batchTestAll(models.value).then((failed) => {
         if (failed.length > 0) {
-          message.warning(`${failed.length} 个模型连接失败，已自动关闭启用`);
+          message.warning(`${failed.length} 个模型连接失败`);
         }
       });
     }
@@ -203,11 +196,10 @@ onUnmounted(() => {
             <tr v-for="m in models.slice(0, 6)" :key="m.id">
               <td class="mono copyable" title="点击复制模型名" @click="onCopy(m.id)">{{ m.id }}</td>
               <td class="r">
-                <span v-if="store.modelStatus[m.id] === 'available' && isEnabled(m.id)" class="cp-tag green">可用</span>
-                <span v-else-if="store.modelStatus[m.id] === 'testing'" class="cp-tag gray">检测中</span>
-                <span v-else-if="store.modelStatus[m.id] === 'unavailable'" class="cp-tag red">不可用</span>
-                <span v-else-if="!isEnabled(m.id)" class="cp-tag gray">已禁用</span>
-                <span v-else class="cp-tag gray">未检测</span>
+                <span v-if="store.modelStatus[m.id] === 'success'" class="cp-tag green">成功</span>
+                <span v-else-if="store.modelStatus[m.id] === 'testing'" class="cp-tag gray">测试中</span>
+                <span v-else-if="store.modelStatus[m.id] === 'failure'" class="cp-tag red">失败</span>
+                <span v-else class="cp-tag gray">未测试</span>
               </td>
             </tr>
           </tbody>
