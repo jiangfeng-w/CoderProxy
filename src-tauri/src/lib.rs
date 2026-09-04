@@ -221,7 +221,7 @@ fn resolve_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let fallback = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("解析 app_data_dir 失败: {e}"))?;
+        .map_err(|e| format!("无法确定数据目录: {e}"))?;
     std::fs::create_dir_all(&fallback).map_err(|e| format!("创建数据目录失败: {e}"))?;
     Ok(fallback)
 }
@@ -275,11 +275,11 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo
     let (mut rx, child) = app
         .shell()
         .sidecar("relay-sidecar")
-        .map_err(|e| format!("解析 sidecar 失败: {e}"))?
+        .map_err(|e| format!("启动服务失败: {e}"))?
         .args(["run"])
         .env("RELAY_DATA_DIR", data_dir.to_string_lossy().as_ref())
         .spawn()
-        .map_err(|e| format!("spawn sidecar 失败（打包 exe 与依赖就绪？）: {e}"))?;
+        .map_err(|e| format!("启动本地服务失败，请检查程序是否完整: {e}"))?;
 
     // 读线程：逐行扫 stdout，命中 [relay-ready] 即通知主线程
     let (tx, ready_rx) = channel();
@@ -325,11 +325,11 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo
         }
         Err(RecvTimeoutError::Timeout) => {
             let _ = child.kill();
-            Err("sidecar 60s 内未就绪（检查打包 exe）".to_string())
+            Err("服务启动超时，请检查程序是否完整".to_string())
         }
         Err(RecvTimeoutError::Disconnected) => {
             let _ = child.kill();
-            Err("sidecar 提前退出（看上方 stderr）".to_string())
+            Err("服务意外退出".to_string())
         }
     }
 }
@@ -359,19 +359,19 @@ async fn relay(
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     if !path.starts_with("/v1/") {
-        return Err(format!("路径受限（仅 /v1/*）: {path}"));
+        return Err(format!("不支持的请求路径: {path}"));
     }
     let ready = state
         .ready
         .lock()
         .unwrap()
         .clone()
-        .ok_or_else(|| "relay 尚未就绪".to_string())?;
+        .ok_or_else(|| "服务尚未就绪，请稍候再试".to_string())?;
 
     let method = match method.to_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
         "POST" => reqwest::Method::POST,
-        _ => return Err("仅支持 GET/POST".to_string()),
+        _ => return Err("不支持的请求方式".to_string()),
     };
     let url = format!("http://127.0.0.1:{}{path}", ready.port);
 
@@ -382,14 +382,14 @@ async fn relay(
     if let Some(b) = body {
         req = req.json(&b);
     }
-    let resp = req.send().await.map_err(|e| format!("relay 请求失败: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("服务请求失败: {e}"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("relay HTTP {}: {}", status.as_u16(), text));
+        return Err(format!("服务响应错误（{}）: {}", status.as_u16(), text));
     }
     serde_json::from_str(&text)
-        .map_err(|e| format!("relay 响应解析失败: {e}（{}）", &text[..text.len().min(200)]))
+        .map_err(|e| format!("服务响应无法解析: {e}（{}）", &text[..text.len().min(200)]))
 }
 
 /// sidecar 就绪状态（前端轮询/初始化用）。
@@ -488,7 +488,7 @@ pub fn run() {
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
-            let icon = app.default_window_icon().cloned().ok_or("无默认窗口图标，无法建托盘")?;
+            let icon = app.default_window_icon().cloned().ok_or("缺少窗口图标，无法创建托盘")?;
             let tray = TrayIconBuilder::with_id("coderproxy-tray")
                 .icon(icon)
                 .tooltip("CoderProxy")

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-// 配置页：API Key / 工具伪装模式 / 服务端口。
+// 配置页：本地 API Key / 工具伪装模式 / 服务端口。
 import { onMounted, ref } from "vue";
 import { useMessage, NPopconfirm } from "naive-ui";
 import { getConfig, updateConfig, relayRestart, type Config } from "../api";
+import { toolModeLabel } from "../store";
 
 const message = useMessage();
 
@@ -42,7 +43,7 @@ async function onResetKey() {
 async function onToolMode(mode: string) {
   try {
     config.value = await updateConfig({ tool_mode: mode });
-    message.success(`工具模式已切换为 ${mode}`);
+    message.success(`已切换为「${toolModeLabel(mode)}」`);
   } catch (e) {
     message.error(String(e));
   }
@@ -76,7 +77,7 @@ onMounted(load);
     <div class="card">
       <div class="card-title">本地 API Key</div>
       <div class="field">
-        <label class="lbl">静态鉴权密钥（Agent 连接 relay 用，Bearer）</label>
+        <label class="lbl">本地 API Key（在 Agent 里添加自定义模型时，填在 API Key 一栏）</label>
         <div class="row">
           <div class="key-input-wrap">
             <input
@@ -109,7 +110,7 @@ onMounted(load);
             重置将生成新密钥并作废旧值，已连接的 Agent 需改用新密钥。
           </n-popconfirm>
         </div>
-        <div class="hint warn">密钥仅存于本机，真实牛码 token 不会下发到任何 Agent。</div>
+        <div class="hint warn">密钥仅保存在本机，牛码账号的真实登录信息不会发给任何 Agent。</div>
       </div>
     </div>
 
@@ -121,9 +122,9 @@ onMounted(load);
         <div class="mode-options">
           <label
             v-for="m in [
-              { key: 'hybrid', name: 'hybrid（推荐）', desc: '已知工具伪装映射，长尾工具默认透传' },
-              { key: 'strict', name: 'strict（严格）', desc: '只放行映射表内工具，其余丢弃' },
-              { key: 'passthrough', name: 'passthrough（透传）', desc: '全部工具名原样透传，不做伪装' },
+              { key: 'hybrid', name: '智能适配（推荐）', desc: '认识的工具自动转换成牛码能理解的名称，不认识的按原名转发' },
+              { key: 'strict', name: '严格模式', desc: '只转换认识的工具，不认识的直接丢弃' },
+              { key: 'passthrough', name: '原样转发', desc: '所有工具按原名转发，不做任何转换' },
             ]"
             :key="m.key"
             class="mode-opt"
@@ -144,7 +145,7 @@ onMounted(load);
     <div class="card">
       <div class="card-title">服务端口</div>
       <div class="field">
-        <label class="lbl">relay 监听端口（保存后重启生效，每次启动固定该端口）</label>
+        <label class="lbl">本地服务端口（保存后自动重启，每次启动固定使用该端口）</label>
         <div class="row">
           <input
             class="mono port-input"

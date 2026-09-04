@@ -4,7 +4,7 @@ import { onMounted, onUnmounted, ref } from "vue";
 import { NButton, NModal, useMessage } from "naive-ui";
 import { listen } from "@tauri-apps/api/event";
 import { relayStatus, relayStop, relayRestart, authStatus, authLoginStart, authLogout, authSync, openAuthorizeUrl, windowHide, appExit } from "./api";
-import { store } from "./store";
+import { store, toolModeLabel } from "./store";
 import Overview from "./views/Overview.vue";
 import Config from "./views/Config.vue";
 import Models from "./views/Models.vue";
@@ -169,7 +169,7 @@ onUnmounted(() => {
           端口：{{ store.relay.port }}
         </span>
         <span v-if="store.relay.running" class="mode cp-tag cyan">
-          {{ store.relay.tool_mode }}
+          {{ toolModeLabel(store.relay.tool_mode) }}
         </span>
       </div>
 

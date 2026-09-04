@@ -11,3 +11,14 @@ export const store = reactive({
   /** 会话级标记：本轮登录后是否已跑过批量测试，跨组件挂载保持，登出时重置。 */
   batchTested: false,
 });
+
+/** 工具模式（tool_mode）在页面上的通俗叫法；代码/API 内部仍用原名 hybrid/strict/passthrough。 */
+const TOOL_MODE_LABELS: Record<string, string> = {
+  hybrid: "智能适配",
+  strict: "严格模式",
+  passthrough: "原样转发",
+};
+
+export function toolModeLabel(mode?: string): string {
+  return TOOL_MODE_LABELS[mode ?? ""] ?? mode ?? "—";
+}

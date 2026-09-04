@@ -47,15 +47,16 @@ function fmtTs(iso: string) {
 
 function detailOf(e: MonitorEvent): string {
   const d = e.data;
+  const stream = d.stream ? " · 流式" : "";
   switch (e.kind) {
     case "chat_request":
-      return `stream=${d.stream} tools=${d.tools ?? 0}`;
+      return `工具 ${d.tools ?? 0} 个${stream}`;
     case "chat_done":
-      return `stream=${d.stream} map_hits=${d.map_hits ?? 0} longtail=${d.longtail ?? 0} dropped=${d.dropped ?? 0}`;
+      return `转换 ${d.map_hits ?? 0} · 转发 ${d.longtail ?? 0} · 忽略 ${d.dropped ?? 0}${stream}`;
     case "chat_error":
       return String(d.error ?? "");
     case "auth_401_refresh":
-      return `模型 ${d.model ?? ""} 已刷新 llm-key 并重试`;
+      return `模型 ${d.model ?? ""} 上游返回 401，已自动刷新重试`;
     default:
       return "";
   }

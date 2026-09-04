@@ -96,15 +96,16 @@ function fmtTs(iso: string) {
 }
 function detailOf(e: { kind: string; data: Record<string, unknown> }): string {
   const d = e.data;
+  const stream = d.stream ? " · 流式" : "";
   switch (e.kind) {
     case "chat_request":
-      return `stream=${d.stream} tools=${d.tools ?? 0}`;
+      return `工具 ${d.tools ?? 0} 个${stream}`;
     case "chat_done":
-      return `stream=${d.stream} map_hits=${d.map_hits ?? 0} longtail=${d.longtail ?? 0}`;
+      return `转换 ${d.map_hits ?? 0} · 转发 ${d.longtail ?? 0} · 忽略 ${d.dropped ?? 0}${stream}`;
     case "chat_error":
       return String(d.error ?? "");
     case "auth_401_refresh":
-      return `模型 ${d.model ?? ""} 已刷新 llm-key`;
+      return `模型 ${d.model ?? ""} 上游返回 401，已自动刷新重试`;
     default:
       return "";
   }
@@ -168,17 +169,17 @@ onUnmounted(() => {
         <div class="card-title">工具映射（累计）</div>
         <div class="tool-bar">
           <div class="tool-row">
-            <span class="t-label">命中 hit</span>
+            <span class="t-label">已转换</span>
             <div class="t-track"><div class="t-fill cyan" :style="{ width: pct(hit) + '%' }" /></div>
             <span class="t-num mono">{{ hit.toLocaleString() }} · {{ pct(hit) }}%</span>
           </div>
           <div class="tool-row">
-            <span class="t-label">长尾透传 long-tail</span>
+            <span class="t-label">原样转发</span>
             <div class="t-track"><div class="t-fill orange" :style="{ width: pct(longtail) + '%' }" /></div>
             <span class="t-num mono">{{ longtail.toLocaleString() }} · {{ pct(longtail) }}%</span>
           </div>
           <div class="tool-row">
-            <span class="t-label">丢弃 discard</span>
+            <span class="t-label">已忽略</span>
             <div class="t-track"><div class="t-fill red" :style="{ width: pct(drop) + '%' }" /></div>
             <span class="t-num mono">{{ drop.toLocaleString() }} · {{ pct(drop) }}%</span>
           </div>

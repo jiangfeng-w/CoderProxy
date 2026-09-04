@@ -323,7 +323,7 @@ async def auth_config_update(request: Request):
     api_key = body.get("api_key")
     if api_key is not None:
         if not isinstance(api_key, str) or not api_key.strip():
-            raise HTTPException(status_code=400, detail="api_key 不能为空")
+            raise HTTPException(status_code=400, detail="访问密钥不能为空")
         await storage.save_api_key(api_key.strip())
 
     if body.get("regenerate_api_key") is True:
@@ -334,13 +334,13 @@ async def auth_config_update(request: Request):
     if tool_mode is not None:
         if tool_mode not in tool_disguise.VALID_MODES:
             raise HTTPException(status_code=400,
-                                detail=f"tool_mode 必须是 {list(tool_disguise.VALID_MODES)}")
+                                detail="无效的工具映射")
         settings.tool_mode = tool_mode
 
     model_whitelist = body.get("model_whitelist")
     if model_whitelist is not None:
         if not isinstance(model_whitelist, list):
-            raise HTTPException(status_code=400, detail="model_whitelist 必须是数组")
+            raise HTTPException(status_code=400, detail="模型列表格式不正确")
         await storage.set_model_whitelist(model_whitelist)
 
     port = body.get("port")
