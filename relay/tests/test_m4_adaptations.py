@@ -12,7 +12,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from relay import cli, monitor as monitor_mod, storage, tool_disguise
+from relay import cli, monitor as monitor_mod, routes as routes_mod, storage, tool_disguise
 from relay.config import settings
 from relay.routes import app as relay_app
 
@@ -195,6 +195,13 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
     monkeypatch.setattr(settings, "tool_mode", "hybrid")
     settings.relay_api_key = "m4-test-key"
+
+    # keyless 单测基准：模拟「已登录 + 对 agent 的 /v1 服务开启」，聚焦后端逻辑本身
+    async def _serving_on():
+        return True
+
+    monkeypatch.setattr(routes_mod, "_serving", _serving_on)
+
     with TestClient(relay_app) as c:
         yield c
     settings.relay_api_key = ""

@@ -5,6 +5,8 @@ import type { RelayStatus, AuthStatus } from "./api";
 export const store = reactive({
   relay: { running: false, port: 0, tool_mode: "hybrid" } as RelayStatus,
   auth: { status: "not_logged_in" } as AuthStatus,
+  /** 对 agent 的 OpenAI /v1 服务是否可用（relay 侧：已登录 且 未手动停止）。 */
+  serviceEnabled: false,
   view: "overview" as string,
   /** 模型可用状态：available / unavailable / testing。跨页面共享，不持久化。 */
   modelStatus: {} as Record<string, string>,

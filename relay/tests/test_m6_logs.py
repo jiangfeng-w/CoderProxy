@@ -194,6 +194,13 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
     monkeypatch.setattr(settings, "relay_log_max_rows", 100000)
     settings.relay_api_key = "m6-test-key"
+
+    # keyless 单测基准：模拟「已登录 + 对 agent 的 /v1 服务开启」，聚焦后端逻辑本身
+    async def _serving_on():
+        return True
+
+    monkeypatch.setattr(routes_mod, "_serving", _serving_on)
+
     # raise_server_exceptions=False：chat_error 路径返回 500 而非向测试抛异常
     with TestClient(relay_app, raise_server_exceptions=False) as c:
         yield c

@@ -70,6 +70,13 @@ export const authLogout = (): Promise<{ status: string }> => relay("POST", "/v1/
 export const authSync = (): Promise<{ status: string; models: string[] }> =>
   relay("POST", "/v1/auth/sync");
 
+/** /v1/service — 对 agent 的 OpenAI 服务开关（进程常驻，仅开关 /v1，不动登录/配置/日志底座）。 */
+export const serviceStatus = (): Promise<{ enabled: boolean }> => relay("GET", "/v1/service");
+export const serviceDisable = (): Promise<{ enabled: boolean; status: string }> =>
+  relay("POST", "/v1/service/disable");
+export const serviceEnable = (): Promise<{ enabled: boolean; status: string }> =>
+  relay("POST", "/v1/service/enable");
+
 /** /v1/auth/config */
 export const getConfig = (): Promise<Config> => relay("GET", "/v1/auth/config");
 export const updateConfig = (patch: Record<string, unknown>): Promise<Config> =>

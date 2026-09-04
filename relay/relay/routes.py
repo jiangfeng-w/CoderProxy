@@ -47,6 +47,18 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="CoderProxy Relay", version="0.2.0")
 
+# 对 agent 的 OpenAI base-url 服务开关（方案B）：relay 进程常驻，仅开关 /v1 对外服务，
+# 不动登录/配置/日志底座。进程级运行时状态、不持久化；进程重启自动复位为「随登录联动态」。
+_service_disabled = False
+
+
+async def _serving() -> bool:
+    """/v1 OpenAI 服务是否可用：未被手动停止 且 已登录。"""
+    if _service_disabled:
+        return False
+    status = await auth_flow.login_status()
+    return status.get("status") == "logged_in"
+
 
 @app.on_event("startup")
 async def _on_startup() -> None:
@@ -202,6 +214,8 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
 @app.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models(all: bool = False):
     """模型目录。默认按白名单过滤（OpenAI 兼容语义）；all=1 返回完整目录（GUI 管理用）。"""
+    if not all and not await _serving():
+        raise HTTPException(status_code=503, detail="服务已停止，请登录并启动服务")
     models = await storage.load_models()
     if all:
         return {
@@ -231,6 +245,8 @@ async def get_model(model_id: str):
 
 @app.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_completions(request: Request):
+    if not await _serving():
+        raise HTTPException(status_code=503, detail="服务已停止，请登录并启动服务")
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -340,7 +356,10 @@ async def auth_login_cancel():
 
 @app.post("/v1/auth/logout")
 async def auth_logout():
+    global _service_disabled
     await auth_flow.logout()
+    # 登出后复位服务开关：下次登录时对 agent 的服务自动启动
+    _service_disabled = False
     return {"status": "logged_out"}
 
 
@@ -408,6 +427,30 @@ async def auth_config_update(request: Request):
         await storage.save_port(port)
 
     return await auth_config()
+
+
+# ─────────────────────────── /v1/service（对 agent 的 OpenAI 服务开关，方案B）───────────────────────────
+
+@app.get("/v1/service", dependencies=[Depends(require_api_key)])
+async def service_status():
+    """查询对 agent 的 /v1 服务是否运行中（逻辑：已登录 且 未手动停止）。"""
+    return {"enabled": await _serving()}
+
+
+@app.post("/v1/service/disable", dependencies=[Depends(require_api_key)])
+async def service_disable():
+    """停止对 agent 的 /v1 服务：仅关 agent 入口，登录/配置/日志底座仍可用。"""
+    global _service_disabled
+    _service_disabled = True
+    return {"enabled": False, "status": "stopped"}
+
+
+@app.post("/v1/service/enable", dependencies=[Depends(require_api_key)])
+async def service_enable():
+    """重新启用对 agent 的 /v1 服务（需已登录，否则仍保持关闭）。"""
+    global _service_disabled
+    _service_disabled = False
+    return {"enabled": await _serving(), "status": "started"}
 
 
 # ─────────────────────────── /v1/monitor/*（M4 GUI 日志面板）───────────────────────────

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 // 顶栏（服务状态/启停/登录态）+ 左侧导航 + 四页内容区。深色主题，全局轮询服务与登录态。
-import { onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { NButton, NModal, useMessage } from "naive-ui";
 import { listen } from "@tauri-apps/api/event";
-import { relayStatus, relayStop, relayRestart, authStatus, authLoginStart, authLogout, authSync, openAuthorizeUrl, windowHide, appExit } from "./api";
+import { relayStatus, relayRestart, authStatus, authLoginStart, authLogout, authSync, openAuthorizeUrl, windowHide, appExit, serviceStatus, serviceEnable, serviceDisable } from "./api";
 import { store, toolModeLabel } from "./store";
 import Overview from "./views/Overview.vue";
 import Config from "./views/Config.vue";
@@ -29,6 +29,20 @@ let closeUnlisten: Promise<() => void> | undefined;
 
 // 关窗三选对话框：用户点右上角 X 时，由 Rust 发 `close-requested` 事件触发。
 const showCloseDlg = ref(false);
+
+// 方案B：relay 进程常驻（登录/配置/日志底座不动）。「对 agent 的 /v1 服务运行中」
+// = relay 进程就绪 && relay 侧判定服务已开放（已登录 且 未手动停止）。
+const serviceRunning = computed(
+  () => store.relay.running && store.serviceEnabled
+);
+
+function serviceStatusText(): string {
+  if (serviceRunning.value) return "运行中";
+  if (store.auth.status === "logged_in") return "已停止";
+  if (store.auth.status === "pending") return "登录中 · 登录后自动启动服务";
+  if (store.auth.status === "failed") return "登录未完成 · 登录后自动启动服务";
+  return "未登录 · 登录后自动启动服务";
+}
 
 async function chooseHide() {
   try {
@@ -72,6 +86,11 @@ async function pollStatus() {
   } catch {
     /* 忽略 */
   }
+  try {
+    store.serviceEnabled = (await serviceStatus()).enabled;
+  } catch {
+    /* 服务开关查询失败（进程未就绪/未登录等），保持上次值 */
+  }
   // 登录态由「未登录 → 已登录」转变（含浏览器授权完成后轮询到）：自动同步一次模型目录
   if (store.auth.status === "logged_in" && lastAuthStatus !== "logged_in") {
     syncModels();
@@ -87,7 +106,7 @@ async function pollStatus() {
 async function onStop() {
   busy.value = true;
   try {
-    await relayStop();
+    await serviceDisable();
     message.success("服务已停止");
   } catch (e) {
     message.error(String(e));
@@ -100,12 +119,19 @@ async function onStop() {
 async function onRestart() {
   busy.value = true;
   try {
-    await relayRestart();
-    message.info("正在重启服务...");
-  } catch (e) {
-    message.error(String(e));
+    await serviceEnable();
+    message.info("服务已启动");
+  } catch {
+    // 进程未就绪（异常退出等）→ 回退为真实重启 relay 进程
+    try {
+      await relayRestart();
+      message.info("正在重启服务...");
+    } catch (e) {
+      message.error(String(e));
+    }
   } finally {
     busy.value = false;
+    await pollStatus();
   }
 }
 
@@ -165,21 +191,25 @@ onUnmounted(() => {
       </div>
 
       <div class="status">
-        <span class="dot" :class="store.relay.running ? 'ok' : 'off'" />
-        <span>{{ store.relay.running ? "运行中" : "已停止" }}</span>
-        <span v-if="store.relay.running && store.relay.port" class="port mono">
+        <span class="dot" :class="serviceRunning ? 'ok' : 'off'" />
+        <span>{{ serviceStatusText() }}</span>
+        <span v-if="serviceRunning && store.relay.port" class="port mono">
           端口：{{ store.relay.port }}
         </span>
-        <span v-if="store.relay.running" class="mode cp-tag cyan">
+        <span v-if="serviceRunning" class="mode cp-tag cyan">
           {{ toolModeLabel(store.relay.tool_mode) }}
         </span>
       </div>
 
       <div class="ops">
-        <button class="btn danger" :disabled="busy || !store.relay.running" @click="onStop">
+        <button class="btn danger" :disabled="busy || !serviceRunning" @click="onStop">
           停止服务
         </button>
-        <button class="btn primary" :disabled="busy" @click="onRestart">
+        <button
+          class="btn primary"
+          :disabled="busy || store.auth.status !== 'logged_in'"
+          @click="onRestart"
+        >
           重启服务
         </button>
         <template v-if="store.auth.status === 'logged_in'">
@@ -306,15 +336,6 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
 }
-.user {
-  color: var(--cp-dim);
-  font-size: 13px;
-  margin-left: 8px;
-}
-.user b {
-  color: var(--cp-text);
-}
-
 .btn {
   padding: 4px 12px;
   border-radius: 6px;
@@ -402,9 +423,18 @@ onUnmounted(() => {
 }
 .ver {
   margin-top: auto;
-  padding: 8px 12px;
+  padding: 6px 12px;
   color: #475569;
   font-size: 12px;
+}
+
+.user {
+  color: var(--cp-dim);
+  font-size: 13px;
+  margin-left: 8px;
+}
+.user b {
+  color: var(--cp-text);
 }
 
 .content {

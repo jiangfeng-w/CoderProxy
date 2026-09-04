@@ -43,8 +43,16 @@ async def start_login() -> dict:
 
 
 async def login_status() -> dict:
-    """查询登录状态：优先 in-flight 任务结果，其次本地登录态。"""
-    return await ta3_oauth.get_login_status(noop_db, PROVIDER_ID)
+    """查询登录状态：优先 in-flight 任务结果，其次本地登录态。
+
+    上游（vendored get_login_status）在「无会话」时也返回 status=pending(错误=未登录)，
+    与「浏览器授权中」(pending) 混淆。前端需区分「未登录」「登录中」，这里归一化：
+    pending 且错误为「未登录」→ not_logged_in；其余原样返回。
+    """
+    result = await ta3_oauth.get_login_status(noop_db, PROVIDER_ID)
+    if result.get("status") == "pending" and result.get("error") == "未登录":
+        return {"status": "not_logged_in"}
+    return result
 
 
 async def cancel_login() -> None:

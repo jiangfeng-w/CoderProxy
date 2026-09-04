@@ -209,7 +209,7 @@ fn spawn_sidecar(app: &tauri::AppHandle) -> Result<ReadyInfo, String> {
 ///
 /// 共享模式：任意版本（便携 / 安装）启动都先读该指针 → 命中同一真实数据目录，
 /// 登录态 / 模型白名单 / 端口 / 日志全部共享。M6 只做「解析 + 默认目录 + 首次写指针」，
-/// 「查看 / 修改数据位置」归 M9 设置页。
+/// 「查看 / 修改数据位置」归 M10 设置页。
 const DATA_POINTER_FILENAME: &str = "data_path.txt";
 
 /// 解析真实数据目录（M6 共享指针底座）。壳入口：取 AppData 目录后交纯函数决策。
