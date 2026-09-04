@@ -107,7 +107,7 @@ class Ta3Provider(ModelProvider):
         self._tools_pre_disguised = tools_pre_disguised
         self._ua = getattr(settings, "ta3_user_agent", "") or _DEFAULT_TA3_UA
         # v28: SSE 空闲超时改读配置——kimi-k3/grok-4.6 长思考时 30s 硬编码会误杀流
-        self._stream_idle_timeout = float(getattr(settings, "ta3_stream_idle_timeout", 180) or 180)
+        self._stream_idle_timeout = float(getattr(settings, "ta3_stream_idle_timeout", 300) or 300)
         # 禁用 httpx 自动注入的 UA/编码头之外，保持与参考项目一致的压缩协商
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(

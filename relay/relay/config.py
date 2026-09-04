@@ -31,7 +31,7 @@ class Settings:
     # ta3
     ta3_api_base: str = "https://lc.yinhaiyun.com/newcoder"
     ta3_user_agent: str = ""
-    ta3_stream_idle_timeout: float = 180.0
+    ta3_stream_idle_timeout: float = 300.0
     ta3_kimi_thinking_effort: str = "low"
     ta3_thinking_watchdog: float = 240.0
     # 直连：M1 结论要求绕系统代理，trust_env=False 语义由 relay/__init__.py 设 NO_PROXY 实现；
