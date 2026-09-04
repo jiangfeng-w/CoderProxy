@@ -13,7 +13,6 @@
 //! M5：sidecar 用 PyInstaller onefile exe（`binaries/relay-sidecar-<triple>.exe`），
 //! 数据目录固定为 `app_data_dir`（打包态 `__file__` 指向解包目录，不可落数据）。
 
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -168,8 +167,6 @@ struct AppState {
     /// 回收 sidecar 整棵进程树的作业对象（PyInstaller onefile 两层结构防残留）。
     job: Mutex<Option<job::JobObject>>,
     ready: Mutex<Option<ReadyInfo>>,
-    /// GUI 配置页期望的端口；0 = 随机端口。重启时按此值 spawn。
-    requested_port: AtomicU16,
     client: reqwest::Client,
     /// 保持托盘句柄存活（TrayIcon 被 Drop 会移除托盘图标）。
     tray: Mutex<Option<TrayIcon>>,
@@ -200,12 +197,14 @@ fn parse_ready(line: &str) -> Option<ReadyInfo> {
 
 fn spawn_sidecar(app: &tauri::AppHandle) -> Result<ReadyInfo, String> {
     let state = app.state::<AppState>();
-    let port = state.requested_port.load(Ordering::SeqCst);
-    spawn_with_port(app, &state, port)
+    spawn_with_port(app, state.inner())
 }
 
-/// 按指定端口 spawn 打包 sidecar 并等待 `[relay-ready]`；成功后将 child/ready 写入 AppState。
-fn spawn_with_port(app: &tauri::AppHandle, state: &AppState, port: u16) -> Result<ReadyInfo, String> {
+/// spawn 打包 sidecar 并等待 `[relay-ready]`；成功后 child/ready 写入 AppState。
+///
+/// 端口由 relay 侧持久化（config.port，跨启动一致），壳不再传 `--port`，
+/// 只从 `[relay-ready]` 行解析实际端口供转发使用。
+fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo, String> {
     // 数据目录：%APPDATA%/com.coderproxy.desktop（打包态不可用 exe 解包目录）
     let data_dir = app
         .path()
@@ -217,7 +216,7 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState, port: u16) -> Resul
         .shell()
         .sidecar("relay-sidecar")
         .map_err(|e| format!("解析 sidecar 失败: {e}"))?
-        .args(["run", "--port", &port.to_string()])
+        .args(["run"])
         .env("RELAY_DATA_DIR", data_dir.to_string_lossy().as_ref())
         .spawn()
         .map_err(|e| format!("spawn sidecar 失败（打包 exe 与依赖就绪？）: {e}"))?;
@@ -356,14 +355,10 @@ fn relay_stop(app: tauri::AppHandle) -> Result<(), String> {
 
 /// 重启 relay sidecar（GUI「重启服务」按钮）。
 ///
-/// `port`: 新的期望端口（None = 保持当前），0 = 随机端口。
+/// 端口由 relay 侧持久化（config.port），重启按持久化端口立即生效，无需壳传端口。
 /// 立即返回 `{"restarting": true}`，实际重启在后台线程执行，前端轮询 `relay_status` 感知就绪。
 #[tauri::command]
-async fn relay_restart(app: tauri::AppHandle, port: Option<u16>) -> Result<serde_json::Value, String> {
-    if let Some(p) = port {
-        app.state::<AppState>().requested_port.store(p, Ordering::SeqCst);
-        println!("[shell] 请求端口 -> {p}");
-    }
+async fn relay_restart(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let handle = app.clone();
     std::thread::spawn(move || {
         stop_sidecar(&handle);
@@ -409,7 +404,6 @@ pub fn run() {
             sidecar: Mutex::new(None),
             job: Mutex::new(None),
             ready: Mutex::new(None),
-            requested_port: AtomicU16::new(0),
             client: reqwest::Client::new(),
             tray: Mutex::new(None),
         })

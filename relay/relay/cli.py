@@ -1,8 +1,8 @@
-"""CLI 入口：`python -m relay run [--port 8786] [--api-base ...] [--api-key ...]`。
+"""CLI 入口：`python -m relay run [--port 3601] [--api-base ...] [--api-key ...]`。
 
 子命令：
-  run          启动 FastAPI relay 服务（默认 127.0.0.1:8786）
-               --port 0 随机端口；端口占用自动顺延；--api-key 设置并持久化 key
+  run          启动 FastAPI relay 服务（默认 127.0.0.1:3601）
+               --port 指定端口并持久化（不传则用上次保存的端口）；--api-key 设置并持久化 key
   login        触发登录（IM 静默优先，降级浏览器 PKCE 并自动打开），轮询至完成
   logout       清除本地登录态
   sync         同步模型目录（需已登录）
@@ -37,39 +37,23 @@ def _setup_logging(level: int = logging.INFO) -> None:
     )
 
 
-def _pick_port(host: str, port: int) -> int:
-    """端口分配（M4：sidecar 被 Tauri 壳 spawn 场景）。
-    - --port 0 → 随机空闲端口；
-    - 目标端口被占用 → 自动顺延到下一个空闲端口（最多探测 100 个）。
-    """
+def _check_port_available(host: str, port: int) -> None:
+    """固定端口预检：被占用直接抛错，不做随机/顺延，保证每次启动同一端口。"""
     import socket
 
     if port == 0:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, 0))
-            return int(s.getsockname()[1])
+        raise SystemExit("端口不能为 0（已移除随机端口功能，请在配置页设置固定端口）")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             s.bind((host, port))
-            return port
         except OSError:
-            pass
-    for p in range(port + 1, port + 100):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind((host, p))
-                return p
-            except OSError:
-                continue
-    return port  # 兜底：交给 uvicorn 抛错
+            raise SystemExit(f"端口 {port} 已被占用，请更换端口后重启") from None
 
 
 def _cmd_run(args) -> int:
     from relay.config import settings
-    from relay.storage import ensure_initialized
+    from relay.storage import ensure_initialized, get_port, save_port
 
-    if args.port is not None:
-        settings.relay_port = args.port
     if args.api_base is not None:
         settings.ta3_api_base = args.api_base
     if args.host is not None:
@@ -82,14 +66,20 @@ def _cmd_run(args) -> int:
     # 首次启动：生成并持久化 RELAY_API_KEY（agent 里填这个）
     asyncio.run(ensure_initialized())
 
+    # 端口：显式 --port 优先并持久化；否则用上次保存的端口（保证跨启动一致）
+    if args.port is not None:
+        settings.relay_port = args.port
+        asyncio.run(save_port(args.port))
+    else:
+        settings.relay_port = asyncio.run(get_port())
+
     # CLI 显式 --api-key：覆盖并持久化（GUI 配置页「生成/复制」等价物）
     if args.api_key is not None:
         from relay.storage import save_api_key
 
         asyncio.run(save_api_key(args.api_key))
 
-    # M4：端口冲突自动顺延 / --port 0 随机端口
-    settings.relay_port = _pick_port(settings.relay_host, settings.relay_port)
+    _check_port_available(settings.relay_host, settings.relay_port)
 
     import uvicorn
 
@@ -175,7 +165,7 @@ def main(argv=None) -> int:
 
     p_run = sub.add_parser("run", help="启动 relay 服务")
     p_run.add_argument("--host", help="监听地址（默认 RELAY_HOST / 127.0.0.1）")
-    p_run.add_argument("--port", type=int, help="监听端口（默认 RELAY_PORT / 8786）")
+    p_run.add_argument("--port", type=int, help="监听端口（默认 RELAY_PORT / 3601）")
     p_run.add_argument("--api-base", help="牛码 API 基址（默认 TA3_API_BASE）")
     p_run.add_argument("--tool-mode", choices=["hybrid", "strict", "passthrough"],
                        help="工具伪装模式（默认 TOOL_MODE / hybrid）")

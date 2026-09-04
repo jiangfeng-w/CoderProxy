@@ -26,7 +26,7 @@ def _env(name: str, default: str) -> str:
 class Settings:
     # 服务
     relay_host: str = "127.0.0.1"
-    relay_port: int = 8786
+    relay_port: int = 3601
     relay_api_key: str = ""
     # ta3
     ta3_api_base: str = "https://lc.yinhaiyun.com/newcoder"

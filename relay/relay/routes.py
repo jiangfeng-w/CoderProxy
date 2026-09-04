@@ -336,6 +336,12 @@ async def auth_config_update(request: Request):
             raise HTTPException(status_code=400, detail="model_whitelist 必须是数组")
         await storage.set_model_whitelist(model_whitelist)
 
+    port = body.get("port")
+    if port is not None:
+        if not isinstance(port, int) or not (1 <= port <= 65535):
+            raise HTTPException(status_code=400, detail="port 必须是 1-65535 的整数")
+        await storage.save_port(port)
+
     return await auth_config()
 
 

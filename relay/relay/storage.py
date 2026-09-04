@@ -143,6 +143,31 @@ async def regenerate_api_key() -> str:
         return key
 
 
+# ─────────────────────────── 监听端口（持久化）───────────────────────────
+
+DEFAULT_PORT = 3601
+
+
+async def get_port() -> int:
+    """持久化的监听端口；未设置时返回默认 3601。
+
+    GUI「配置页」改端口/重启均以本函数为准，确保每次启动同一个端口。
+    """
+    state = await _io(_load_state)
+    p = (state.get("config") or {}).get("port")
+    return p if isinstance(p, int) and 1 <= p <= 65535 else DEFAULT_PORT
+
+
+async def save_port(port: int) -> int:
+    """持久化监听端口（GUI 配置页写入）。"""
+    async with _asyncio_lock:
+        state = await _io(_load_state)
+        state.setdefault("config", {})["port"] = int(port)
+        await _io(_save_state, state)
+    settings.relay_port = int(port)
+    return int(port)
+
+
 # ─────────────────────────── 模型白名单（M4）───────────────────────────
 
 # 哨兵：白名单为 [DISABLE_ALL] 表示「全部禁用」（区别于 [] 的全部启用）。

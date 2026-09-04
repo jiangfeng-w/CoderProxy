@@ -117,35 +117,60 @@ def test_monitor_clear():
     assert [e["id"] for e in m.events()["events"]] == [1]
 
 
-# ─────────────────────────── cli：端口分配 ───────────────────────────
+# ─────────────────────────── cli：固定端口（持久化，无随机/顺延）───────────────────────────
 
-def test_pick_port_zero_random_free():
-    port = cli._pick_port("127.0.0.1", 0)
-    assert 0 < port < 65536
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", port))
+def test_check_port_available_no_op_raises():
+    with pytest.raises(SystemExit, match="0"):
+        cli._check_port_available("127.0.0.1", 0)
 
 
-def test_pick_port_conflict_switches():
+def test_check_port_available_free_passes():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    # 探测后释放，端口应可绑定；固定端口不引入随机/顺延
+    cli._check_port_available("127.0.0.1", port)
+
+
+def test_check_port_available_conflict_raises():
     blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     blocker.bind(("127.0.0.1", 0))
     blocker.listen(1)
     busy = blocker.getsockname()[1]
     try:
-        free = cli._pick_port("127.0.0.1", busy)
+        with pytest.raises(SystemExit, match="占用"):
+            cli._check_port_available("127.0.0.1", busy)
     finally:
         blocker.close()
-    assert free != busy
-    assert free > busy
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", free))
 
 
-def test_pick_port_free_keeps_same():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    assert cli._pick_port("127.0.0.1", port) == port
+# ─────────────────────────── storage：端口持久化 ───────────────────────────
+
+import pytest_asyncio
+
+
+@pytest_asyncio.fixture
+def port_storage(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage.settings, "data_dir", str(tmp_path))
+    return storage
+
+
+@pytest.mark.asyncio
+async def test_storage_port_default(port_storage):
+    assert await port_storage.get_port() == storage.DEFAULT_PORT
+
+
+@pytest.mark.asyncio
+async def test_storage_port_roundtrip(port_storage):
+    await port_storage.save_port(9090)
+    assert await port_storage.get_port() == 9090
+
+
+@pytest.mark.asyncio
+async def test_storage_port_invalid_falls_back(port_storage):
+    # 直接写非法值后，get_port 应回退默认（防御损坏状态）
+    await port_storage.save_port(0)
+    assert await port_storage.get_port() == storage.DEFAULT_PORT
 
 
 # ─────────────────────────── 工具伪装计数（M4 监控字段）───────────────────────────

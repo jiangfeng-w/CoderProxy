@@ -56,8 +56,8 @@ export async function relay(
 /** Tauri 壳命令。 */
 export const relayStatus = (): Promise<RelayStatus> => invoke("relay_status");
 export const relayStop = (): Promise<void> => invoke("relay_stop");
-export const relayRestart = (port?: number): Promise<{ restarting: boolean }> =>
-  invoke("relay_restart", { port: port ?? null });
+export const relayRestart = (): Promise<{ restarting: boolean }> =>
+  invoke("relay_restart");
 
 /** 托盘/关窗相关：隐藏主窗口或真正退出。 */
 export const windowHide = (): Promise<void> => invoke("window_hide");

@@ -48,21 +48,23 @@ async function onToolMode(mode: string) {
   }
 }
 
-const randomPort = ref(true);
-
 async function onApplyPort() {
-  if (randomPort.value) {
-    await relayRestart(0);
-    message.info("已按随机端口重启");
-  } else {
-    const p = config.value?.port;
-    if (!p || p < 1 || p > 65535) {
-      message.error("端口需在 1-65535 之间");
-      return;
-    }
-    await relayRestart(p);
-    message.info(`已按固定端口 ${p} 重启`);
+  const p = config.value?.port;
+  if (!p || p < 1 || p > 65535) {
+    message.error("端口需在 1-65535 之间");
+    return;
   }
+  // 1) 保存端口到 relay（持久化，跨重启一致）
+  try {
+    config.value = await updateConfig({ port: p });
+  } catch (e) {
+    message.error(`端口保存失败：${String(e)}`);
+    return;
+  }
+  message.info(`已保存端口 ${p}，重启生效`);
+  // 2) 重启 relay，按持久化端口立即生效
+  await relayRestart();
+  message.info(`已按固定端口 ${p} 重启`);
 }
 
 onMounted(load);
@@ -132,24 +134,19 @@ onMounted(load);
     <div class="card">
       <div class="card-title">服务端口</div>
       <div class="field">
-        <label class="lbl">relay 监听端口（修改后需重启生效）</label>
+        <label class="lbl">relay 监听端口（保存后重启生效，每次启动固定该端口）</label>
         <div class="row">
           <input
-            v-if="!randomPort"
             class="mono port-input"
             type="number"
             min="1"
             max="65535"
-            :value="config?.port ?? 0"
+            :value="config?.port ?? 3601"
             @input="config && (config.port = Number(($event.target as HTMLInputElement).value))"
           />
-          <span v-else class="mono port-static">随机（每次启动自动分配）</span>
-          <label class="switch-row">
-            <input type="checkbox" v-model="randomPort" />
-            <span>随机端口</span>
-          </label>
-          <button class="btn primary" @click="onApplyPort">应用并重启</button>
+          <button class="btn primary" @click="onApplyPort">保存并重启</button>
         </div>
+        <div class="hint warn">端口修改后保存到本地，重启即生效；占用时应用会提示更换端口。</div>
       </div>
     </div>
   </div>
