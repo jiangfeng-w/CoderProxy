@@ -61,10 +61,10 @@ async function onApplyPort() {
     message.error(`端口保存失败：${String(e)}`);
     return;
   }
-  message.info(`已保存端口 ${p}，重启生效`);
+  message.info(`已保存端口 ${p}`);
   // 2) 重启 relay，按持久化端口立即生效
   await relayRestart();
-  message.info(`已按固定端口 ${p} 重启`);
+  message.success(`已重启服务，监听端口 ${p}`);
 }
 
 onMounted(load);
@@ -154,9 +154,15 @@ onMounted(load);
             :value="config?.port ?? 3601"
             @input="config && (config.port = Number(($event.target as HTMLInputElement).value))"
           />
-          <button class="btn primary" @click="onApplyPort">保存并重启</button>
+          <button class="btn primary" @click="onApplyPort">保存</button>
         </div>
-        <div class="hint warn">端口修改后保存到本地，重启即生效；占用时应用会提示更换端口。</div>
+      </div>
+      <div class="field">
+        <label class="lbl">Agent 连接地址（在其它 Agent 中填写自定义模型时使用）</label>
+        <div class="row">
+          <input class="mono key-input" :value="config?.base_url ?? ''" readonly />
+          <button class="btn primary" @click="copyText(config?.base_url ?? '')">复制</button>
+        </div>
       </div>
     </div>
   </div>
