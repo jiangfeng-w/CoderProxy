@@ -1,0 +1,40 @@
+# 统一行尾：文本文件入库一律归一为 LF（覆盖各机器本地 core.autocrlf），
+# 消除跨机检出导致的"幻影改动"与仓库混行尾问题。
+* text=auto
+
+# 源码/文本：固定工作区行尾为 LF，任何平台、任何编辑器都不会再漂移
+*.py  text eol=lf
+*.rs  text eol=lf
+*.js  text eol=lf
+*.ts  text eol=lf
+*.vue text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.md  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh  text eol=lf
+
+# Windows 脚本：工作区保留 CRLF
+*.ps1  text eol=crlf
+*.psm1 text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# 二进制：禁止任何行尾转换，防止 git 改坏
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.icns binary
+*.exe  binary
+*.dll  binary
+*.pdf  binary
+*.zip  binary
+*.sqlite  binary
+*.sqlite3 binary
+*.db   binary
