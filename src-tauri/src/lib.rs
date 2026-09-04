@@ -13,6 +13,7 @@
 //! M5：sidecar 用 PyInstaller onefile exe（`binaries/relay-sidecar-<triple>.exe`），
 //! 数据目录固定为 `app_data_dir`（打包态 `__file__` 指向解包目录，不可落数据）。
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -200,17 +201,76 @@ fn spawn_sidecar(app: &tauri::AppHandle) -> Result<ReadyInfo, String> {
     spawn_with_port(app, state.inner())
 }
 
+/// 解析数据目录：优先 exe 旁 `data/` 子目录（便携/绿色），无写权限时回退 AppData。
+///
+/// 规则（M6）：
+/// - 首选 `<exe 所在目录>/data`：安装版装到用户可写目录即可持久化到安装子目录，
+///   便携版解压到哪都自带数据；
+/// - 装到 Program Files 等无写权限路径时，写入探测失败 → 回退 `%APPDATA%/com.coderproxy.desktop`。
+fn resolve_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // 候选 1：exe 旁的 data/ 子目录
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(base) = exe.parent() {
+            let candidate = base.join("data");
+            if writable_dir(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+    // 候选 2：AppData（回退）
+    let fallback = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("解析 app_data_dir 失败: {e}"))?;
+    std::fs::create_dir_all(&fallback).map_err(|e| format!("创建数据目录失败: {e}"))?;
+    Ok(fallback)
+}
+
+/// 探测目录是否可写：创建并尝试写入一个探针文件；成功删掉返回 true。
+fn writable_dir(dir: &Path) -> bool {
+    use std::io::Write as _;
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".write_probe");
+    match std::fs::File::create(&probe) {
+        Ok(mut f) => {
+            let ok = f.write_all(b"ok").is_ok();
+            let _ = std::fs::remove_file(&probe);
+            ok
+        }
+        Err(_) => false,
+    }
+}
+
+/// 首次切换数据目录时迁移旧数据：目标目录没有 relay_state.json 但 AppData 有则复制。
+///
+/// 仅在「选了 exe 旁 data/ 且它里面还没有状态文件」时触发，避免重复迁移与覆盖。
+fn migrate_legacy_data(app: &tauri::AppHandle, target: &Path) {
+    if !target.join("relay_state.json").exists() {
+        let legacy = match app.path().app_data_dir() {
+            Ok(d) => d.join("relay_state.json"),
+            Err(_) => return,
+        };
+        if legacy.exists() {
+            if let Err(e) = std::fs::copy(&legacy, target.join("relay_state.json")) {
+                eprintln!("[shell] 迁移旧数据失败: {e}");
+            } else {
+                println!("[shell] 已迁移旧数据 -> {}", target.display());
+            }
+        }
+    }
+}
+
 /// spawn 打包 sidecar 并等待 `[relay-ready]`；成功后 child/ready 写入 AppState。
 ///
 /// 端口由 relay 侧持久化（config.port，跨启动一致），壳不再传 `--port`，
 /// 只从 `[relay-ready]` 行解析实际端口供转发使用。
 fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo, String> {
-    // 数据目录：%APPDATA%/com.coderproxy.desktop（打包态不可用 exe 解包目录）
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("解析 app_data_dir 失败: {e}"))?;
-    std::fs::create_dir_all(&data_dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
+    // 数据目录：优先 exe 旁 data/；无写权限回退 %APPDATA%（M6）。
+    let data_dir = resolve_data_dir(app)?;
+    // 便携版首次切换：把 AppData 旧状态复制过来，保留登录态/白名单/端口
+    migrate_legacy_data(app, &data_dir);
 
     let (mut rx, child) = app
         .shell()
