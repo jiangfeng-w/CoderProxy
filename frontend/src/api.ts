@@ -75,9 +75,12 @@ export const getConfig = (): Promise<Config> => relay("GET", "/v1/auth/config");
 export const updateConfig = (patch: Record<string, unknown>): Promise<Config> =>
   relay("POST", "/v1/auth/config", patch);
 
-/** /v1/models */
-export const getModels = (): Promise<{ object: string; data: OaiModel[] }> =>
-  relay("GET", "/v1/models");
+/** /v1/models
+ * all=true 时请求完整目录（GUI 管理用，不受白名单过滤）；
+ * 默认 false 保持 OpenAI 兼容语义（只返回已启用模型）。
+ */
+export const getModels = (all = false): Promise<{ object: string; data: OaiModel[] }> =>
+  relay("GET", all ? "/v1/models?all=1" : "/v1/models");
 
 /** /v1/monitor/* */
 export const getStats = (): Promise<MonitorStats> => relay("GET", "/v1/monitor/stats");

@@ -72,21 +72,31 @@ onMounted(load);
 
 <template>
   <div>
-    <h2 class="page-title">配置</h2>
-
     <!-- 本地 API Key -->
     <div class="card">
       <div class="card-title">本地 API Key</div>
       <div class="field">
         <label class="lbl">静态鉴权密钥（Agent 连接 relay 用，Bearer）</label>
         <div class="row">
-          <input
-            class="mono key-input"
-            :type="showKey ? 'text' : 'password'"
-            :value="config?.api_key ?? ''"
-            readonly
-          />
-          <button class="btn ghost" @click="showKey = !showKey">{{ showKey ? "隐藏" : "显示" }}</button>
+          <div class="key-input-wrap">
+            <input
+              class="mono key-input"
+              :type="showKey ? 'text' : 'password'"
+              :value="config?.api_key ?? ''"
+              readonly
+            />
+            <button class="key-eye" @click="showKey = !showKey" :title="showKey ? '隐藏' : '显示'">
+              <svg v-if="showKey" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+                <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+                <line x1="1" y1="1" x2="23" y2="23"/>
+              </svg>
+              <svg v-else viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
           <button class="btn primary" @click="copyText(config?.api_key ?? '')">复制</button>
           <n-popconfirm
             positive-text="确认重置"
@@ -180,14 +190,34 @@ onMounted(load);
   gap: 8px;
   flex-wrap: wrap;
 }
+.key-input-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
 .key-input {
   width: 360px;
   background: var(--cp-panel-2);
   border: 1px solid var(--cp-border);
   border-radius: 6px;
   color: var(--cp-text);
-  padding: 7px 10px;
+  padding: 7px 36px 7px 10px;
   font-size: 13px;
+}
+.key-eye {
+  position: absolute;
+  right: 8px;
+  background: none;
+  border: none;
+  color: var(--cp-dim);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+.key-eye:hover {
+  color: var(--cp-cyan);
 }
 .port-input {
   width: 140px;

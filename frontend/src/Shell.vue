@@ -74,6 +74,11 @@ async function pollStatus() {
   if (store.auth.status === "logged_in" && lastAuthStatus !== "logged_in") {
     syncModels();
   }
+  // 登出：重置批量测试标记与模型可用状态，下次登录后重新测试
+  if (store.auth.status === "not_logged_in" && lastAuthStatus === "logged_in") {
+    store.batchTested = false;
+    Object.keys(store.modelStatus).forEach((k) => delete store.modelStatus[k]);
+  }
   lastAuthStatus = store.auth.status;
 }
 

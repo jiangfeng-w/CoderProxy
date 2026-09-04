@@ -1,8 +1,10 @@
 <script setup lang="ts">
-// 模型页：列表 + 搜索 + 白名单启用开关 + 全部启用/禁用。
+// 模型页：列表 + 搜索 + 白名单启用开关 + 全部启用/禁用 + 可用状态检测。
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useMessage } from "naive-ui";
-import { relay, getModels, getConfig, updateConfig, authSync, type OaiModel, type Config } from "../api";
+import { getModels, getConfig, updateConfig, authSync, type OaiModel, type Config } from "../api";
+import { store } from "../store";
+import { testModel, batchTestAll } from "../modelCheck";
 
 const message = useMessage();
 const DISABLE_ALL = "__none__";
@@ -13,6 +15,11 @@ const search = ref("");
 const syncing = ref(false);
 const testing = ref<string | null>(null);
 let timer: number | undefined;
+
+/** 从全局 store 读取模型状态 */
+function getStatus(id: string): string {
+  return store.modelStatus[id] ?? "";
+}
 
 const wl = computed(() => config.value?.model_whitelist ?? []);
 
@@ -41,20 +48,29 @@ async function saveWl(next: string[]) {
   }
 }
 
+/** 启用开关：先测试连通性，失败则保持关闭。 */
 async function onToggle(id: string, on: boolean) {
+  if (on) {
+    // 先测试连通性
+    store.modelStatus[id] = "testing";
+    const ok = await testModel(id);
+    store.modelStatus[id] = ok ? "available" : "unavailable";
+    if (!ok) {
+      message.error(`模型 ${id} 连接失败，保持关闭`);
+      return;
+    }
+  }
   const w = wl.value;
   let next: string[];
   if (on) {
-    // 启用：从「全部禁用」或已有白名单里加回
-    if (w.length === 0) return; // 已全部启用
+    if (w.length === 0) return;
     if (w.length === 1 && w[0] === DISABLE_ALL) next = [id];
     else next = w.includes(id) ? w : [...w, id];
   } else {
-    // 禁用
     if (w.length === 0) {
       next = models.value.map((m) => m.id).filter((x) => x !== id);
     } else if (w.length === 1 && w[0] === DISABLE_ALL) {
-      return; // 已全部禁用
+      return;
     } else {
       next = w.filter((x) => x !== id);
       if (next.length === 0) next = [DISABLE_ALL];
@@ -72,14 +88,19 @@ async function onAllDisable() {
   message.success("已全部禁用");
 }
 
-/** 同步模型目录并刷新列表（需已登录）。 */
+/** 同步模型目录并刷新列表，然后顺序测试所有模型可用性。 */
 async function onSync() {
   if (syncing.value) return;
   syncing.value = true;
   try {
     const res = await authSync();
     message.success(`同步完成：${res.models.length} 个模型`);
-    models.value = (await getModels()).data;
+    models.value = (await getModels(true)).data;
+    // 同步完成后顺序测试所有模型（失败自动关闭启用开关）
+    const failed = await batchTestAll(models.value);
+    if (failed.length > 0) {
+      message.warning(`${failed.length} 个模型连接失败，已自动关闭启用`);
+    }
   } catch (e) {
     message.error(String(e));
   } finally {
@@ -97,20 +118,25 @@ async function onCopy(id: string) {
   }
 }
 
-/** 向模型发一条 Hi! 测试连通性（走 /v1/chat/completions，自动带工具伪装链路）。 */
+/** 手动测试单个模型连通性。失败时自动关闭启用开关。 */
 async function onTest(id: string) {
   if (testing.value) return;
   testing.value = id;
+  store.modelStatus[id] = "testing";
   try {
-    const res = await relay("POST", "/v1/chat/completions", {
-      model: id,
-      messages: [{ role: "user", content: "Hi!" }],
-      stream: false,
-    });
-    const content = res?.choices?.[0]?.message?.content ?? "";
-    message.success(`连通成功：${String(content).slice(0, 80)}`);
-  } catch (e) {
-    message.error(`连接失败：${String(e)}`);
+    const ok = await testModel(id);
+    store.modelStatus[id] = ok ? "available" : "unavailable";
+    if (ok) {
+      message.success(`模型 ${id} 连通`);
+    } else {
+      message.error(`模型 ${id} 连接失败，已关闭`);
+      // 测试失败时自动关闭启用开关
+      const w = wl.value;
+      if (w.length > 0 && w.includes(id)) {
+        const next = w.filter((x) => x !== id);
+        await saveWl(next.length === 0 ? [DISABLE_ALL] : next);
+      }
+    }
   } finally {
     testing.value = null;
   }
@@ -118,7 +144,8 @@ async function onTest(id: string) {
 
 async function load() {
   try {
-    models.value = (await getModels()).data;
+    // GUI 用完整目录（all=1），失败模型仍需可见，不能按白名单过滤隐藏
+    models.value = (await getModels(true)).data;
   } catch (e) {
     message.error(String(e));
   }
@@ -141,8 +168,6 @@ onUnmounted(() => clearInterval(timer));
 
 <template>
   <div>
-    <h2 class="page-title">模型</h2>
-
     <div class="card">
       <div class="toolbar">
         <input
@@ -163,13 +188,20 @@ onUnmounted(() => clearInterval(timer));
         <thead>
           <tr>
             <th>模型名</th>
-            <th class="r">启用</th>
-            <th class="r">测试</th>
+            <th class="r col-status">状态</th>
+            <th class="r col-toggle">启用</th>
+            <th class="r col-test">测试</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="m in filtered" :key="m.id">
             <td class="mono copyable" title="点击复制模型名" @click="onCopy(m.id)">{{ m.id }}</td>
+            <td class="r">
+              <span v-if="getStatus(m.id) === 'available'" class="cp-tag green">可用</span>
+              <span v-else-if="getStatus(m.id) === 'testing'" class="cp-tag gray">检测中</span>
+              <span v-else-if="getStatus(m.id) === 'unavailable'" class="cp-tag red">不可用</span>
+              <span v-else class="cp-tag gray">未检测</span>
+            </td>
             <td class="r">
               <label class="switch">
                 <input
@@ -334,5 +366,33 @@ onUnmounted(() => clearInterval(timer));
 .switch input:checked + .slider::before {
   transform: translateX(16px);
   background: #04121a;
+}
+.cp-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.cp-tag.green {
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--cp-green);
+}
+.cp-tag.red {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--cp-red);
+}
+.cp-tag.gray {
+  background: rgba(100, 116, 139, 0.2);
+  color: var(--cp-dim);
+}
+.col-status {
+  width: 120px;
+}
+.col-toggle {
+  width: 60px;
+}
+.col-test {
+  width: 120px;
 }
 </style>

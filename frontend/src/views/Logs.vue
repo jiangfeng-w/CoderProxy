@@ -99,8 +99,6 @@ onUnmounted(() => clearInterval(timer));
 
 <template>
   <div>
-    <h2 class="page-title">日志</h2>
-
     <div class="card">
       <div class="toolbar">
         <div class="filters">

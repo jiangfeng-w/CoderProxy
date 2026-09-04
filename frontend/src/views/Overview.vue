@@ -1,9 +1,12 @@
 <script setup lang="ts">
-// 总览页：快速指标 + 工具映射 + 服务概要 + 模型/事件速览。
+// 总览页：快速指标 + 工具映射 + 模型/事件速览。
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import { useMessage } from "naive-ui";
 import { getStats, getConfig, getModels, getEvents, type MonitorStats, type OaiModel } from "../api";
 import { store } from "../store";
+import { batchTestAll } from "../modelCheck";
 
+const message = useMessage();
 const stats = ref<MonitorStats>({});
 const config = ref<{ tool_mode: string; port: number; model_whitelist: string[] } | null>(null);
 const models = ref<OaiModel[]>([]);
@@ -20,12 +23,12 @@ const drop = computed(() => n("tool_dropped"));
 const toolTotal = computed(() => hit.value + longtail.value + drop.value || 1);
 const pct = (v: number) => Math.round((v / toolTotal.value) * 1000) / 10;
 
-const enabledCount = computed(() => {
+function isEnabled(id: string): boolean {
   const wl = config.value?.model_whitelist ?? [];
-  if (wl.length === 0) return models.value.length;
-  if (wl.length === 1 && wl[0] === "__none__") return 0;
-  return wl.filter((id) => models.value.some((m) => m.id === id)).length;
-});
+  if (wl.length === 0) return true;
+  if (wl.length === 1 && wl[0] === "__none__") return false;
+  return wl.includes(id);
+}
 
 let timer: number | undefined;
 let configTimer: number | undefined;
@@ -48,7 +51,17 @@ async function loadConfig() {
 }
 async function loadModels() {
   try {
-    models.value = (await getModels()).data;
+    // GUI 用完整目录（all=1），不受白名单过滤，失败模型仍需可见以便重新启用
+    models.value = (await getModels(true)).data;
+    // 登录后首次：模型同步完成后顺序测试一轮（会话内只测一次，跨页面挂载保持）
+    if (!store.batchTested && models.value.length > 0) {
+      store.batchTested = true;
+      batchTestAll(models.value).then((failed) => {
+        if (failed.length > 0) {
+          message.warning(`${failed.length} 个模型连接失败，已自动关闭启用`);
+        }
+      });
+    }
   } catch (e) {
     console.error("[overview] loadModels", e);
   }
@@ -58,6 +71,16 @@ async function loadRecent() {
     recentEvents.value = (await getEvents(0, 8)).events;
   } catch (e) {
     console.error("[overview] loadRecent", e);
+  }
+}
+
+/** 点击模型名复制到剪贴板。 */
+async function onCopy(id: string) {
+  try {
+    await navigator.clipboard.writeText(id);
+    message.success(`已复制：${id}`);
+  } catch (e) {
+    message.error(`复制失败：${String(e)}`);
   }
 }
 
@@ -97,6 +120,7 @@ onMounted(() => {
   modelTimer = window.setInterval(loadModels, 5000);
   eventTimer = window.setInterval(loadRecent, 3000);
 });
+
 onUnmounted(() => {
   clearInterval(timer);
   clearInterval(configTimer);
@@ -107,8 +131,6 @@ onUnmounted(() => {
 
 <template>
   <div>
-    <h2 class="page-title">中转概览</h2>
-
     <!-- 合规警示（M5：开发计划 §10 风险 1） -->
     <div class="warn-banner">
       <span class="warn-icon">⚠</span>
@@ -117,18 +139,7 @@ onUnmounted(() => {
       </span>
     </div>
 
-    <!-- 服务概要 -->
-    <div class="card">
-      <div class="card-title">服务概要</div>
-      <div class="kv-row">
-        <span class="kv"><span class="k">运行状态</span><span class="v"><span class="dot" :class="store.relay.running ? 'ok' : 'off'" />{{ store.relay.running ? "运行中" : "已停止" }}</span></span>
-        <span class="kv"><span class="k">监听端口</span><span class="v mono">{{ store.relay.port || "—" }}</span></span>
-        <span class="kv"><span class="k">工具模式</span><span class="v">{{ store.relay.tool_mode }}</span></span>
-        <span class="kv"><span class="k">模型白名单</span><span class="v mono">{{ enabledCount }}/{{ models.length }}</span></span>
-      </div>
-    </div>
-
-    <div class="grid2">
+    <div class="grid2-fixed">
       <!-- 快速指标 -->
       <div class="card">
         <div class="card-title">快速指标</div>
@@ -185,15 +196,17 @@ onUnmounted(() => {
         <div v-if="models.length === 0" class="empty">暂无模型，请先登录并同步</div>
         <table v-else class="tbl">
           <thead>
-            <tr><th>模型名</th><th>显示名</th><th class="r">状态</th></tr>
+            <tr><th>模型名</th><th class="r">状态</th></tr>
           </thead>
           <tbody>
             <tr v-for="m in models.slice(0, 6)" :key="m.id">
-              <td class="mono">{{ m.id }}</td>
-              <td class="dim">{{ m.name || "—" }}</td>
+              <td class="mono copyable" title="点击复制模型名" @click="onCopy(m.id)">{{ m.id }}</td>
               <td class="r">
-                <span v-if="enabledCount === 0" class="cp-tag red">禁用</span>
-                <span v-else class="cp-tag green">启用</span>
+                <span v-if="store.modelStatus[m.id] === 'available' && isEnabled(m.id)" class="cp-tag green">可用</span>
+                <span v-else-if="store.modelStatus[m.id] === 'testing'" class="cp-tag gray">检测中</span>
+                <span v-else-if="store.modelStatus[m.id] === 'unavailable'" class="cp-tag red">不可用</span>
+                <span v-else-if="!isEnabled(m.id)" class="cp-tag gray">已禁用</span>
+                <span v-else class="cp-tag gray">未检测</span>
               </td>
             </tr>
           </tbody>
@@ -273,6 +286,16 @@ onUnmounted(() => {
   text-decoration: none;
 }
 .grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+@media (max-width: 1200px) {
+  .grid2 {
+    grid-template-columns: 1fr;
+  }
+}
+.grid2-fixed {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 14px;
@@ -385,5 +408,32 @@ onUnmounted(() => {
   color: var(--cp-dim);
   padding: 20px 0;
   text-align: center;
+}
+.copyable {
+  cursor: pointer;
+  user-select: text;
+  transition: color 0.15s;
+}
+.copyable:hover {
+  color: var(--cp-cyan);
+}
+.cp-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.cp-tag.green {
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--cp-green);
+}
+.cp-tag.red {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--cp-red);
+}
+.cp-tag.gray {
+  background: rgba(100, 116, 139, 0.2);
+  color: var(--cp-dim);
 }
 </style>

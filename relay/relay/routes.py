@@ -163,8 +163,14 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
 # ─────────────────────────── OpenAI /v1 ───────────────────────────
 
 @app.get("/v1/models", dependencies=[Depends(require_api_key)])
-async def list_models():
+async def list_models(all: bool = False):
+    """模型目录。默认按白名单过滤（OpenAI 兼容语义）；all=1 返回完整目录（GUI 管理用）。"""
     models = await storage.load_models()
+    if all:
+        return {
+            "object": "list",
+            "data": [oai_adapter.model_to_openai(m) for m in models],
+        }
     wl = await storage.get_model_whitelist()
     if wl == [storage.DISABLE_ALL]:
         data = []
