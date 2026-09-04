@@ -81,6 +81,7 @@ def build_provider(model: dict, model_name: str,
         args_to_ta3=ctx.args_to_ta3 if ctx else None,
         args_from_ta3=ctx.args_from_ta3 if ctx else None,
         tools_pre_disguised=bool(ctx),
+        passthrough_names=ctx.passthrough_names if ctx else None,
     )
 
 

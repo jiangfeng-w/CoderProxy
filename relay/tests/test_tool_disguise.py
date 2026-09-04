@@ -29,6 +29,7 @@ def _provider(ctx: tool_disguise.DisguiseContext, *, model="glm-5.3-flash", meta
         args_to_ta3=ctx.args_to_ta3,
         args_from_ta3=ctx.args_from_ta3,
         tools_pre_disguised=ctx.tools_pre_disguised,
+        passthrough_names=ctx.passthrough_names,
     )
 
 
@@ -121,6 +122,38 @@ def test_passthrough_restore_keeps_name():
     p = _provider(ctx)
     out = p._restore_tool_calls([{"id": "c1", "name": "bash", "arguments": '{"command": "x"}'}])
     assert out[0]["name"] == "bash"
+
+
+def test_restore_hybrid_native_name_passthrough_not_mismapped():
+    """回归：hybrid 下 agent 直接用 ta3 原生英文名（Read/Edit）长尾透传，模型返回
+    同名工具调用时不可被 FROM_TA3 误还原成 fs_read（否则 agent 收到不认识的工具，
+    「调用工具直接停」）。"""
+    tools = [_tool("Read"), _tool("Edit")]
+    ctx = tool_disguise.build_disguise_context(tools, "hybrid")
+    # 长尾透传：出站保留原名 schema
+    assert [t["function"]["name"] for t in ctx.outbound_tools] == ["Read", "Edit"]
+    assert "Read" in ctx.passthrough_names
+    p = _provider(ctx)
+    out = p._restore_tool_calls([
+        {"id": "c1", "name": "Read", "arguments": '{"file_path": "a.py"}'},
+        {"id": "c2", "name": "Edit", "arguments": '{"file_path": "a.py"}'},
+    ])
+    # 名字不被误映射成 fs_read / editor_apply_diff，参数也原样保留
+    assert [t["name"] for t in out] == ["Read", "Edit"]
+    assert out[0]["arguments"] == {"file_path": "a.py"}
+    assert out[1]["arguments"] == {"file_path": "a.py"}
+
+
+def test_history_hybrid_native_name_passthrough_kept():
+    """回归：hybrid 透传工具的历史 tool_calls 多轮回传时原名保留（不降级成文本）。"""
+    tools = [_tool("Read")]
+    ctx = tool_disguise.build_disguise_context(tools, "hybrid")
+    p = _provider(ctx)
+    out = p._disguise_message(ChatMessage(role="assistant", content="",
+        tool_calls=[{"id": "c1", "name": "Read", "arguments": {"file_path": "a.py"}}]))
+    assert "tool_calls" in out
+    assert out["tool_calls"][0]["function"]["name"] == "Read"
+    assert json.loads(out["tool_calls"][0]["function"]["arguments"]) == {"file_path": "a.py"}
 
 
 # ─────────────────────────── 历史消息伪装 ───────────────────────────

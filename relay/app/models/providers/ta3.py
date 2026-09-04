@@ -84,13 +84,17 @@ class Ta3Provider(ModelProvider):
     def __init__(self, *, api_key: str, base_url: str, model: str, meta: dict | None = None,
                  tool_mode: str = "strict", disguise_map: dict | None = None,
                  restore_map: dict | None = None, args_to_ta3: dict | None = None,
-                 args_from_ta3: dict | None = None, tools_pre_disguised: bool = False):
+                 args_from_ta3: dict | None = None, tools_pre_disguised: bool = False,
+                 passthrough_names: set | None = None):
         """M3 工具伪装参数（默认与 M2 完全一致，仅 relay 传入时启用）：
         - tool_mode: strict|hybrid|passthrough，控制历史消息伪装与入站还原策略；
         - disguise_map / restore_map / args_to_ta3 / args_from_ta3：请求级双向映射表
           （relay/tool_disguise.py 产出），缺省回退 vendored 表；
         - tools_pre_disguised: relay 已按模式编排出站 tools schema，原样透传不再
-          disguise_tools（避免 ta3 名被二次处理丢弃）。
+          disguise_tools（避免 ta3 名被二次处理丢弃）；
+        - passthrough_names: 长尾透传工具名集合（agent 原名 == 模型暴露名，如 TRAE
+          的 Read/Edit）。入站/历史还原时这些名字原样保留，不能走 FROM_TA3 反向映射
+          或未映射降级，否则工具调用断流。
         """
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -105,6 +109,7 @@ class Ta3Provider(ModelProvider):
         self._args_to_ta3 = args_to_ta3 if args_to_ta3 is not None else ARGS_TO_TA3
         self._args_from_ta3 = args_from_ta3 if args_from_ta3 is not None else ARGS_FROM_TA3
         self._tools_pre_disguised = tools_pre_disguised
+        self._passthrough_names = set(passthrough_names or ())
         self._ua = getattr(settings, "ta3_user_agent", "") or _DEFAULT_TA3_UA
         # v28: SSE 空闲超时改读配置——kimi-k3/grok-4.6 长思考时 30s 硬编码会误杀流
         self._stream_idle_timeout = float(getattr(settings, "ta3_stream_idle_timeout", 300) or 300)
@@ -196,10 +201,26 @@ class Ta3Provider(ModelProvider):
         return out
 
     def _restore_name(self, name: str) -> str:
-        """入站：ta3 名 → agent 真实名；passthrough 或未知名原样保留。"""
+        """入站：ta3 名 → agent 真实名；passthrough / 长尾透传原样保留。
+
+        修复「调用工具直接停」根因：hybrid 下 agent 直接用的 ta3 原生英文名
+        （如 TRAE 的 Read/Edit/Write）走长尾透传，模型返回同名工具调用。它们
+        在请求级 restore_map 之外，若继续走 FROM_TA3 兜底会被误映射成 fs_read 等
+        无关工具，agent 收到不认识的工具名导致工具调用断流。故透传工具一律原样保留。
+        """
         if self._tool_mode == "passthrough":
             return name
-        return self._restore_map.get(name) or FROM_TA3.get(name) or name
+        if name in self._passthrough_names:
+            return name
+        mapped = self._restore_map.get(name)
+        if mapped is not None:
+            return mapped
+        if self._tools_pre_disguised:
+            # relay 预伪装：restore_map 之外的 ta3 名即长尾透传工具，原样保留
+            return name
+        # 直接构造（未预伪装）：restore_map 缺省即 FROM_TA3，上面已命中；
+        # 此处仅兜底 restore_map 未覆盖的未知 ta3 名
+        return FROM_TA3.get(name) or name
 
     def _restore_args(self, ta3_name: str, args: dict) -> dict:
         """入站：ta3 参数 → agent 参数（按请求级映射表）。"""
@@ -260,6 +281,16 @@ class Ta3Provider(ModelProvider):
                         continue
                     alias = self._disguise_map.get(name)
                     if alias is None:
+                        if name in self._passthrough_names:
+                            # 长尾透传工具（如 TRAE 的 Read/Edit）：原名原样回传，
+                            # ta3 侧本来就以该名暴露，不能降级成文本（否则多轮断流）
+                            tc_list.append({
+                                "id": str(tc.get("id") or f"call_{len(tc_list):02d}"),
+                                "type": "function",
+                                "function": {"name": name,
+                                             "arguments": json.dumps(args, ensure_ascii=False)},
+                            })
+                            continue
                         # 未映射的历史调用（如 apply_patch / 长尾）→ 转普通文本，避免协议断裂
                         out.pop("tool_calls", None)
                         out["content"] = (m.content or "") + (
@@ -474,6 +505,15 @@ class Ta3Provider(ModelProvider):
                             continue
                         alias = self._disguise_map.get(name)
                         if alias is None:
+                            if name in self._passthrough_names:
+                                # 长尾透传工具：原名原样回传（对齐 OpenAI 侧，避免多轮断流）
+                                blocks.append({
+                                    "type": "tool_use",
+                                    "id": str(tc.get("id") or ""),
+                                    "name": name,
+                                    "input": args,
+                                })
+                                continue
                             # 未映射历史调用 → 文本占位（对齐 OpenAI 侧降级，避免协议断裂）
                             blocks.append({"type": "text",
                                            "text": f"（历史工具调用 {name} 在当前环境不可用，结果已略）"})

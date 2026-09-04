@@ -89,6 +89,9 @@ class DisguiseContext:
     outbound_tools: list[dict]  # 发给牛码的最终 tools schema（已重命名/顶替/透传）
     disguise_map: dict[str, str] = field(default_factory=dict)   # agent 名 → ta3 名（历史重命名）
     restore_map: dict[str, str] = field(default_factory=dict)    # ta3 名 → agent 名（请求级精确还原）
+    # 长尾透传工具名集合（agent 原名 == 模型暴露名，如 TRAE 直接用的 Read/Edit）。
+    # 入站/历史还原时必须原样保留，否则会被 FROM_TA3 / 未映射降级误伤 → 工具调用断流。
+    passthrough_names: set[str] = field(default_factory=set)
     args_to_ta3: dict[str, dict[str, str | None]] = field(default_factory=dict)
     args_from_ta3: dict[str, dict[str, str | None]] = field(default_factory=dict)
     tools_pre_disguised: bool = True
@@ -113,6 +116,9 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
     if mode == MODE_PASSTHROUGH:
         # 原样透传：不重命名/不降级/不还原（provider 的 passthrough 分支接管）
         return DisguiseContext(mode=mode, outbound_tools=tools,
+                               passthrough_names={s.get("function", {}).get("name") or ""
+                                                  for s in tools
+                                                  if s.get("function", {}).get("name")},
                                tool_longtail_passthrough=len(tools))
 
     disguise_map = {**TO_TA3, **EXT_TO_TA3}
@@ -120,6 +126,7 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
     args_from = {**ARGS_FROM_TA3}  # 基础：vendored ta3→agent；下面按请求覆盖
     outbound: list[dict] = []
     restore_map: dict[str, str] = {}
+    passthrough_names: set[str] = set()
     map_hits = 0
     longtail = 0
     dropped = 0
@@ -136,6 +143,7 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
                 continue
             longtail += 1
             outbound.append(schema)
+            passthrough_names.add(agent_name)
             continue
         native = TA3_NATIVE_SCHEMAS.get(alias)
         if native is None:
@@ -145,6 +153,7 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
                 continue
             longtail += 1
             outbound.append(schema)
+            passthrough_names.add(agent_name)
             continue
         map_hits += 1
         restore_map[alias] = agent_name  # 请求级：入站按 agent 实际名精确还原
@@ -161,6 +170,7 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
         outbound_tools=outbound,
         disguise_map=disguise_map,
         restore_map=restore_map,
+        passthrough_names=passthrough_names,
         args_to_ta3=args_to,
         args_from_ta3=args_from,
         tool_map_hits=map_hits,
