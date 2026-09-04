@@ -400,7 +400,7 @@ fn stop_sidecar(app: &tauri::AppHandle) {
 
 // ─────────────────────────── tauri 命令 ───────────────────────────
 
-/// 通用代理：GUI → Rust → relay（仅放行 /v1/*，GET/POST）。
+/// 通用代理：GUI → Rust → relay（仅放行 /v1/*，GET/POST/DELETE；DELETE 供 /v1/logs 清空，M7）。
 #[tauri::command]
 async fn relay(
     state: State<'_, AppState>,
@@ -421,6 +421,7 @@ async fn relay(
     let method = match method.to_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
         "POST" => reqwest::Method::POST,
+        "DELETE" => reqwest::Method::DELETE,
         _ => return Err("不支持的请求方式".to_string()),
     };
     let url = format!("http://127.0.0.1:{}{path}", ready.port);

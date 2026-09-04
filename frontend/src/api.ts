@@ -44,9 +44,9 @@ export interface MonitorEvent {
 
 export type MonitorStats = Record<string, number>;
 
-/** 通用中继：只放行 /v1/*，仅 GET/POST。 */
+/** 通用中继：只放行 /v1/*，支持 GET/POST/DELETE。 */
 export async function relay(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   body?: Record<string, unknown>
 ): Promise<any> {
@@ -96,3 +96,65 @@ export { openUrl };
 export function openAuthorizeUrl(url: string): void {
   void openUrl(url);
 }
+
+// ─────────────────────────── /v1/logs（M7：SQLite 持久化历史日志）───────────────────────────
+
+/** M6 落库行：detail 为 JSON 兜底（chat_error 的 error、chat_request 的 tools 等）。 */
+export interface LogRow {
+  id: number;
+  ts: string;
+  kind: string;
+  model?: string | null;
+  stream?: number | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  cached_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  total_tokens?: number | null;
+  duration_ms?: number | null;
+  detail?: Record<string, unknown> | string | null;
+}
+
+export interface LogsResult {
+  rows: LogRow[];
+  total: number;
+  kinds: string[];
+  models: string[];
+}
+
+export interface LogsQuery {
+  limit?: number;
+  offset?: number;
+  kind?: string;
+  model?: string;
+  timeFrom?: string; // UTC ISO；由筛选控件（本地时间）转换后传入
+  timeTo?: string;
+}
+
+function logsQueryString(q: LogsQuery): string {
+  const p = new URLSearchParams();
+  if (q.limit !== undefined) p.set("limit", String(q.limit));
+  if (q.offset !== undefined) p.set("offset", String(q.offset));
+  if (q.kind) p.set("kind", q.kind);
+  if (q.model) p.set("model", q.model);
+  if (q.timeFrom) p.set("time_from", q.timeFrom);
+  if (q.timeTo) p.set("time_to", q.timeTo);
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
+
+/** 分页 + 多条件筛选；rows 按 id 倒序（最新在前）。 */
+export const fetchLogs = (q: LogsQuery = {}): Promise<LogsResult> =>
+  relay("GET", `/v1/logs${logsQueryString(q)}`);
+
+/** 类型 distinct（筛选项下拉）。 */
+export const fetchLogKinds = (): Promise<{ kinds: string[] }> =>
+  relay("GET", "/v1/logs/kinds");
+
+/** 模型 distinct（筛选项下拉）。 */
+export const fetchLogModels = (): Promise<{ models: string[] }> =>
+  relay("GET", "/v1/logs/models");
+
+/** 按条件清空（无参数 = 全清）。 */
+export const deleteLogs = (q: LogsQuery = {}): Promise<{ status: string; deleted: number }> =>
+  relay("DELETE", `/v1/logs${logsQueryString(q)}`);
