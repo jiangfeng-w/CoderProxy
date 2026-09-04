@@ -17,6 +17,7 @@
 - GET    /v1/logs/kinds           日志类型 distinct（筛选项）
 - GET    /v1/logs/models          日志模型 distinct（筛选项）
 - DELETE /v1/logs                 按条件清空（无参数 = 全清）
+- GET    /v1/stats                按维度聚合 token/请求数（M8 统计页）
 
 聊天流程：
 1. 解析 OpenAI 请求 → ChatRequest
@@ -431,6 +432,28 @@ async def monitor_clear():
 
 
 # ─────────────────────────── /v1/logs/*（M6 数据底座：SQLite 持久化日志）───────────────────────────
+
+_STATS_GROUP_BY = {"model", "kind", "day", "hour"}
+
+
+@app.get("/v1/stats", dependencies=[Depends(require_api_key)])
+async def logs_stats(group_by: str, model: str | None = None, kind: str | None = None,
+                     time_from: str | None = None, time_to: str | None = None):
+    """按维度聚合 token/请求数（M8 统计页）。
+
+    - group_by（必填）：model | kind | day | hour。
+    - model / kind / time_from / time_to：与 /v1/logs 同口径的过滤（可组合）。
+    - 返回 { rows, total }；rows 每组一个 key + 汇总字段，total 为未分组总量。
+    """
+    if group_by not in _STATS_GROUP_BY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"group_by 必须是 {', '.join(sorted(_STATS_GROUP_BY))} 之一")
+    rows, total = await db.query_stats(
+        group_by=group_by, model=model, kind=kind,
+        time_from=time_from, time_to=time_to)
+    return {"rows": rows, "total": total}
+
 
 @app.get("/v1/logs", dependencies=[Depends(require_api_key)])
 async def logs_list(limit: int = 50, offset: int = 0, kind: str | None = None,

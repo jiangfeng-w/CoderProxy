@@ -287,3 +287,74 @@ async def prune(max_rows: int | None = None) -> int:
     """滚动删除最旧行至上限内；max_rows 缺省用 settings.relay_log_max_rows。"""
     return await asyncio.to_thread(
         _prune_sync, max_rows if max_rows is not None else settings.relay_log_max_rows)
+
+
+# ─────────────────────────── 聚合统计（M8 /v1/stats）───────────────────────────
+
+# 各维度分组表达式：day/hour 用 strftime 从 ts 切片；ts 落库为 UTC ISO8601，
+# 展示/聚合按**本机时区**转本地（datetime(...,'localtime')），保证统计页时间与用户一致。
+# model/kind 用独立列。全部包 COALESCE 兜 NULL（model/kind 允许为空、异常 ts 的 strftime 可能为 NULL）。
+_STATS_GROUP_EXPR: dict[str, str] = {
+    "model": "COALESCE(model, '')",
+    "kind": "COALESCE(kind, '')",
+    "day": "COALESCE(strftime('%Y-%m-%d', datetime(ts, 'localtime')), '')",
+    "hour": "COALESCE(strftime('%Y-%m-%d %H:00', datetime(ts, 'localtime')), '')",
+}
+
+# 聚合 SELECT 片段（rows 与 total 共用；SUM 用 COALESCE 避免 NULL 参与求和）
+_STATS_AGG_SELECT = (
+    "COUNT(*) AS requests,"
+    " SUM(CASE WHEN kind='chat_done' THEN 1 ELSE 0 END) AS success,"
+    " SUM(CASE WHEN kind='chat_error' THEN 1 ELSE 0 END) AS failed,"
+    " SUM(COALESCE(prompt_tokens, 0)) AS prompt_tokens,"
+    " SUM(COALESCE(completion_tokens, 0)) AS completion_tokens,"
+    " SUM(COALESCE(cached_tokens, 0)) AS cached_tokens,"
+    " SUM(COALESCE(reasoning_tokens, 0)) AS reasoning_tokens,"
+    " SUM(COALESCE(total_tokens, 0)) AS total_tokens"
+)
+
+
+def _stats_sync(group_by: str, model: str | None = None, kind: str | None = None,
+                time_from: str | None = None, time_to: str | None = None,
+                ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """按维度聚合 token 与请求数；返回 (rows, total)。
+
+    - rows：`GROUP BY <维度>` 后每组的 key 与各汇总字段，按 key 排序（ISO 时间/文本自然序）。
+    - total：在同样 WHERE 过滤下、不分组的总量（供前端指标卡合计）。
+    - 统计口径与时序检索一致：只针对 M6 独立列，`detail` JSON 不参与聚合。
+    """
+    _schema_sync()
+    if group_by not in _STATS_GROUP_EXPR:
+        raise ValueError(f"未知的聚合维度: {group_by}")
+    expr = _STATS_GROUP_EXPR[group_by]
+
+    where, params = _where_clause(kind=kind, model=model,
+                                  time_from=time_from, time_to=time_to)
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"SELECT {expr} AS key,{_STATS_AGG_SELECT} "
+            f"FROM {_LOG_TABLE}{where} GROUP BY {expr} ORDER BY key",
+            params).fetchall()
+        total_row = conn.execute(
+            f"SELECT {_STATS_AGG_SELECT} FROM {_LOG_TABLE}{where}",
+            params).fetchone()
+        row_list = [dict(r) for r in rows]
+        # 聚合查询总存在 1 行；空表（或 WHERE 无命中）时 SUM 为 NULL，COUNT(*) 为 0，
+        # 故统一把数值列 None 归 0，保证前端 total 口径稳定。
+        _raw = dict(total_row) if total_row is not None else {}
+        _zero = {"requests": 0, "success": 0, "failed": 0,
+                 "prompt_tokens": 0, "completion_tokens": 0,
+                 "cached_tokens": 0, "reasoning_tokens": 0, "total_tokens": 0}
+        total_dict = {k: (0 if _raw.get(k) is None else int(_raw[k])) for k in _zero}
+        return row_list, total_dict
+    finally:
+        conn.close()
+
+
+async def query_stats(group_by: str, model: str | None = None, kind: str | None = None,
+                      time_from: str | None = None, time_to: str | None = None,
+                      ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """按维度聚合 token/请求数（M8 /v1/stats）；返回 (rows, total)。"""
+    return await asyncio.to_thread(
+        _stats_sync, group_by, model, kind, time_from, time_to)

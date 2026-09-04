@@ -158,3 +158,52 @@ export const fetchLogModels = (): Promise<{ models: string[] }> =>
 /** 按条件清空（无参数 = 全清）。 */
 export const deleteLogs = (q: LogsQuery = {}): Promise<{ status: string; deleted: number }> =>
   relay("DELETE", `/v1/logs${logsQueryString(q)}`);
+
+// ─────────────────────────── /v1/stats（M8：Token 统计页）───────────────────────────
+
+/** 统计维度：模型 / 类型 / 按天 / 按小时。 */
+export type StatsGroupBy = "model" | "kind" | "day" | "hour";
+
+/** /v1/stats 的聚合行：key 为维度取值，数值均为汇总。 */
+export interface StatsRow {
+  key: string;
+  requests: number;
+  success: number;
+  failed: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+}
+
+/** /v1/stats 的未分组总量（前端指标卡合计）。 */
+export type StatsTotal = Omit<StatsRow, "key">;
+
+export interface StatsResult {
+  rows: StatsRow[];
+  total: StatsTotal;
+}
+
+export interface StatsQuery {
+  groupBy: StatsGroupBy;
+  model?: string;
+  kind?: string;
+  timeFrom?: string; // UTC ISO；由筛选控件（本地时间）转换后传入
+  timeTo?: string;
+}
+
+function statsQueryString(q: StatsQuery): string {
+  const p = new URLSearchParams();
+  p.set("group_by", q.groupBy);
+  if (q.model) p.set("model", q.model);
+  if (q.kind) p.set("kind", q.kind);
+  if (q.timeFrom) p.set("time_from", q.timeFrom);
+  if (q.timeTo) p.set("time_to", q.timeTo);
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
+
+/** 按维度聚合 token/请求数（模型/类型/按天/按小时）。 */
+export const fetchStats = (q: StatsQuery): Promise<StatsResult> =>
+  relay("GET", `/v1/stats${statsQueryString(q)}`);

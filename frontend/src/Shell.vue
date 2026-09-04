@@ -9,6 +9,7 @@ import Overview from "./views/Overview.vue";
 import Config from "./views/Config.vue";
 import Models from "./views/Models.vue";
 import Logs from "./views/Logs.vue";
+import Stats from "./views/Stats.vue";
 
 const message = useMessage();
 
@@ -17,6 +18,7 @@ const views: Record<string, { name: string; comp: any }> = {
   config: { name: "配置", comp: Config },
   models: { name: "模型", comp: Models },
   logs: { name: "日志", comp: Logs },
+  stats: { name: "统计", comp: Stats },
 };
 
 const busy = ref(false);
@@ -203,7 +205,7 @@ onUnmounted(() => {
             :class="{ active: store.view === key }"
             @click="store.view = key"
           >
-            <span class="nav-ico">{{ { overview: "◉", config: "⚙", models: "◈", logs: "☰" }[key] }}</span>
+            <span class="nav-ico">{{ { overview: "◉", config: "⚙", models: "◈", logs: "☰", stats: "≡" }[key] }}</span>
             {{ v.name }}
           </a>
         </nav>
