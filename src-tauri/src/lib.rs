@@ -19,7 +19,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -169,6 +171,8 @@ struct AppState {
     /// GUI 配置页期望的端口；0 = 随机端口。重启时按此值 spawn。
     requested_port: AtomicU16,
     client: reqwest::Client,
+    /// 保持托盘句柄存活（TrayIcon 被 Drop 会移除托盘图标）。
+    tray: Mutex<Option<TrayIcon>>,
 }
 
 // ─────────────────────────── sidecar 生命周期 ───────────────────────────
@@ -370,6 +374,22 @@ async fn relay_restart(app: tauri::AppHandle, port: Option<u16>) -> Result<serde
     Ok(serde_json::json!({ "restarting": true }))
 }
 
+/// 隐藏主窗口（最小化到托盘）——前端「最小化到托盘」按钮调用。
+#[tauri::command]
+fn window_hide(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    Ok(())
+}
+
+/// 真正退出应用——前端「退出应用」按钮调用，走 RunEvent::Exit 回收 sidecar。
+#[tauri::command]
+fn app_exit(app: tauri::AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
+}
+
 // ─────────────────────────── 入口 ───────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -391,8 +411,16 @@ pub fn run() {
             ready: Mutex::new(None),
             requested_port: AtomicU16::new(0),
             client: reqwest::Client::new(),
+            tray: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![relay, relay_status, relay_stop, relay_restart])
+        .invoke_handler(tauri::generate_handler![
+            relay,
+            relay_status,
+            relay_stop,
+            relay_restart,
+            window_hide,
+            app_exit
+        ])
         .setup(|app| {
             // 后台线程 spawn，窗口立即显示；就绪后 relay_status 才返回 running=true
             let handle = app.handle().clone();
@@ -401,6 +429,58 @@ pub fn run() {
                     eprintln!("[shell] {e}");
                 }
             });
+
+            // ── 系统托盘：左键/菜单「显示主界面」唤回隐藏窗口；菜单「退出」真退出 ──
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let show_item = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let icon = app.default_window_icon().cloned().ok_or("无默认窗口图标，无法建托盘")?;
+            let tray = TrayIconBuilder::with_id("coderproxy-tray")
+                .icon(icon)
+                .tooltip("CoderProxy")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.unminimize();
+                            let _ = win.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.unminimize();
+                            let _ = win.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+            // 存入 AppState，防止被 Drop 移除托盘
+            *app.state::<AppState>().tray.lock().unwrap() = Some(tray);
+
+            // ── 拦截主窗口右上角关闭（X）：不直接关，发事件给前端弹三选对话框 ──
+            let handle = app.handle().clone();
+            app.get_webview_window("main")
+                .expect("main 窗口应存在")
+                .on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = handle.emit("close-requested", ());
+                    }
+                });
+
             Ok(())
         })
         .build(tauri::generate_context!())

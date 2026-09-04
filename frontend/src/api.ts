@@ -59,6 +59,10 @@ export const relayStop = (): Promise<void> => invoke("relay_stop");
 export const relayRestart = (port?: number): Promise<{ restarting: boolean }> =>
   invoke("relay_restart", { port: port ?? null });
 
+/** 托盘/关窗相关：隐藏主窗口或真正退出。 */
+export const windowHide = (): Promise<void> => invoke("window_hide");
+export const appExit = (): Promise<void> => invoke("app_exit");
+
 /** /v1/auth/* */
 export const authStatus = (): Promise<AuthStatus> => relay("GET", "/v1/auth/status");
 export const authLoginStart = (): Promise<AuthStatus> => relay("POST", "/v1/auth/login/start");

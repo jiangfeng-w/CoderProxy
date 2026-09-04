@@ -2,7 +2,7 @@
 // 模型页：列表 + 搜索 + 白名单启用开关 + 全部启用/禁用。
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useMessage } from "naive-ui";
-import { getModels, getConfig, updateConfig, authSync, type OaiModel, type Config } from "../api";
+import { relay, getModels, getConfig, updateConfig, authSync, type OaiModel, type Config } from "../api";
 
 const message = useMessage();
 const DISABLE_ALL = "__none__";
@@ -11,6 +11,7 @@ const models = ref<OaiModel[]>([]);
 const config = ref<Config | null>(null);
 const search = ref("");
 const syncing = ref(false);
+const testing = ref<string | null>(null);
 let timer: number | undefined;
 
 const wl = computed(() => config.value?.model_whitelist ?? []);
@@ -86,6 +87,35 @@ async function onSync() {
   }
 }
 
+/** 点击模型名即复制到剪贴板。 */
+async function onCopy(id: string) {
+  try {
+    await navigator.clipboard.writeText(id);
+    message.success(`已复制模型名：${id}`);
+  } catch (e) {
+    message.error(`复制失败：${String(e)}`);
+  }
+}
+
+/** 向模型发一条 Hi! 测试连通性（走 /v1/chat/completions，自动带工具伪装链路）。 */
+async function onTest(id: string) {
+  if (testing.value) return;
+  testing.value = id;
+  try {
+    const res = await relay("POST", "/v1/chat/completions", {
+      model: id,
+      messages: [{ role: "user", content: "Hi!" }],
+      stream: false,
+    });
+    const content = res?.choices?.[0]?.message?.content ?? "";
+    message.success(`连通成功：${String(content).slice(0, 80)}`);
+  } catch (e) {
+    message.error(`连接失败：${String(e)}`);
+  } finally {
+    testing.value = null;
+  }
+}
+
 async function load() {
   try {
     models.value = (await getModels()).data;
@@ -118,7 +148,7 @@ onUnmounted(() => clearInterval(timer));
         <input
           v-model="search"
           class="search"
-          placeholder="搜索模型名 / 显示名"
+          placeholder="搜索模型名"
         />
         <button class="btn primary" :disabled="syncing" @click="onSync">同步模型</button>
         <button class="btn primary" @click="onAllEnable">全部启用</button>
@@ -133,14 +163,13 @@ onUnmounted(() => clearInterval(timer));
         <thead>
           <tr>
             <th>模型名</th>
-            <th>显示名</th>
-            <th class="r">启用（白名单）</th>
+            <th class="r">启用</th>
+            <th class="r">测试</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="m in filtered" :key="m.id">
-            <td class="mono">{{ m.id }}</td>
-            <td class="dim">{{ m.name || "—" }}</td>
+            <td class="mono copyable" title="点击复制模型名" @click="onCopy(m.id)">{{ m.id }}</td>
             <td class="r">
               <label class="switch">
                 <input
@@ -150,6 +179,11 @@ onUnmounted(() => clearInterval(timer));
                 />
                 <span class="slider" />
               </label>
+            </td>
+            <td class="r">
+              <button class="btn test" :disabled="testing !== null" @click="onTest(m.id)">
+                {{ testing === m.id ? "测试中…" : "测试" }}
+              </button>
             </td>
           </tr>
         </tbody>
@@ -236,6 +270,28 @@ onUnmounted(() => clearInterval(timer));
 }
 .dim {
   color: var(--cp-dim);
+}
+.copyable {
+  cursor: pointer;
+  user-select: text;
+  transition: color 0.15s;
+}
+.copyable:hover {
+  color: var(--cp-cyan);
+}
+.btn.test {
+  padding: 3px 12px;
+  font-size: 12px;
+  color: var(--cp-dim);
+}
+.btn.test:hover:not(:disabled) {
+  color: var(--cp-cyan);
+  border-color: var(--cp-cyan);
+  background: rgba(34, 211, 238, 0.1);
+}
+.btn.test:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .empty {
   color: var(--cp-dim);

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // 顶栏（服务状态/启停/登录态）+ 左侧导航 + 四页内容区。深色主题，全局轮询服务与登录态。
 import { onMounted, onUnmounted, ref } from "vue";
-import { useMessage } from "naive-ui";
-import { relayStatus, relayStop, relayRestart, authStatus, authLoginStart, authLogout, authSync, openAuthorizeUrl } from "./api";
+import { NButton, NModal, useMessage } from "naive-ui";
+import { listen } from "@tauri-apps/api/event";
+import { relayStatus, relayStop, relayRestart, authStatus, authLoginStart, authLogout, authSync, openAuthorizeUrl, windowHide, appExit } from "./api";
 import { store } from "./store";
 import Overview from "./views/Overview.vue";
 import Config from "./views/Config.vue";
@@ -22,6 +23,29 @@ const busy = ref(false);
 let timer: number | undefined;
 let lastAuthStatus = "not_logged_in";
 let syncing = false;
+let closeUnlisten: Promise<() => void> | undefined;
+
+// 关窗三选对话框：用户点右上角 X 时，由 Rust 发 `close-requested` 事件触发。
+const showCloseDlg = ref(false);
+
+async function chooseHide() {
+  try {
+    await windowHide();
+  } catch (e) {
+    message.error(String(e));
+  } finally {
+    showCloseDlg.value = false;
+  }
+}
+
+async function chooseExit() {
+  showCloseDlg.value = false;
+  try {
+    await appExit();
+  } catch (e) {
+    message.error(String(e));
+  }
+}
 
 async function syncModels() {
   if (syncing) return;
@@ -114,8 +138,15 @@ async function onLogout() {
 onMounted(() => {
   pollStatus();
   timer = window.setInterval(pollStatus, 2500);
+  // 点右上角 X → Rust prevent_close + 发事件 → 弹三选对话框
+  closeUnlisten = listen("close-requested", () => {
+    showCloseDlg.value = true;
+  });
 });
-onUnmounted(() => clearInterval(timer));
+onUnmounted(() => {
+  clearInterval(timer);
+  closeUnlisten?.then((fn) => fn());
+});
 </script>
 
 <template>
@@ -178,6 +209,26 @@ onUnmounted(() => clearInterval(timer));
         <component :is="views[store.view]?.comp" />
       </main>
     </div>
+
+    <!-- 关窗三选对话框：取消(灰) / 退出应用(红) / 最小化到托盘(蓝) -->
+    <n-modal
+      v-model:show="showCloseDlg"
+      preset="card"
+      title="退出 CoderProxy？"
+      :style="{ width: '420px' }"
+      :closable="false"
+      :mask-closable="false"
+      :bordered="false"
+    >
+      <p class="dlg-tip">选择关闭后的处理方式：</p>
+      <template #footer>
+        <div class="dlg-actions">
+          <n-button @click="showCloseDlg = false">取消</n-button>
+          <n-button type="error" @click="chooseExit">退出应用</n-button>
+          <n-button type="primary" @click="chooseHide">最小化到托盘</n-button>
+        </div>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -370,5 +421,16 @@ onUnmounted(() => clearInterval(timer));
 }
 .content::-webkit-scrollbar-track {
   background: transparent;
+}
+
+.dlg-tip {
+  margin: 0 0 4px;
+  color: var(--cp-dim);
+  font-size: 13px;
+}
+.dlg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 </style>
