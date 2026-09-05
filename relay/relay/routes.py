@@ -291,6 +291,17 @@ async def chat_completions(request: Request):
                  dropped=ctx.tool_dropped)
 
     if stream:
+        # 流式请求：SSE 建立前先做模型/白名单校验。此前校验在 gen() 内、响应头 200
+        # 已发出后才执行，白名单外模型表现为「开流即断」；agent 端只见费解的断流错误，
+        # 无法识别为「未知或未启用的模型」。前置后拒绝以标准 HTTP 404 返回给调用方。
+        try:
+            await _ensure_model(chat_request.model, probe=probe)
+        except Exception as exc:  # noqa: BLE001（与 gen() 内一致：失败也落 chat_error）
+            monitor.emit("chat_error", model=chat_request.model,
+                         error=str(exc)[:200])
+            await _log_db("chat_error", model=chat_request.model, stream=1,
+                          detail={"error": str(exc)[:500]})
+            raise
         collector = oai_adapter.UsageCollector(started_at)
 
         async def gen():

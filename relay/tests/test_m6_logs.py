@@ -365,6 +365,11 @@ def test_usage_collector_reset_semantics():
 
 def test_chat_stream_logs_done_usage(client, monkeypatch):
     """流式 chat_done 落库 usage；agent 不传 include_usage 也能落非全 0 token。"""
+    # 前置白名单校验（SSE 建立前执行）需模型在目录且启用；mock 转发层不再覆盖该校验
+    _run(storage.save_models(
+        [{"name": "glm-x", "api_key": "k", "base_url": "b", "anthropic": False}]))
+    _run(storage.set_model_whitelist(["glm-x"]))
+
     async def _fake_sse(model_name, chat_request, include_usage, ctx,
                         usage_collector=None, *, probe=False):
         assert usage_collector is not None

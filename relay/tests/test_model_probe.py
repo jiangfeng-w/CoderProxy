@@ -141,6 +141,24 @@ def test_chat_probe_reaches_upstream_for_non_whitelisted(client, monkeypatch):
     assert body["messages"][0]["content"] == "Hi!"
 
 
+def test_chat_stream_without_probe_non_whitelisted_is_clean_404(client):
+    """流式请求白名单外模型：SSE 建立前即返回标准 404，而不是 200 开流后断流。
+
+    （修复：_ensure_model 提前到 StreamingResponse 之前执行；此前 agent 端只见
+    Stream error 断流错误，无法识别「未知或未启用的模型」。）
+    """
+    _run(storage.save_models(_MODELS))
+    _run(storage.set_model_whitelist(["enabled-model"]))
+    resp = client.post("/v1/chat/completions",
+                       json={"model": "other-model",
+                             "messages": [{"role": "user", "content": "Hi!"}],
+                             "stream": True},
+                       headers=_auth())
+    assert resp.status_code == 404
+    assert "未知或未启用的模型" in resp.json()["detail"]
+    assert resp.headers.get("content-type", "").startswith("application/json")
+
+
 def test_probe_and_normal_share_provider_construction(client, monkeypatch):
     """probe 与普通请求走同一 build_provider（伪装同构、无独立裸路径）。"""
     _run(storage.save_models(_MODELS))
@@ -161,3 +179,4 @@ def test_probe_and_normal_share_provider_construction(client, monkeypatch):
     assert client.post("/v1/chat/completions", json={**payload, "probe": True},
                        headers=_auth()).status_code == 200
     assert built[0] == built[1]
+
