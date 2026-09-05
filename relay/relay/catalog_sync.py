@@ -28,11 +28,11 @@ PROVIDER_ID = 1
 async def sync_models() -> list[dict]:
     """同步目录 → storage.models，返回模型条目列表（空 = 未登录或目录无模型）。"""
     api_base = settings.ta3_api_base
-    token = await ta3_session.ensure_token(PROVIDER_ID, api_base)
+    token = await ta3_session.ensure_token(provider_id=PROVIDER_ID, api_base=api_base)
     try:
         raw = await ta3_catalog.fetch_catalog_raw(api_base, token)
     except ta3_catalog.Ta3Unauthorized:
-        token = await ta3_session.ensure_token(PROVIDER_ID, api_base)
+        token = await ta3_session.ensure_token(provider_id=PROVIDER_ID, api_base=api_base)
         raw = await ta3_catalog.fetch_catalog_raw(api_base, token)
 
     orgs = raw["organizations"]
