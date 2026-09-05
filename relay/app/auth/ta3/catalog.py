@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 import httpx
 
 from app.auth.ta3 import session as ta3_session
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -317,7 +318,8 @@ async def _list_assistants(client: httpx.AsyncClient, api_base: str, token: str,
 async def fetch_catalog_raw(api_base: str, token: str) -> dict:
     """拉取完整目录（组织 + 各组织 assistants 原始结构），供同步与调试。"""
     async with httpx.AsyncClient(timeout=_CATALOG_TIMEOUT,
-                                 headers={"Accept-Encoding": "gzip, deflate"}) as client:
+                                 headers={"Accept-Encoding": "gzip, deflate",
+                                          "User-Agent": settings.ta3_user_agent}) as client:
         organizations = await _list_organizations(client, api_base, token)
         assistants_by_org: dict[str, list[dict]] = {}
         for org in organizations:

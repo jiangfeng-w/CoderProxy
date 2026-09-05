@@ -18,6 +18,7 @@ import httpx
 
 from app.auth.ta3 import callback as ta3_callback
 from app.auth.ta3.pkce import gen_code_verifier, sm3_challenge
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,8 @@ async def exchange_authorization_code(api_base: str, code: str, code_verifier: s
         "client_id": YINHAI_OAUTH_CLIENT_ID,
     }
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
+                                     headers={"User-Agent": settings.ta3_user_agent}) as client:
             resp = await client.post(url, data=data,
                                      headers={"Content-Type": "application/x-www-form-urlencoded"})
     except httpx.HTTPError as e:
@@ -224,7 +226,8 @@ async def try_im_login(api_base: str) -> LoginResult | None:
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=_IM_LOGIN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_IM_LOGIN_TIMEOUT,
+                                     headers={"User-Agent": settings.ta3_user_agent}) as client:
             resp = await client.post(
                 f"{api_base.rstrip('/')}{AICONTINUE_LOGIN_PATH}",
                 headers={"Authorization": uid},

@@ -20,6 +20,7 @@ import logging
 
 import httpx
 
+from app.core.config import settings
 from relay.storage import (
     Ta3AuthError,
     clear_auth,
@@ -63,7 +64,8 @@ async def refresh_access_token(api_base: str, refresh_token: str) -> dict:
         "client_id": YINHAI_OAUTH_CLIENT_ID,
     }
     try:
-        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_TOKEN_TIMEOUT,
+                                     headers={"User-Agent": settings.ta3_user_agent}) as client:
             resp = await client.post(url, data=data,
                                      headers={"Content-Type": "application/x-www-form-urlencoded"})
     except httpx.HTTPError as e:

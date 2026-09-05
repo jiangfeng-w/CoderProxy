@@ -31,7 +31,13 @@ class Settings:
     relay_api_key: str = ""
     # ta3
     ta3_api_base: str = "https://lc.yinhaiyun.com/newcoder"
-    ta3_user_agent: str = ""
+    # 默认伪装 Electron 同族 UA（对齐聊天请求 ta3.py 的 _DEFAULT_TA3_UA），
+    # 使目录同步 / OAuth token / 登录等全部出站请求不裸露 python-httpx 指纹；
+    # 可经 TA3_USER_AGENT 覆盖
+    ta3_user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "ta3-new-coder-desktop/1.0.0 Chrome/126.0.0.0 Electron/31.0.0 Safari/537.36"
+    )
     ta3_stream_idle_timeout: float = 300.0
     ta3_kimi_thinking_effort: str = "low"
     ta3_thinking_watchdog: float = 240.0
