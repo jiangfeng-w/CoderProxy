@@ -413,7 +413,12 @@ async def auth_config():
 
 @app.post("/v1/auth/config", dependencies=[Depends(require_api_key)])
 async def auth_config_update(request: Request):
-    """GUI 配置页写入：api_key / tool_mode / model_whitelist（部分更新）。"""
+    """GUI 配置页写入：api_key / tool_mode / model_whitelist（部分更新）。
+
+    写路径固定：① 全字段校验（任一项非法即 400，不进入任何写）→
+    ② 逐字段落盘（storage.save_*）→ ③ 落盘成功后同步内存运行值 →
+    ④ 返回完整 config（= 前端整体替换 store 的唯一回执）。
+    """
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -421,33 +426,35 @@ async def auth_config_update(request: Request):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="请求体必须是对象")
 
+    # ── ① 全字段先校验，避免改了一半才撞上非法字段 ──
     api_key = body.get("api_key")
-    if api_key is not None:
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise HTTPException(status_code=400, detail="访问密钥不能为空")
-        await storage.save_api_key(api_key.strip())
+    if api_key is not None and (not isinstance(api_key, str) or not api_key.strip()):
+        raise HTTPException(status_code=400, detail="访问密钥不能为空")
 
+    tool_mode = body.get("tool_mode")
+    if tool_mode is not None and tool_mode not in tool_disguise.VALID_MODES:
+        raise HTTPException(status_code=400, detail="无效的工具映射")
+
+    model_whitelist = body.get("model_whitelist")
+    if model_whitelist is not None and not isinstance(model_whitelist, list):
+        raise HTTPException(status_code=400, detail="模型列表格式不正确")
+
+    port = body.get("port")
+    if port is not None and (not isinstance(port, int) or not (1 <= port <= 65535)):
+        raise HTTPException(status_code=400, detail="port 必须是 1-65535 的整数")
+
+    # ── ②③ 逐字段落盘；save_* 内部落盘成功后同步 settings ──
+    if api_key is not None:
+        await storage.save_api_key(api_key.strip())
     if body.get("regenerate_api_key") is True:
         # 重置密钥：生成新 key 落盘（作废旧值；已连接的 agent 需改用新 key）
         await storage.regenerate_api_key()
-
-    tool_mode = body.get("tool_mode")
     if tool_mode is not None:
-        if tool_mode not in tool_disguise.VALID_MODES:
-            raise HTTPException(status_code=400,
-                                detail="无效的工具映射")
+        await storage.save_tool_mode(tool_mode)
         settings.tool_mode = tool_mode
-
-    model_whitelist = body.get("model_whitelist")
     if model_whitelist is not None:
-        if not isinstance(model_whitelist, list):
-            raise HTTPException(status_code=400, detail="模型列表格式不正确")
         await storage.set_model_whitelist(model_whitelist)
-
-    port = body.get("port")
     if port is not None:
-        if not isinstance(port, int) or not (1 <= port <= 65535):
-            raise HTTPException(status_code=400, detail="port 必须是 1-65535 的整数")
         await storage.save_port(port)
 
     return await auth_config()

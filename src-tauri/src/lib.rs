@@ -2,10 +2,10 @@
 //!
 //! 职责（M4 spec §6.3）：
 //! 1. spawn relay sidecar（PyInstaller 打包的 `relay-sidecar`，经 `bundle.externalBin`
-//!    随壳分发），解析 stdout 的 `[relay-ready]` 行拿到实际端口与 API Key；
+//!    随壳分发），解析 stdout 的 `[relay-ready]` 行拿到实际监听端口；
 //! 2. 向前端暴露 invoke 命令：
 //!    - `relay`：通用代理，GUI → Rust → HTTP(localhost:port) 转发 `/v1/*`；
-//!    - `relay_status`：当前 sidecar 就绪状态（端口 / key / 工具模式）；
+//!    - `relay_status`：当前 sidecar 就绪状态（端口；配置/鉴权真值在 relay 磁盘 + 前端 config store）；
 //!    - `relay_stop`：停止 sidecar；
 //!    - `relay_restart`：按指定端口重启 sidecar（后台线程，前端轮询就绪）。
 //! 3. 应用退出时杀掉 sidecar。
@@ -159,12 +159,14 @@ mod job {
     }
 }
 
-/// sidecar 就绪信息（`[relay-ready]` 行解析结果）。
+/// sidecar 就绪信息（`[relay-ready]` 行解析结果：仅进程状态 `port`）。
+///
+/// 配置（tool_mode / api_key）不再由壳持有（D1/D3：配置真值 = relay 磁盘 + 前端
+/// config store）；`[relay-ready]` 行里的 `api_key=` / `tool_mode=` 仅为协议兼容
+/// 而由 relay 打印，解析侧忽略，新增配置字段无需壳配合。
 #[derive(Clone, Serialize)]
 struct ReadyInfo {
     port: u16,
-    api_key: String,
-    tool_mode: String,
 }
 
 struct AppState {
@@ -180,24 +182,21 @@ struct AppState {
 // ─────────────────────────── sidecar 生命周期 ───────────────────────────
 
 /// 解析 `[relay-ready] port=... api_key=... tool_mode=...` 行。
+///
+/// 只取进程状态 `port`；`api_key=` / `tool_mode=` 附加字段兼容忽略（不再由壳持有）。
 fn parse_ready(line: &str) -> Option<ReadyInfo> {
     let rest = line.strip_prefix("[relay-ready] ")?;
     let mut port = 0u16;
-    let mut api_key = String::new();
-    let mut tool_mode = String::from("hybrid");
     for kv in rest.split_whitespace() {
         let (k, v) = kv.split_once('=')?;
-        match k {
-            "port" => port = v.parse().ok()?,
-            "api_key" => api_key = v.to_string(),
-            "tool_mode" => tool_mode = v.to_string(),
-            _ => {}
+        if k == "port" {
+            port = v.parse().ok()?;
         }
     }
-    if port == 0 || api_key.is_empty() {
+    if port == 0 {
         return None;
     }
-    Some(ReadyInfo { port, api_key, tool_mode })
+    Some(ReadyInfo { port })
 }
 
 fn spawn_sidecar(app: &tauri::AppHandle) -> Result<ReadyInfo, String> {
@@ -370,7 +369,7 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo
             }
             *state.sidecar.lock().unwrap() = Some(child);
             *state.ready.lock().unwrap() = Some(info.clone());
-            println!("[shell] sidecar 就绪 port={} tool_mode={}", info.port, info.tool_mode);
+            println!("[shell] sidecar 就绪 port={}", info.port);
             Ok(info)
         }
         Err(RecvTimeoutError::Timeout) => {
@@ -401,12 +400,16 @@ fn stop_sidecar(app: &tauri::AppHandle) {
 // ─────────────────────────── tauri 命令 ───────────────────────────
 
 /// 通用代理：GUI → Rust → relay（仅放行 /v1/*，GET/POST/DELETE；DELETE 供 /v1/logs 清空，M7）。
+///
+/// 鉴权 key 由前端（config store）随每次调用传入（D3：壳不持有配置/密钥镜像），
+/// 转发时原样作为 Bearer 交给 relay 校验。
 #[tauri::command]
 async fn relay(
     state: State<'_, AppState>,
     method: String,
     path: String,
     body: Option<serde_json::Value>,
+    api_key: String,
 ) -> Result<serde_json::Value, String> {
     if !path.starts_with("/v1/") {
         return Err(format!("不支持的请求路径: {path}"));
@@ -429,7 +432,7 @@ async fn relay(
     let mut req = state
         .client
         .request(method, &url)
-        .header("Authorization", format!("Bearer {}", ready.api_key));
+        .header("Authorization", format!("Bearer {api_key}"));
     if let Some(b) = body {
         req = req.json(&b);
     }
@@ -443,15 +446,13 @@ async fn relay(
         .map_err(|e| format!("服务响应无法解析: {e}（{}）", &text[..text.len().min(200)]))
 }
 
-/// sidecar 就绪状态（前端轮询/初始化用）。
+/// sidecar 就绪状态（前端轮询/初始化用）。只含进程状态；配置展示读前端 config store。
 #[tauri::command]
 fn relay_status(state: State<'_, AppState>) -> serde_json::Value {
     match state.ready.lock().unwrap().clone() {
         Some(r) => serde_json::json!({
             "running": true,
             "port": r.port,
-            "api_key": r.api_key,
-            "tool_mode": r.tool_mode,
         }),
         None => serde_json::json!({ "running": false }),
     }
@@ -680,5 +681,35 @@ mod data_dir_tests {
 
         fs::remove_dir_all(&app).unwrap();
         fs::remove_dir_all(&target).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod ready_parse_tests {
+    use super::*;
+
+    #[test]
+    fn parse_ready_requires_only_port() {
+        assert!(matches!(
+            parse_ready("[relay-ready] port=3601"),
+            Some(ReadyInfo { port: 3601 })
+        ));
+    }
+
+    #[test]
+    fn parse_ready_ignores_legacy_config_fields() {
+        // [relay-ready] 行仍由 relay 打印 api_key/tool_mode（协议兼容），解析侧忽略
+        assert!(matches!(
+            parse_ready("[relay-ready] port=8786 api_key=abc tool_mode=strict"),
+            Some(ReadyInfo { port: 8786 })
+        ));
+    }
+
+    #[test]
+    fn parse_ready_rejects_bad_lines() {
+        assert!(parse_ready("relay-ready port=3601").is_none());
+        assert!(parse_ready("[relay-ready] api_key=abc").is_none());
+        assert!(parse_ready("[relay-ready] port=0").is_none());
+        assert!(parse_ready("[relay-ready] port=abc").is_none());
     }
 }

@@ -1,185 +1,192 @@
 <script setup lang="ts">
 // 顶栏（服务状态/启停/登录态）+ 左侧导航 + 四页内容区。深色主题，全局轮询服务与登录态。
-import { computed, onMounted, onUnmounted, ref } from "vue";
-import { NButton, NModal, useMessage } from "naive-ui";
-import { listen } from "@tauri-apps/api/event";
-import { relayStatus, relayRestart, authStatus, authLoginStart, authLogout, authSync, openAuthorizeUrl, windowHide, appExit, serviceStatus, serviceEnable, serviceDisable } from "./api";
-import { store, toolModeLabel } from "./store";
-import Overview from "./views/Overview.vue";
-import Config from "./views/Config.vue";
-import Models from "./views/Models.vue";
-import Logs from "./views/Logs.vue";
-import Stats from "./views/Stats.vue";
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { NButton, NModal, useMessage } from 'naive-ui'
+import { listen } from '@tauri-apps/api/event'
+import { relayStatus, relayRestart, authStatus, authLoginStart, authLogout, authSync, openAuthorizeUrl, windowHide, appExit, serviceStatus, serviceEnable, serviceDisable } from './api'
+import { store, configStore, toolModeLabel } from './store'
+import Overview from './views/Overview.vue'
+import Config from './views/Config.vue'
+import Models from './views/Models.vue'
+import Logs from './views/Logs.vue'
+import Stats from './views/Stats.vue'
 
-const message = useMessage();
+const message = useMessage()
 
 const views: Record<string, { name: string; comp: any }> = {
-  overview: { name: "总览", comp: Overview },
-  config: { name: "配置", comp: Config },
-  models: { name: "模型", comp: Models },
-  logs: { name: "日志", comp: Logs },
-  stats: { name: "统计", comp: Stats },
-};
+  overview: { name: '总览', comp: Overview },
+  config: { name: '配置', comp: Config },
+  models: { name: '模型', comp: Models },
+  logs: { name: '日志', comp: Logs },
+  stats: { name: '统计', comp: Stats }
+}
 
-const busy = ref(false);
-let timer: number | undefined;
-let lastAuthStatus = "not_logged_in";
-let syncing = false;
-let closeUnlisten: Promise<() => void> | undefined;
+const busy = ref(false)
+let timer: number | undefined
+let lastAuthStatus = 'not_logged_in'
+let syncing = false
+let closeUnlisten: Promise<() => void> | undefined
 
 // 关窗三选对话框：用户点右上角 X 时，由 Rust 发 `close-requested` 事件触发。
-const showCloseDlg = ref(false);
+const showCloseDlg = ref(false)
 
 // 方案B：relay 进程常驻（登录/配置/日志底座不动）。「对 agent 的 /v1 服务运行中」
 // = relay 进程就绪 && relay 侧判定服务已开放（已登录 且 未手动停止）。
-const serviceRunning = computed(
-  () => store.relay.running && store.serviceEnabled
-);
+const serviceRunning = computed(() => store.relay.running && store.serviceEnabled)
 
 function serviceStatusText(): string {
-  if (serviceRunning.value) return "运行中";
-  if (store.auth.status === "logged_in") return "已停止";
-  if (store.auth.status === "pending") return "登录中 · 登录后自动启动服务";
-  if (store.auth.status === "failed") return "登录未完成 · 登录后自动启动服务";
-  return "未登录 · 登录后自动启动服务";
+  if (serviceRunning.value) return '运行中'
+  if (store.auth.status === 'logged_in') return '已停止'
+  if (store.auth.status === 'pending') return '登录中 · 登录后自动启动服务'
+  if (store.auth.status === 'failed') return '登录未完成 · 登录后自动启动服务'
+  return '未登录 · 登录后自动启动服务'
 }
 
 async function chooseHide() {
   try {
-    await windowHide();
+    await windowHide()
   } catch (e) {
-    message.error(String(e));
+    message.error(String(e))
   } finally {
-    showCloseDlg.value = false;
+    showCloseDlg.value = false
   }
 }
 
 async function chooseExit() {
-  showCloseDlg.value = false;
+  showCloseDlg.value = false
   try {
-    await appExit();
+    await appExit()
   } catch (e) {
-    message.error(String(e));
+    message.error(String(e))
   }
 }
 
 async function syncModels() {
-  if (syncing) return;
-  syncing = true;
+  if (syncing) return
+  syncing = true
   try {
-    await authSync();
+    await authSync()
   } catch {
     /* 同步失败不打扰：模型页可手动重试 */
   } finally {
-    syncing = false;
+    syncing = false
   }
 }
 
 async function pollStatus() {
   try {
-    store.relay = await relayStatus();
+    store.relay = await relayStatus()
+    // relay 就绪后补一次配置装载：顶栏模式/端口展示以 config store（relay 真值）为准，
+    // 不读壳的启动快照。装载失败不打扰（下轮重试；各页挂载也会兜底 load）。
+    if (store.relay.running && !configStore.loaded) {
+      try {
+        await configStore.load()
+      } catch {
+        /* 保持未装载，下轮重试 */
+      }
+    }
   } catch {
     /* 壳未就绪 */
   }
   try {
-    store.auth = await authStatus();
+    store.auth = await authStatus()
   } catch {
     /* 忽略 */
   }
   try {
-    store.serviceEnabled = (await serviceStatus()).enabled;
+    store.serviceEnabled = (await serviceStatus()).enabled
   } catch {
     /* 服务开关查询失败（进程未就绪/未登录等），保持上次值 */
   }
   // 登录态由「未登录 → 已登录」转变（含浏览器授权完成后轮询到）：自动同步一次模型目录
-  if (store.auth.status === "logged_in" && lastAuthStatus !== "logged_in") {
-    syncModels();
+  if (store.auth.status === 'logged_in' && lastAuthStatus !== 'logged_in') {
+    syncModels()
   }
   // 登出：重置批量测试标记与模型可用状态，下次登录后重新测试
-  if (store.auth.status === "not_logged_in" && lastAuthStatus === "logged_in") {
-    store.batchTested = false;
-    Object.keys(store.modelStatus).forEach((k) => delete store.modelStatus[k]);
+  if (store.auth.status === 'not_logged_in' && lastAuthStatus === 'logged_in') {
+    store.batchTested = false
+    Object.keys(store.modelStatus).forEach(k => delete store.modelStatus[k])
   }
-  lastAuthStatus = store.auth.status;
+  lastAuthStatus = store.auth.status
 }
 
 async function onStop() {
-  busy.value = true;
+  busy.value = true
   try {
-    await serviceDisable();
-    message.success("服务已停止");
+    await serviceDisable()
+    message.success('服务已停止')
   } catch (e) {
-    message.error(String(e));
+    message.error(String(e))
   } finally {
-    busy.value = false;
-    await pollStatus();
+    busy.value = false
+    await pollStatus()
   }
 }
 
 async function onRestart() {
-  busy.value = true;
+  busy.value = true
   try {
-    await serviceEnable();
-    message.info("服务已启动");
+    await serviceEnable()
+    message.info('服务已启动')
   } catch {
     // 进程未就绪（异常退出等）→ 回退为真实重启 relay 进程
     try {
-      await relayRestart();
-      message.info("正在重启服务...");
+      await relayRestart()
+      message.info('正在重启服务...')
     } catch (e) {
-      message.error(String(e));
+      message.error(String(e))
     }
   } finally {
-    busy.value = false;
-    await pollStatus();
+    busy.value = false
+    await pollStatus()
   }
 }
 
 async function onLogin() {
-  busy.value = true;
+  busy.value = true
   try {
-    const res = await authLoginStart();
-    if (res.status === "pending" && res.authorize_url) {
-      openAuthorizeUrl(res.authorize_url);
-      message.info("已在浏览器打开授权页，登录完成后自动同步");
-    } else if (res.status === "logged_in") {
-      message.success("已登录");
+    const res = await authLoginStart()
+    if (res.status === 'pending' && res.authorize_url) {
+      openAuthorizeUrl(res.authorize_url)
+      message.info('已在浏览器打开授权页，登录完成后自动同步')
+    } else if (res.status === 'logged_in') {
+      message.success('已登录')
     } else {
-      message.warning(res.error || "登录未完成");
+      message.warning(res.error || '登录未完成')
     }
   } catch (e) {
-    message.error(String(e));
+    message.error(String(e))
   } finally {
-    busy.value = false;
-    await pollStatus();
+    busy.value = false
+    await pollStatus()
   }
 }
 
 async function onLogout() {
-  busy.value = true;
+  busy.value = true
   try {
-    await authLogout();
-    message.info("已登出");
+    await authLogout()
+    message.info('已登出')
   } catch (e) {
-    message.error(String(e));
+    message.error(String(e))
   } finally {
-    busy.value = false;
-    await pollStatus();
+    busy.value = false
+    await pollStatus()
   }
 }
 
 onMounted(() => {
-  pollStatus();
-  timer = window.setInterval(pollStatus, 2500);
+  pollStatus()
+  timer = window.setInterval(pollStatus, 2500)
   // 点右上角 X → Rust prevent_close + 发事件 → 弹三选对话框
-  closeUnlisten = listen("close-requested", () => {
-    showCloseDlg.value = true;
-  });
-});
+  closeUnlisten = listen('close-requested', () => {
+    showCloseDlg.value = true
+  })
+})
 onUnmounted(() => {
-  clearInterval(timer);
-  closeUnlisten?.then((fn) => fn());
-});
+  clearInterval(timer)
+  closeUnlisten?.then(fn => fn())
+})
 </script>
 
 <template>
@@ -191,18 +198,31 @@ onUnmounted(() => {
       </div>
 
       <div class="status">
-        <span class="dot" :class="serviceRunning ? 'ok' : 'off'" />
+        <span
+          class="dot"
+          :class="serviceRunning ? 'ok' : 'off'"
+        />
         <span>{{ serviceStatusText() }}</span>
-        <span v-if="serviceRunning && store.relay.port" class="port mono">
+        <span
+          v-if="serviceRunning && store.relay.port"
+          class="port mono"
+        >
           端口：{{ store.relay.port }}
         </span>
-        <span v-if="serviceRunning" class="mode cp-tag cyan">
-          {{ toolModeLabel(store.relay.tool_mode) }}
+        <span
+          v-if="serviceRunning"
+          class="mode cp-tag cyan"
+        >
+          {{ toolModeLabel(configStore.tool_mode) }}
         </span>
       </div>
 
       <div class="ops">
-        <button class="btn danger" :disabled="busy || !serviceRunning" @click="onStop">
+        <button
+          class="btn danger"
+          :disabled="busy || !serviceRunning"
+          @click="onStop"
+        >
           停止服务
         </button>
         <button
@@ -215,12 +235,22 @@ onUnmounted(() => {
         <template v-if="store.auth.status === 'logged_in'">
           <span class="user">
             已登录
-            <b>{{ store.auth.account?.label || store.auth.account?.id || "" }}</b>
+            <b>{{ store.auth.account?.label || store.auth.account?.id || '' }}</b>
           </span>
-          <button class="btn ghost" :disabled="busy" @click="onLogout">登出</button>
+          <button
+            class="btn ghost"
+            :disabled="busy"
+            @click="onLogout"
+            >登出</button
+          >
         </template>
         <template v-else>
-          <button class="btn ghost" :disabled="busy" @click="onLogin">登录</button>
+          <button
+            class="btn ghost"
+            :disabled="busy"
+            @click="onLogin"
+            >登录</button
+          >
         </template>
       </div>
     </header>
@@ -235,7 +265,7 @@ onUnmounted(() => {
             :class="{ active: store.view === key }"
             @click="store.view = key"
           >
-            <span class="nav-ico">{{ { overview: "◉", config: "⚙", models: "◈", logs: "☰", stats: "≡" }[key] }}</span>
+            <span class="nav-ico">{{ { overview: '◉', config: '⚙', models: '◈', logs: '☰', stats: '≡' }[key] }}</span>
             {{ v.name }}
           </a>
         </nav>
@@ -261,8 +291,16 @@ onUnmounted(() => {
       <template #footer>
         <div class="dlg-actions">
           <n-button @click="showCloseDlg = false">取消</n-button>
-          <n-button type="error" @click="chooseExit">退出应用</n-button>
-          <n-button type="primary" @click="chooseHide">最小化到托盘</n-button>
+          <n-button
+            type="error"
+            @click="chooseExit"
+            >退出应用</n-button
+          >
+          <n-button
+            type="primary"
+            @click="chooseHide"
+            >最小化到托盘</n-button
+          >
         </div>
       </template>
     </n-modal>
@@ -344,7 +382,9 @@ onUnmounted(() => {
   background: transparent;
   color: var(--cp-text);
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
 }
 .btn:hover {
   border-color: var(--cp-cyan);
@@ -405,7 +445,9 @@ onUnmounted(() => {
   font-size: 14px;
   cursor: pointer;
   user-select: none;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 .nav-item:hover {
   color: var(--cp-text);

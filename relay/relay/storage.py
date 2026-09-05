@@ -93,17 +93,24 @@ async def _io(fn, *args, **kwargs):
 
 
 async def ensure_initialized() -> None:
-    """首次启动：确保 config.api_key 已生成并回填 settings.relay_api_key。"""
+    """首次启动：确保 config.api_key 已生成并回填 settings.relay_api_key。
+
+    D1 装载语义：磁盘已有 key → 磁盘值优先（覆盖 env 兜底）；磁盘无 key 且
+    已设 env RELAY_API_KEY → 以 env 为本次有效值（不落盘）；都无 → 生成并落盘。
+    """
     async with _asyncio_lock:
         state = await _io(_load_state)
         cfg = state.setdefault("config", {})
         key = cfg.get("api_key") or ""
-        if not key:
+        if key:
+            settings.relay_api_key = key
+        elif settings.relay_api_key:
+            pass  # env 兜底：磁盘无历史 key，本次以 env 值为有效值
+        else:
             key = secrets.token_urlsafe(24)
             cfg["api_key"] = key
             state["config"] = cfg
             await _io(_save_state, state)
-        if not settings.relay_api_key:
             settings.relay_api_key = key
 
 
@@ -166,6 +173,42 @@ async def save_port(port: int) -> int:
         await _io(_save_state, state)
     settings.relay_port = int(port)
     return int(port)
+
+
+# ─────────────────────────── 工具伪装模式（持久化，D1）───────────────────────────
+
+# 与 tool_disguise.VALID_MODES 保持一致（独立常量，避免模块环）
+DEFAULT_TOOL_MODE = "hybrid"
+_VALID_TOOL_MODES = {"hybrid", "strict", "passthrough"}
+
+
+async def get_tool_mode() -> str:
+    """磁盘持久化的工具伪装模式；未设置/非法时回退默认 hybrid。"""
+    state = await _io(_load_state)
+    m = (state.get("config") or {}).get("tool_mode")
+    return m if m in _VALID_TOOL_MODES else DEFAULT_TOOL_MODE
+
+
+async def save_tool_mode(mode: str) -> str:
+    """持久化工具伪装模式（GUI/CLI 写入口；运行值由调用方同步 settings）。"""
+    async with _asyncio_lock:
+        state = await _io(_load_state)
+        state.setdefault("config", {})["tool_mode"] = mode
+        await _io(_save_state, state)
+    return mode
+
+
+async def apply_persisted_config() -> None:
+    """D1 启动装载：磁盘持久化的 config 字段优先于 env/默认兜底。
+
+    当前由磁盘装载的字段：tool_mode（磁盘未保存时保持 env/默认，不覆写）。
+    api_key 由 ensure_initialized 装载、port 由 CLI get_port() 装载，各走各的
+    读取路径，本函数只负责其余「持久化优先」的配置字段，供 cli._cmd_run 调用。
+    """
+    state = await _io(_load_state)
+    m = (state.get("config") or {}).get("tool_mode")
+    if m in _VALID_TOOL_MODES:
+        settings.tool_mode = m
 
 
 # ─────────────────────────── 模型白名单（M4）───────────────────────────

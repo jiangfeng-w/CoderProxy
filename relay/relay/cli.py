@@ -52,14 +52,13 @@ def _check_port_available(host: str, port: int) -> None:
 
 def _cmd_run(args) -> int:
     from relay.config import settings
-    from relay.storage import ensure_initialized, get_port, save_port
+    from relay.storage import (apply_persisted_config, ensure_initialized,
+                               get_port, save_port, save_tool_mode)
 
     if args.api_base is not None:
         settings.ta3_api_base = args.api_base
     if args.host is not None:
         settings.relay_host = args.host
-    if args.tool_mode is not None:
-        settings.tool_mode = args.tool_mode
     if args.api_key is not None:
         settings.relay_api_key = args.api_key
 
@@ -72,6 +71,14 @@ def _cmd_run(args) -> int:
         asyncio.run(save_port(args.port))
     else:
         settings.relay_port = asyncio.run(get_port())
+
+    # D1 启动装载：磁盘持久化配置优先（tool_mode 等），env/默认仅兜底。
+    # GUI（壳 spawn sidecar = 本命令无参）由此读到上次保存的模式。
+    asyncio.run(apply_persisted_config())
+    if args.tool_mode is not None:
+        # CLI 显式指定 = 落盘持久化（对齐 --port 语义），并覆盖磁盘装载结果
+        settings.tool_mode = args.tool_mode
+        asyncio.run(save_tool_mode(args.tool_mode))
 
     # CLI 显式 --api-key：覆盖并持久化（GUI 配置页「生成/复制」等价物）
     if args.api_key is not None:

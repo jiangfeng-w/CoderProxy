@@ -1,74 +1,76 @@
 <script setup lang="ts">
-// 配置页：本地 API Key / 工具伪装模式 / 服务端口。
-import { onMounted, ref } from "vue";
-import { useMessage, NPopconfirm } from "naive-ui";
-import { getConfig, updateConfig, relayRestart, type Config } from "../api";
-import { toolModeLabel } from "../store";
+// 配置页：本地 API Key / 工具伪装模式 / 服务端口。读写全部走 useConfigStore——
+// 后端「校验→落盘→改运行值」成功后返回完整 config，由 store 整体回写，页面即展示
+// 当前真值（顶栏模式/其它页面随同一 store 自动收敛，不再各自维护副本）。
+import { onMounted, ref } from 'vue'
+import { useMessage, NPopconfirm } from 'naive-ui'
+import { relayRestart } from '../api'
+import { configStore, toolModeLabel } from '../store'
 
-const message = useMessage();
+const message = useMessage()
 
-const config = ref<Config | null>(null);
-const showKey = ref(false);
-const busy = ref(false);
+const config = configStore
+const showKey = ref(false)
+const busy = ref(false)
 
 async function load() {
   try {
-    config.value = await getConfig();
+    await config.load()
   } catch (e) {
-    message.error(String(e));
+    message.error(String(e))
   }
 }
 
 async function copyText(text: string) {
   try {
-    await navigator.clipboard.writeText(text);
-    message.success("已复制到剪贴板");
+    await navigator.clipboard.writeText(text)
+    message.success('已复制到剪贴板')
   } catch {
-    message.error("复制失败");
+    message.error('复制失败')
   }
 }
 
 async function onResetKey() {
-  busy.value = true;
+  busy.value = true
   try {
-    config.value = await updateConfig({ regenerate_api_key: true });
-    void copyText(config.value.api_key);
+    const cfg = await config.update({ regenerate_api_key: true })
+    void copyText(cfg.api_key)
   } catch (e) {
-    message.error(String(e));
+    message.error(String(e))
   } finally {
-    busy.value = false;
+    busy.value = false
   }
 }
 
 async function onToolMode(mode: string) {
   try {
-    config.value = await updateConfig({ tool_mode: mode });
-    message.success(`已切换为「${toolModeLabel(mode)}」`);
+    await config.update({ tool_mode: mode })
+    message.success(`已切换为「${toolModeLabel(mode)}」`)
   } catch (e) {
-    message.error(String(e));
+    message.error(String(e))
   }
 }
 
 async function onApplyPort() {
-  const p = config.value?.port;
+  const p = config.port
   if (!p || p < 1 || p > 65535) {
-    message.error("端口需在 1-65535 之间");
-    return;
+    message.error('端口需在 1-65535 之间')
+    return
   }
-  // 1) 保存端口到 relay（持久化，跨重启一致）
+  // 1) 保存端口到 relay（持久化，跨重启一致）；成功后 store 已回写新 port/base_url
   try {
-    config.value = await updateConfig({ port: p });
+    await config.update({ port: p })
   } catch (e) {
-    message.error(`端口保存失败：${String(e)}`);
-    return;
+    message.error(`端口保存失败：${String(e)}`)
+    return
   }
-  message.info(`已保存端口 ${p}`);
+  message.info(`已保存端口 ${p}`)
   // 2) 重启 relay，按持久化端口立即生效
-  await relayRestart();
-  message.success(`已重启服务，监听端口 ${p}`);
+  await relayRestart()
+  message.success(`已重启服务，监听端口 ${p}`)
 }
 
-onMounted(load);
+onMounted(load)
 </script>
 
 <template>
@@ -83,29 +85,70 @@ onMounted(load);
             <input
               class="mono key-input"
               :type="showKey ? 'text' : 'password'"
-              :value="config?.api_key ?? ''"
+              :value="config.api_key"
               readonly
             />
-            <button class="key-eye" @click="showKey = !showKey" :title="showKey ? '隐藏' : '显示'">
-              <svg v-if="showKey" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
-                <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
-                <line x1="1" y1="1" x2="23" y2="23"/>
+            <button
+              class="key-eye"
+              @click="showKey = !showKey"
+              :title="showKey ? '隐藏' : '显示'"
+            >
+              <svg
+                v-if="showKey"
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+                <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+                <line
+                  x1="1"
+                  y1="1"
+                  x2="23"
+                  y2="23"
+                />
               </svg>
-              <svg v-else viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                <circle cx="12" cy="12" r="3"/>
+              <svg
+                v-else
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="3"
+                />
               </svg>
             </button>
           </div>
-          <button class="btn primary" @click="copyText(config?.api_key ?? '')">复制</button>
+          <button
+            class="btn primary"
+            @click="copyText(config.api_key)"
+            >复制</button
+          >
           <n-popconfirm
             positive-text="确认重置"
             negative-text="取消"
             @positive-click="onResetKey"
           >
             <template #trigger>
-              <button class="btn danger" :disabled="busy">重置</button>
+              <button
+                class="btn danger"
+                :disabled="busy"
+                >重置</button
+              >
             </template>
             重置将生成新密钥并作废旧值，已连接的 Agent 需改用新密钥。
           </n-popconfirm>
@@ -124,14 +167,17 @@ onMounted(load);
             v-for="m in [
               { key: 'hybrid', name: '智能适配（推荐）', desc: '认识的工具自动转换成牛码能理解的名称，不认识的按原名转发' },
               { key: 'strict', name: '严格模式', desc: '只转换认识的工具，不认识的直接丢弃' },
-              { key: 'passthrough', name: '原样转发', desc: '所有工具按原名转发，不做任何转换' },
+              { key: 'passthrough', name: '原样转发', desc: '所有工具按原名转发，不做任何转换' }
             ]"
             :key="m.key"
             class="mode-opt"
-            :class="{ active: config?.tool_mode === m.key }"
+            :class="{ active: config.tool_mode === m.key }"
             @click="onToolMode(m.key)"
           >
-            <span class="radio" :class="{ on: config?.tool_mode === m.key }" />
+            <span
+              class="radio"
+              :class="{ on: config.tool_mode === m.key }"
+            />
             <div>
               <div class="mode-name mono">{{ m.name }}</div>
               <div class="mode-desc">{{ m.desc }}</div>
@@ -152,17 +198,29 @@ onMounted(load);
             type="number"
             min="1"
             max="65535"
-            :value="config?.port ?? 3601"
-            @input="config && (config.port = Number(($event.target as HTMLInputElement).value))"
+            :value="config.port"
+            @input="config.port = Number(($event.target as HTMLInputElement).value)"
           />
-          <button class="btn primary" @click="onApplyPort">保存</button>
+          <button
+            class="btn primary"
+            @click="onApplyPort"
+            >保存</button
+          >
         </div>
       </div>
       <div class="field">
         <label class="lbl">Agent 连接地址（在其它 Agent 中填写自定义模型时使用）</label>
         <div class="row">
-          <input class="mono key-input" :value="config?.base_url ?? ''" readonly />
-          <button class="btn primary" @click="copyText(config?.base_url ?? '')">复制</button>
+          <input
+            class="mono key-input"
+            :value="config.base_url"
+            readonly
+          />
+          <button
+            class="btn primary"
+            @click="copyText(config.base_url)"
+            >复制</button
+          >
         </div>
       </div>
     </div>
@@ -246,7 +304,10 @@ onMounted(load);
   background: transparent;
   color: var(--cp-text);
   cursor: pointer;
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  transition:
+    border-color 0.15s,
+    color 0.15s,
+    background 0.15s;
 }
 .btn:hover {
   border-color: var(--cp-cyan);
@@ -294,7 +355,9 @@ onMounted(load);
   border: 1px solid var(--cp-border);
   border-radius: 8px;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
 }
 .mode-opt.active {
   border-color: var(--cp-cyan);

@@ -248,8 +248,9 @@ def test_config_get_and_post(client):
     assert body["tool_mode"] == "strict"
     assert body["model_whitelist"] == ["glm-x"]
     assert settings.tool_mode == "strict"
-    # 落盘持久化（GUI 重启后仍生效）
+    # 落盘持久化（GUI 重启后仍生效）：白名单 + 工具模式均读回
     assert _run(storage.get_model_whitelist()) == ["glm-x"]
+    assert _run(storage.get_tool_mode()) == "strict"
 
 
 def test_config_post_requires_auth(client):

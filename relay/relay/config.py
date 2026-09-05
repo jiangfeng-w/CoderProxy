@@ -44,7 +44,8 @@ class Settings:
     # 直连：M1 结论要求绕系统代理，trust_env=False 语义由 relay/__init__.py 设 NO_PROXY 实现；
     # TRUST_ENV_PROXY=true 时保留系统代理行为（调试用）
     trust_env_proxy: bool = False
-    # 工具模式（M3 生效；M2 阶段沿用 vendored ta3.py 内置 disguise/restore）
+    # 工具模式（M3 生效；M2 阶段沿用 vendored ta3.py 内置 disguise/restore）。
+    # D1 后：env TOOL_MODE 仅作磁盘未保存时的兜底，启动装载以磁盘持久化值为准。
     tool_mode: str = "hybrid"
     # 数据目录
     data_dir: str = field(default_factory=lambda: str(_RELAY_ROOT / "data"))
