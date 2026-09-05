@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.models.providers.ta3 import Ta3Provider
 from app.models.schemas import ChatRequest
 
-from relay import auth_flow, db, oai_adapter, storage, tool_disguise
+from relay import auth_flow, db, oai_adapter, storage, tool_disguise, tool_inventory
 from relay.config import settings
 from relay.middleware import require_api_key
 from relay.monitor import monitor
@@ -271,6 +271,13 @@ async def chat_completions(request: Request):
         raise HTTPException(status_code=400, detail="缺少 model 字段")
     if not chat_request.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
+
+    # M11：工具指纹采集（被动）。在伪装前抓 agent 声明的真实工具，落库供语义映射；
+    # 跳过连通性探针（probe）请求，避免污染指纹表。
+    if settings.tool_inventory_enabled and not probe:
+        source_tools = body.get("tools")
+        if source_tools:
+            await tool_inventory.record_tools(source_tools, chat_request.model)
 
     # M3：按模式编排出站 tools schema，并把请求级映射表交给 provider
     ctx = tool_disguise.build_disguise_context(chat_request.tools, settings.tool_mode)

@@ -51,6 +51,9 @@ class Settings:
     data_dir: str = field(default_factory=lambda: str(_RELAY_ROOT / "data"))
     # 日志保留行数上限（超出滚动删除最旧，防磁盘膨胀）
     relay_log_max_rows: int = 100000
+    # 工具指纹采集（M11：多 agent 工具名发现）。入站请求的真实工具声明
+    # 自动归一化后落库 tool_inventory，供后续语义映射。RELAY_TOOL_INVENTORY=false 关闭。
+    tool_inventory_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -66,6 +69,8 @@ class Settings:
         s.trust_env_proxy = _env("TRUST_ENV_PROXY", "").lower() in ("1", "true", "yes")
         s.tool_mode = _env("TOOL_MODE", s.tool_mode)
         s.data_dir = _env("RELAY_DATA_DIR", s.data_dir)
+        s.tool_inventory_enabled = _env(
+            "RELAY_TOOL_INVENTORY", "").lower() not in ("0", "false", "no")
         try:
             s.ta3_stream_idle_timeout = float(_env("TA3_STREAM_IDLE_TIMEOUT", str(s.ta3_stream_idle_timeout)))
         except ValueError:
