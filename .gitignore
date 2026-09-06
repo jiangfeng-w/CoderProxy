@@ -35,3 +35,6 @@ Thumbs.db
 
 # 本地设计备忘：开发计划 + spec 需求文档，不入 git
 docs/
+
+# WorkBuddy AI 会话数据（工作日志/记忆，属本地状态）
+.workbuddy/

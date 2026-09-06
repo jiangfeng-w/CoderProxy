@@ -28,7 +28,9 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 
@@ -108,7 +110,46 @@ def build_provider(model: dict, model_name: str,
 
 
 def _is_upstream_401(exc: Exception) -> bool:
+    extracted = _extract_upstream_error(exc)
+    if extracted is not None:
+        return extracted[0] == 401
     return isinstance(exc, RuntimeError) and "401" in str(exc)
+
+
+# vendored ta3.py 的上游错误形态：RuntimeError("模型请求失败 {status}：{body}")，
+# 状态码与上游响应体都裹在文本里（vendored 代码不改，只能在此解析）。
+_UPSTREAM_ERR_RE = re.compile(r"^模型请求失败 (\d{3})：(.*)$", re.DOTALL)
+
+
+def _extract_upstream_error(exc: Exception) -> tuple[int, str] | None:
+    """从上游错误 RuntimeError 拆出 (HTTP 状态码, 上游响应体)；非上游错误返回 None。"""
+    m = _UPSTREAM_ERR_RE.match(str(exc))
+    if not m:
+        return None
+    return int(m.group(1)), m.group(2).strip()
+
+
+def _openai_error_payload(message: str, status: int,
+                          err_type: str = "upstream_error") -> dict:
+    """OpenAI 风格错误体，agent 端 SDK 能直接识别展示。"""
+    return {"error": {"message": message, "type": err_type, "code": status}}
+
+
+def _upstream_error_response(exc: Exception) -> JSONResponse | None:
+    """上游错误 → 透传真实状态码的 OpenAI 风格错误响应；非上游错误返回 None（仍 500）。
+
+    此前上游错误一律以 500 纯文本抛出，agent 端（如 ZCode）把 500 当可重试的
+    网络错误做指数退避，403/402 这类终态错误被盲目重放到放弃；透传状态码后
+    客户端按语义处理（4xx 终态直接报错，429 才重试）。
+    """
+    extracted = _extract_upstream_error(exc)
+    if extracted is None:
+        return None
+    status, text = extracted
+    if not 400 <= status <= 599:
+        status = 502
+    return JSONResponse(status_code=status,
+                        content=_openai_error_payload(text[:1000], status))
 
 
 async def _log_db(kind: str, **fields) -> None:
@@ -310,13 +351,32 @@ async def chat_completions(request: Request):
                           detail={"error": str(exc)[:500]})
             raise
         collector = oai_adapter.UsageCollector(started_at)
+        upstream_iter = _sse_with_retry(chat_request.model, chat_request,
+                                        include_usage, ctx,
+                                        usage_collector=collector,
+                                        probe=probe)
+        # 预拉首帧：上游错误（401/403/429/...）都发生在首帧产出前。此前错误在 gen()
+        # 内才触发，响应头 200 已发出，客户端只见「开流即断」（ZCode 报 terminated
+        # 并盲目重试）；预拉后可以在响应头未发时把真实状态码透传回去。
+        try:
+            first_chunk = await anext(upstream_iter)
+        except StopAsyncIteration:
+            first_chunk = None
+        except Exception as exc:  # noqa: BLE001（首帧前失败也落 chat_error）
+            monitor.emit("chat_error", model=chat_request.model,
+                         error=str(exc)[:200])
+            await _log_db("chat_error", model=chat_request.model, stream=1,
+                          detail={"error": str(exc)[:500]})
+            err_resp = _upstream_error_response(exc)
+            if err_resp is not None:
+                return err_resp
+            raise
 
         async def gen():
             try:
-                async for chunk in _sse_with_retry(chat_request.model, chat_request,
-                                                   include_usage, ctx,
-                                                   usage_collector=collector,
-                                                   probe=probe):
+                if first_chunk is not None:
+                    yield first_chunk
+                async for chunk in upstream_iter:
                     yield chunk
                 monitor.emit("chat_done", model=chat_request.model, stream=True,
                              map_hits=ctx.tool_map_hits,
@@ -331,7 +391,12 @@ async def chat_completions(request: Request):
                              error=str(exc)[:200])
                 await _log_db("chat_error", model=chat_request.model, stream=1,
                               detail={"error": str(exc)[:500]})
-                raise
+                # 流中途失败：响应头已发无法改状态。补一帧 OpenAI 风格错误帧再干净
+                # 收尾，替代此前 raise 导致的连接硬断（客户端只见 "terminated"）。
+                extracted = _extract_upstream_error(exc)
+                status, text = extracted if extracted else (500, str(exc)[:500])
+                payload = _openai_error_payload(text[:1000], status)
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
@@ -342,6 +407,9 @@ async def chat_completions(request: Request):
         monitor.emit("chat_error", model=chat_request.model, error=str(exc)[:200])
         await _log_db("chat_error", model=chat_request.model, stream=0,
                       detail={"error": str(exc)[:500]})
+        err_resp = _upstream_error_response(exc)
+        if err_resp is not None:
+            return err_resp
         raise
     duration_ms = max(0, int((time.monotonic() - started_at) * 1000))
     monitor.emit("chat_done", model=chat_request.model, stream=False,
