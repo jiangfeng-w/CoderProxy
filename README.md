@@ -8,7 +8,7 @@
         ▼
   ┌────────── CoderProxy ──────────┐
   │ Tauri(Rust)+Vue3  GUI ── spawn ──► │
-  │ Python FastAPI relay (vendored ta3)│
+  │ Python FastAPI relay (内置 ta3 伪装层)│
   │   · 伪装牛码登录(PKCE-SM3 / IM)     │
   │   · 请求指纹伪装(Electron UA等)      │
   │   · 工具名双向伪装(hybrid/strict)    │
@@ -49,7 +49,7 @@
 ```
 src-tauri/        Rust 壳（spawn sidecar / 配置）
 frontend/         Vue3 前端（登录 / 配置 / 模型 / 日志）
-relay/            Python FastAPI 中转（vendored ta3 伪装/登录库）
+relay/            Python FastAPI 中转（内置 ta3 伪装/登录层）
 docs/             CoderProxy-开发计划 + spec 需求文档（本地备忘，不入仓库）
 AGENTS.md         开发规则（本地备忘）
 ```

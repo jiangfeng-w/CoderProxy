@@ -8,8 +8,8 @@ Tauri 壳 spawn 该 exe，监听 127.0.0.1:<port>，stdout 输出 [relay-ready] 
 - relay 第三方依赖全部 vendored 在 relay/_deps/（fastapi/uvicorn/httpx/pydantic 等），
   无需 pip 全局安装 → pathex 同时指向 relay 根 与 _deps。
 - uvicorn 各子模块（logging/loops/protocols/websockets）为运行时 import，
-  PyInstaller 静态分析扫不到，需显式 hiddenimports（chatcoder 验证过的坑）。
-- vendored app/auth/ta3/catalog.py 内 sync_ta3_models 惰性 import sqlalchemy，
+  PyInstaller 静态分析扫不到，需显式 hiddenimports（实测踩过的坑）。
+- app/auth/ta3/catalog.py 内 sync_ta3_models 惰性 import sqlalchemy，
   但 relay 走 catalog_sync.py（无 DB），该函数永不执行，缺失 sqlalchemy 无碍。
 - 数据目录禁止落在解包目录：调用方须传 RELAY_DATA_DIR（run.py frozen 分支注释）。
 """
@@ -24,7 +24,7 @@ DEPS_DIR = RELAY_DIR / "_deps"
 
 hiddenimports = [
     "sqlite3",
-    # uvicorn 子模块运行时 import，静态分析扫不到（chatcoder 验证过的坑）
+    # uvicorn 子模块运行时 import，静态分析扫不到（实测踩过的坑）
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",

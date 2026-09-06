@@ -83,10 +83,10 @@ async def test_sse_tool_calls_frames():
 
 
 def test_disguise_tools_maps_native():
-    """出站工具 schema：chatcoder 内部名 terminal_exec → ta3 原生 Bash schema。
+    """出站工具 schema：内部名 terminal_exec → ta3 原生 Bash schema。
 
-    M2 阶段沿用 vendored ta3.py 的 strict 式 disguise_tools（只认 chatcoder 内部
-    工具名）；第三方 agent 常见工具名（bash/read_file 等）的扩展映射归 M3。
+    M2 阶段沿用 ta3.py 的 strict 式 disguise_tools（只认内部工具名）；
+    第三方 agent 常见工具名（bash/read_file 等）的扩展映射归 M3。
     """
     tools = [{"type": "function", "function": {"name": "terminal_exec", "parameters": {"type": "object"}}}]
     out = disguise_tools(tools)

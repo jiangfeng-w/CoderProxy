@@ -2,12 +2,12 @@
 
 对外只暴露 OpenAI /v1，agent 的工具名五花八门（bash/read_file/glob/apply_patch），
 牛码模型只认识官方桌面端的原生工具集（Read/Edit/Bash/SubAgent…，PascalCase）。
-M3 在 M2 的 vendored disguise/restore 之上补两层：
+M3 在 M2 的 disguise/restore 之上补两层：
 
 1. 三模式（settings.tool_mode，见开发计划 §5.4）：
    - hybrid（默认）：有映射工具重命名为 ta3 原生名 + 参数适配；无映射长尾透传保留
      （M1 探针已确认牛码网关容忍任意工具名）；历史未映射调用降级文本占位。
-   - strict：有映射同 hybrid；无映射丢弃（对齐 chatcoder，模型不感知该工具）。
+   - strict：有映射同 hybrid；无映射丢弃（模型不感知该工具）。
    - passthrough：tools 原样透传，不做任何映射（放弃伪装层，兼容性最好）。
 
 2. 请求级映射表：
@@ -15,7 +15,7 @@ M3 在 M2 的 vendored disguise/restore 之上补两层：
    TO_TA3 多对一导致的 FROM_TA3 反查歧义（如 terminal_exec 与 bash 都映射 Bash）。
 
 实现边界：本模块只做「编排出站 tools schema + 构建请求级映射表」；历史消息伪装
-与入站还原由 vendored ta3.py 完成（接收本模块产出的映射表，见 ta3.py 构造参数）。
+与入站还原由 app/models/providers/ta3.py 完成（接收本模块产出的映射表，见 ta3.py 构造参数）。
 """
 from __future__ import annotations
 

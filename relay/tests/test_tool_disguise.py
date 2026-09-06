@@ -96,7 +96,7 @@ def test_restore_request_scoped_agent_name():
 
 
 def test_restore_vendored_name_exact():
-    """入站：chatcoder 内部名 terminal_exec → Bash → 还原回 terminal_exec（还原原名）。"""
+    """入站：内部名 terminal_exec → Bash → 还原回 terminal_exec（还原原名）。"""
     tools = [_tool("terminal_exec")]
     ctx = tool_disguise.build_disguise_context(tools, "hybrid")
     p = _provider(ctx)

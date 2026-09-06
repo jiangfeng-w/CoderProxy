@@ -1,14 +1,14 @@
 """ta3 登录态存储与会话管理（relay 适配版）。
 
-接口对齐 chatcoder 上游 session.py（save_auth/load_auth/clear_auth/get_access_token/
+接口契约（save_auth/load_auth/clear_auth/get_access_token/
 get_auth_row/ensure_token/refresh_access_token/mark_login_required/Ta3AuthError），
 但持久化改为本地 JSON 文件（relay.storage，M2 需求：token 落本地文件，非 DB）。
 
-db 参数仅为兼容 vendored oauth.py/catalog.py 的调用签名保留，实际被忽略
-（上游是 SQLAlchemy session，relay 无 DB）。oauth.py 中对 db 的 commit/flush
+db 参数仅为兼容 oauth.py/catalog.py 的调用签名保留，实际被忽略
+（原实现是 SQLAlchemy session，relay 无 DB）。oauth.py 中对 db 的 commit/flush
 调用由调用方传入 no-op db 对象兜底（见 relay/auth_flow.py 的 noop_db）。
 
-行为对齐上游：
+行为说明：
 - ensure_token：业务请求 401 时自动 refresh（带 in-flight 锁防并发 stampede，
   对齐参考项目 authService.ts:787-792 refreshIfNeeded）
 - refresh_token 失效（invalid_grant）→ 清会话并抛错，调用方提示重新登录

@@ -1,4 +1,4 @@
-"""ta3 PKCE(SM3) 工具单测：国标向量 + 参考项目契约格式（移植自 chatcoder tests/test_ta3_pkce.py）。"""
+"""ta3 PKCE(SM3) 工具单测：国标向量 + 参考项目契约格式。"""
 import re
 
 from app.auth.ta3.pkce import gen_code_verifier, sm3_challenge, sm3_hash, sm3_hex

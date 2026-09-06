@@ -186,14 +186,14 @@ _WEB_SEARCH: list[dict] = [
 # ── attachment（plan-147-674：当前项目补充，非参考项目原生——附件/图片读取）──
 _ATTACHMENT: list[dict] = [
     _f("ReadAttachment", "读取用户上传的附件文件内容。path 参数可直接使用用户消息附件中的"
-        "服务器磁盘绝对路径（如 'C:/Users/xx/AppData/Local/chatcoder/uploads/1a2b3c/报告.docx'），"
+        "服务器磁盘绝对路径（如 'C:/Users/xx/AppData/Local/…/uploads/1a2b3c/报告.docx'），"
         "也兼容相对路径（如 '1a2b3c/报告.docx'）。\n"
         "支持 docx / pdf / xlsx / csv / txt / md 等文本类（返回解析文本）"
         "以及 png/jpg/jpeg/gif/webp 图片（返回 base64 与元信息，多模态模型可直接理解）。\n"
         "path 取自用户消息中附件的 path 字段，或对话上下文「用户上传的附件」列表中的路径。", {
         "type": "object", "required": ["path"],
         "properties": {
-            "path": {"type": "string", "description": "附件路径——优先使用消息中给出的服务器绝对路径（如 'C:/Users/xx/AppData/Local/chatcoder/uploads/1a2b3c/报告.docx'），相对路径（'1a2b3c/报告.docx'）亦可"},
+            "path": {"type": "string", "description": "附件路径——优先使用消息中给出的服务器绝对路径（如 'C:/Users/xx/AppData/Local/…/uploads/1a2b3c/报告.docx'），相对路径（'1a2b3c/报告.docx'）亦可"},
         },
     }),
     _f("ViewImage", "查看图片文件，返回图片元信息（大小、格式、尺寸）与 base64（多模态模型可直接理解）。", {
