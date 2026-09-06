@@ -313,6 +313,13 @@ async def chat_completions(request: Request):
     if not chat_request.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
 
+    # agent 显式传的思考档位不在该模型上游档位内时**透传**（2026-09-06 用户拍板）：
+    # 不做回退改写，档位合法性由上游网关自行处理。
+
+    # 每模型默认思考强度（GUI 模型页配置）：agent 未显式传思考参数时按默认值下发
+    oai_adapter.apply_thinking_default(
+        body, chat_request, await storage.get_thinking_defaults())
+
     # M11：工具指纹采集（被动）。在伪装前抓 agent 声明的真实工具，落库供语义映射；
     # 跳过连通性探针（probe）请求，避免污染指纹表。
     if settings.tool_inventory_enabled and not probe:
@@ -330,9 +337,13 @@ async def chat_completions(request: Request):
     # M4 监控：记录请求与工具伪装统计（GUI 日志面板数据源）
     monitor.emit("chat_request", model=chat_request.model, stream=stream,
                  tools=len(ctx.outbound_tools))
-    # M6：chat_request 落库（tools 数走 detail 兜底，不建独立列，不入统计口径）
+    # M6：chat_request 落库（tools 数走 detail 兜底，不建独立列，不入统计口径）；
+    # detail 同时记录思考下发态（agent 显式传参或 relay 兜底后的最终值），
+    # 供日志页/验收核对「这次请求是否开了思考、用的哪档」
     await _log_db("chat_request", model=chat_request.model, stream=1 if stream else 0,
-                  detail={"tools": len(ctx.outbound_tools)})
+                  detail={"tools": len(ctx.outbound_tools),
+                          "thinking": chat_request.thinking,
+                          "thinking_effort": chat_request.reasoning_effort})
     monitor.emit("tool_disguise", mode=ctx.mode,
                  map_hits=ctx.tool_map_hits,
                  longtail_passthrough=ctx.tool_longtail_passthrough,
@@ -483,6 +494,8 @@ async def auth_config():
         "api_key": storage.relay_api_key(),
         "tool_mode": settings.tool_mode,
         "model_whitelist": await storage.get_model_whitelist(),
+        "thinking_defaults": await storage.get_thinking_defaults(),
+        "thinking_unset_mode": await storage.get_thinking_unset_mode(),
     }
 
 
@@ -514,6 +527,20 @@ async def auth_config_update(request: Request):
     if model_whitelist is not None and not isinstance(model_whitelist, list):
         raise HTTPException(status_code=400, detail="模型列表格式不正确")
 
+    thinking_defaults = body.get("thinking_defaults")
+    if thinking_defaults is not None and (
+        not isinstance(thinking_defaults, dict)
+        or not all(isinstance(k, str) and storage.valid_thinking_effort(v)
+                   for k, v in thinking_defaults.items())
+    ):
+        raise HTTPException(status_code=400, detail="思考强度默认值格式不正确")
+
+    thinking_unset_mode = body.get("thinking_unset_mode")
+    if thinking_unset_mode is not None and (
+        thinking_unset_mode not in storage.VALID_THINKING_UNSET_MODES
+    ):
+        raise HTTPException(status_code=400, detail="无效的思考兜底策略")
+
     port = body.get("port")
     if port is not None and (not isinstance(port, int) or not (1 <= port <= 65535)):
         raise HTTPException(status_code=400, detail="port 必须是 1-65535 的整数")
@@ -529,6 +556,10 @@ async def auth_config_update(request: Request):
         settings.tool_mode = tool_mode
     if model_whitelist is not None:
         await storage.set_model_whitelist(model_whitelist)
+    if thinking_defaults is not None:
+        await storage.save_thinking_defaults(thinking_defaults)
+    if thinking_unset_mode is not None:
+        await storage.save_thinking_unset_mode(thinking_unset_mode)
     if port is not None:
         await storage.save_port(port)
 

@@ -114,6 +114,27 @@ def _parse_tool_calls(tool_calls) -> list[dict] | None:
     return out or None
 
 
+def apply_thinking_default(body: dict, request: ChatRequest, defaults: dict,
+                           unset_mode: str = "default") -> None:
+    """agent 未显式传思考参数时，按兜底策略下发（GUI 模型页/设置页配置）。
+
+    - agent 传了 thinking / enable_thinking / reasoning_effort 任一 → 尊重 agent，不动；
+    - unset_mode="off"（真关）：一律显式关思考，忽略每模型默认值；
+    - unset_mode="default"（假关）：按每模型默认档位下发（未配置 = "none" 关）。
+    "none" → thinking=True + reasoning_effort="none"，走 ta3.py 的
+    thinking:disabled 路径显式关思考（上游默认行为可能是高档位思考，烧 token）。
+    """
+    if (body.get("thinking") is not None or body.get("enable_thinking") is not None
+            or body.get("reasoning_effort")):
+        return
+    if unset_mode == "off":
+        effort = "none"
+    else:
+        effort = str((defaults or {}).get(request.model) or "none")
+    request.thinking = True
+    request.reasoning_effort = effort
+
+
 def oai_request_to_chat_request(body: dict) -> ChatRequest:
     """OpenAI 请求体 → ChatRequest。"""
     messages: list[ChatMessage] = []
@@ -137,11 +158,20 @@ def oai_request_to_chat_request(body: dict) -> ChatRequest:
 
     # thinking：显式字段优先，其次按 reasoning_effort 推断（启用思考）。
     # 归一化非 bool 形态——GLM/智谱系（含 ZCode）发 {"type": "enabled"|"disabled", ...}，
-    # 部分客户端发字符串；原样透传会在 ChatRequest(bool|None) 校验炸成 500。
+    # Qwen/阿里系发 enable_thinking 布尔，部分客户端发字符串；原样透传会在
+    # ChatRequest(bool|None) 校验炸成 500。
     thinking = _parse_thinking(body.get("thinking"))
+    if thinking is None:
+        thinking = _parse_thinking(body.get("enable_thinking"))
     reasoning_effort = body.get("reasoning_effort")
     if thinking is None and reasoning_effort:
         thinking = True
+    if thinking is False:
+        # agent 显式关思考（thinking: false / {"type": "disabled"}）→ 归一为
+        # thinking=True + effort="none"：ta3.py 仅在此组合下才真发 thinking:disabled，
+        # thinking=False 会什么都不发、落上游默认（大概率开思考），「关」语义丢失。
+        thinking = True
+        reasoning_effort = "none"
 
     return ChatRequest(
         messages=messages,
@@ -327,8 +357,33 @@ def chat_response_to_openai(provider: Ta3Provider, request: ChatRequest,
 
 
 def model_to_openai(model: dict) -> dict:
-    """目录模型条目 → OpenAI /v1/models data 项（附额外元数据字段）。"""
+    """目录模型条目 → OpenAI /v1/models data 项（附额外元数据字段）。
+
+    reasoning_efforts（思考强度档位）：取自上游目录 completion_options.thinkingLevels
+    （牛码官方配置，实测各模型档位不同，如 glm-5.3 有 low/high/max、deepseek-v4 仅
+    high/max），level 即 agent 端 reasoning_effort 的合法取值；reasoning_labels 为
+    上游自带的中文标签（GUI 展示用）。不查 vendored 内置目录——其数据来源不可靠。
+    """
     name = model.get("name") or model.get("id") or ""
+    completion_options = model.get("completion_options") or {}
+    levels = completion_options.get("thinkingLevels") or []
+    efforts: list[str] = []
+    labels: dict[str, str] = {}
+    for lv in levels:
+        if not isinstance(lv, dict):
+            continue
+        level = str(lv.get("level") or "").strip()
+        if not level or level in efforts:
+            continue
+        efforts.append(level)
+        label = str(lv.get("label") or "").strip()
+        if label:
+            labels[level] = label
+    supports_reasoning = (
+        bool(model.get("anthropic"))
+        or bool(completion_options.get("thinkingEnabled"))
+        or bool(efforts)
+    )
     return {
         "id": name,
         "object": "model",
@@ -336,6 +391,8 @@ def model_to_openai(model: dict) -> dict:
         "owned_by": DEFAULT_MODEL_OWNED_BY,
         "name": model.get("title") or name,
         "context_window": model.get("context_window"),
-        "supports_reasoning": bool(model.get("anthropic")) or bool(model.get("completion_options", {}).get("thinkingEnabled")),
+        "supports_reasoning": supports_reasoning,
+        "reasoning_efforts": efforts,
+        "reasoning_labels": labels,
         "is_multimodal": bool(model.get("is_multimodal")),
     }

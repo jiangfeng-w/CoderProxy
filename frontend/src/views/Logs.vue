@@ -2,200 +2,214 @@
 // 日志页（M7）：历史日志视图，数据源 = /v1/logs（SQLite）。
 // 近实时 = 2.5s 轮询当前页（暂停停轮询）；筛选（类型/模型/时间区间）可组合；分页 + 清空。
 // 交互控件统一 Naive UI（dark 主题），类型标签用全局 cp-tag 配色。
-import { computed, onMounted, onUnmounted, ref } from "vue";
-import {
-  NButton, NDatePicker, NEmpty, NPagination, NPopconfirm, NSelect, NSpin, useMessage,
-} from "naive-ui";
-import {
-  fetchLogs, fetchLogKinds, fetchLogModels, deleteLogs,
-  type LogRow, type LogsQuery,
-} from "../api";
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { NButton, NDatePicker, NEmpty, NPagination, NPopconfirm, NSelect, NSpin, useMessage } from 'naive-ui'
+import { fetchLogs, fetchLogKinds, fetchLogModels, deleteLogs, getModels, type LogRow, type LogsQuery } from '../api'
+import { STANDARD_EFFORT_LABELS } from '../store'
 
-const message = useMessage();
-const POLL_MS = 2500;
+const message = useMessage()
+const POLL_MS = 2500
 
 // ── 类型元信息（M6 落库 kind；配色沿用全局 cp-tag）──
 const kindMeta: Record<string, { label: string; cls: string }> = {
-  chat_request: { label: "请求", cls: "cyan" },
-  chat_done: { label: "完成", cls: "green" },
-  chat_error: { label: "错误", cls: "red" },
-  auth_401_refresh: { label: "401刷新", cls: "yellow" },
-};
+  chat_request: { label: '请求', cls: 'cyan' },
+  chat_done: { label: '完成', cls: 'green' },
+  chat_error: { label: '错误', cls: 'red' },
+  auth_401_refresh: { label: '401刷新', cls: 'yellow' }
+}
 
-const rows = ref<LogRow[]>([]);
-const total = ref(0);
-const kinds = ref<string[]>([]);
-const models = ref<string[]>([]);
+const rows = ref<LogRow[]>([])
+const total = ref(0)
+const kinds = ref<string[]>([])
+const models = ref<string[]>([])
 
-const kind = ref<string | null>(null);          // null = 全部类型
-const model = ref<string | null>(null);         // null = 全部模型
-const timeRange = ref<[number, number] | null>(null); // naive 时间戳（ms）
-const page = ref(1);
-const pageSize = ref(50);
+const kind = ref<string | null>(null) // null = 全部类型
+const model = ref<string | null>(null) // null = 全部模型
+const timeRange = ref<[number, number] | null>(null) // naive 时间戳（ms）
+const page = ref(1)
+const pageSize = ref(50)
 
-const paused = ref(false);
-const loading = ref(false);
-const loadError = ref("");
-const clearing = ref(false);
+const paused = ref(false)
+const loading = ref(false)
+const loadError = ref('')
+const clearing = ref(false)
 
-let timer: number | undefined;
+let timer: number | undefined
 
-const kindOptions = computed(() =>
-  Object.entries(kindMeta).map(([key, m]) => ({ label: m.label, value: key }))
-);
-const modelOptions = computed(() => models.value.map((m) => ({ label: m, value: m })));
+const kindOptions = computed(() => Object.entries(kindMeta).map(([key, m]) => ({ label: m.label, value: key })))
+const modelOptions = computed(() => models.value.map(m => ({ label: m, value: m })))
 
-const hasAnyFilter = computed(
-  () => !!(kind.value || model.value || timeRange.value)
-);
+const hasAnyFilter = computed(() => !!(kind.value || model.value || timeRange.value))
 
 /** naive 时间戳（ms）→ UTC ISO，后缀与后端存储一致的 `+00:00`（毫秒）。 */
 function toUtcIso(ts: number): string {
-  return new Date(ts).toISOString().replace("Z", "+00:00");
+  return new Date(ts).toISOString().replace('Z', '+00:00')
 }
 
 function filterQuery(): LogsQuery {
-  const r = timeRange.value;
+  const r = timeRange.value
   return {
     kind: kind.value ?? undefined,
     model: model.value ?? undefined,
     timeFrom: r ? toUtcIso(r[0]) : undefined,
-    timeTo: r ? toUtcIso(r[1]) : undefined,
-  };
+    timeTo: r ? toUtcIso(r[1]) : undefined
+  }
 }
 
 async function fetchKindsModels() {
   try {
-    const [k, m] = await Promise.all([fetchLogKinds(), fetchLogModels()]);
-    kinds.value = k.kinds;
-    models.value = m.models;
+    const [k, m] = await Promise.all([fetchLogKinds(), fetchLogModels()])
+    kinds.value = k.kinds
+    models.value = m.models
   } catch {
     /* 下拉失败不阻断列表；列表返回同源亦可兜底 */
   }
 }
 
+/** 模型 → { 思考档位 level → 上游中文标签 }，日志行展示「低（low）」双写用；拉取失败回退原始值。 */
+const effortLabels = ref<Record<string, Record<string, string>>>({})
+
+async function fetchEffortLabels() {
+  try {
+    const res = await getModels(true)
+    const map: Record<string, Record<string, string>> = {}
+    for (const m of res.data) {
+      if (m.reasoning_labels && Object.keys(m.reasoning_labels).length > 0) map[m.id] = m.reasoning_labels
+    }
+    effortLabels.value = map
+  } catch {
+    /* 标签缺失不阻断日志展示，回退显示 level 原值 */
+  }
+}
+
 async function fetchList(silent = false): Promise<void> {
-  if (!silent) loading.value = true;
-  loadError.value = "";
+  if (!silent) loading.value = true
+  loadError.value = ''
   try {
     const res = await fetchLogs({
       ...filterQuery(),
       limit: pageSize.value,
-      offset: (page.value - 1) * pageSize.value,
-    });
-    rows.value = res.rows;
-    total.value = res.total;
-    if (res.kinds.length) kinds.value = res.kinds;
-    if (res.models.length) models.value = res.models;
-    const maxPage = Math.max(1, Math.ceil(res.total / pageSize.value));
+      offset: (page.value - 1) * pageSize.value
+    })
+    rows.value = res.rows
+    total.value = res.total
+    if (res.kinds.length) kinds.value = res.kinds
+    if (res.models.length) models.value = res.models
+    const maxPage = Math.max(1, Math.ceil(res.total / pageSize.value))
     if (page.value > maxPage) {
-      page.value = maxPage;
-      await fetchList(true);
-      return;
+      page.value = maxPage
+      await fetchList(true)
+      return
     }
   } catch (e) {
-    loadError.value = String(e);
+    loadError.value = String(e)
   } finally {
-    if (!silent) loading.value = false;
+    if (!silent) loading.value = false
   }
 }
 
 function onFilterChange() {
-  page.value = 1;
-  void fetchList();
+  page.value = 1
+  void fetchList()
 }
 
 function resetFilter() {
-  kind.value = null;
-  model.value = null;
-  timeRange.value = null;
-  onFilterChange();
+  kind.value = null
+  model.value = null
+  timeRange.value = null
+  onFilterChange()
 }
 
 function onPageChange() {
-  void fetchList();
+  void fetchList()
 }
 
 function onSizeChange() {
-  page.value = 1;
-  void fetchList();
+  page.value = 1
+  void fetchList()
 }
 
 // ── 行渲染辅助 ──
 function fmtTs(iso: string): string {
-  const d = new Date(iso);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  const d = new Date(iso)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
 function fmtDur(ms: number): string {
-  return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`;
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`
 }
 
 function kindOf(row: LogRow): { label: string; cls: string } {
-  return kindMeta[row.kind] ?? { label: row.kind, cls: "gray" };
+  return kindMeta[row.kind] ?? { label: row.kind, cls: 'gray' }
 }
 
 function detailOf(row: LogRow): string {
   switch (row.kind) {
-    case "chat_done": {
-      const t = row.total_tokens ?? 0;
-      const d = row.duration_ms ?? 0;
-      return `共 ${t.toLocaleString()} tokens · 耗时 ${fmtDur(d)}`;
+    case 'chat_done': {
+      const t = row.total_tokens ?? 0
+      const d = row.duration_ms ?? 0
+      return `共 ${t.toLocaleString()} tokens · 耗时 ${fmtDur(d)}`
     }
-    case "chat_request": {
-      const d = row.detail;
-      const tools = typeof d === "object" && d ? Number((d as Record<string, unknown>).tools ?? 0) : 0;
-      return `工具 ${tools} 个${row.stream ? " · 流式" : ""}`;
+    case 'chat_request': {
+      const d = row.detail
+      const rec = typeof d === 'object' && d ? (d as Record<string, unknown>) : {}
+      const tools = Number(rec.tools ?? 0)
+      // 思考下发态（relay 兜底/agent 显式传参后的最终值）；无字段=旧日志，不展示。
+      // 标签优先用上游自带中文名，目录外档位（透传/标准档补全）回退标准中文名，都没有则显示原值
+      const effort = typeof rec.thinking_effort === 'string' ? rec.thinking_effort : ''
+      const thinking = rec.thinking === true
+      const label = (effort && row.model && effortLabels.value[row.model]?.[effort]) || STANDARD_EFFORT_LABELS[effort] || ''
+      const thinkText = effort ? (effort === 'none' ? ' · 思考关' : ` · 思考 ${label ? `${label}（${effort}）` : effort}`) : thinking ? ' · 思考开' : ''
+      return `工具 ${tools} 个${row.stream ? ' · 流式' : ''}${thinkText}`
     }
-    case "chat_error": {
-      const d = row.detail;
-      if (typeof d === "string") return d;
-      if (d && typeof d === "object") return String((d as Record<string, unknown>).error ?? "");
-      return "";
+    case 'chat_error': {
+      const d = row.detail
+      if (typeof d === 'string') return d
+      if (d && typeof d === 'object') return String((d as Record<string, unknown>).error ?? '')
+      return ''
     }
-    case "auth_401_refresh":
-      return "上游返回 401，已自动刷新重试";
+    case 'auth_401_refresh':
+      return '上游返回 401，已自动刷新重试'
     default:
-      return "";
+      return ''
   }
 }
 
 /** 悬浮显示完整 usage（chat_done 行）。 */
 function titleOf(row: LogRow): string | undefined {
-  if (row.kind !== "chat_done") return undefined;
-  const p = (n?: number | null) => n?.toLocaleString() ?? "—";
-  return `prompt ${p(row.prompt_tokens)} · completion ${p(row.completion_tokens)}\n缓存 ${p(row.cached_tokens)} · 推理 ${p(row.reasoning_tokens)} · duration ${row.duration_ms ?? "—"}ms`;
+  if (row.kind !== 'chat_done') return undefined
+  const p = (n?: number | null) => n?.toLocaleString() ?? '—'
+  return `prompt ${p(row.prompt_tokens)} · completion ${p(row.completion_tokens)}\n缓存 ${p(row.cached_tokens)} · 推理 ${p(row.reasoning_tokens)} · duration ${row.duration_ms ?? '—'}ms`
 }
 
 // ── 清空（按当前筛选条件 = 条件清空，无条件 = 全清）──
-const clearScopeText = computed(() =>
-  hasAnyFilter.value ? "当前筛选条件内的全部日志" : "全部日志（不可恢复）"
-);
+const clearScopeText = computed(() => (hasAnyFilter.value ? '当前筛选条件内的全部日志' : '全部日志（不可恢复）'))
 
 async function confirmClear() {
-  clearing.value = true;
+  clearing.value = true
   try {
-    const res = await deleteLogs(filterQuery());
-    message.success(`已清空 ${res.deleted} 条日志`);
-    page.value = 1;
-    await Promise.all([fetchList(), fetchKindsModels()]);
+    const res = await deleteLogs(filterQuery())
+    message.success(`已清空 ${res.deleted} 条日志`)
+    page.value = 1
+    await Promise.all([fetchList(), fetchKindsModels()])
   } catch (e) {
-    message.error(String(e));
+    message.error(String(e))
   } finally {
-    clearing.value = false;
+    clearing.value = false
   }
 }
 
 // ── 生命周期：首次加载 + 近实时轮询 ──
 onMounted(() => {
-  void fetchKindsModels();
-  void fetchList();
+  void fetchKindsModels()
+  void fetchEffortLabels()
+  void fetchList()
   timer = window.setInterval(() => {
-    if (!paused.value && !loading.value) void fetchList(true);
-  }, POLL_MS);
-});
-onUnmounted(() => clearInterval(timer));
+    if (!paused.value && !loading.value) void fetchList(true)
+  }, POLL_MS)
+})
+onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
@@ -204,9 +218,12 @@ onUnmounted(() => clearInterval(timer));
       <div class="head">
         <span class="card-title">请求日志</span>
         <span class="spacer" />
-        <span class="live mono" :class="{ off: paused }">
+        <span
+          class="live mono"
+          :class="{ off: paused }"
+        >
           <span class="live-dot" />
-          {{ paused ? "已暂停" : "自动刷新" }}
+          {{ paused ? '已暂停' : '自动刷新' }}
         </span>
       </div>
 
@@ -242,11 +259,20 @@ onUnmounted(() => clearInterval(timer));
           :update-value-on-close="true"
           @update:value="onFilterChange"
         />
-        <n-button size="small" quaternary @click="resetFilter">重置筛选</n-button>
+        <n-button
+          size="small"
+          quaternary
+          @click="resetFilter"
+          >重置筛选</n-button
+        >
 
         <div class="spacer" />
-        <n-button size="small" :type="paused ? 'primary' : 'default'" @click="paused = !paused">
-          {{ paused ? "继续" : "暂停" }}
+        <n-button
+          size="small"
+          :type="paused ? 'primary' : 'default'"
+          @click="paused = !paused"
+        >
+          {{ paused ? '继续' : '暂停' }}
         </n-button>
         <n-popconfirm
           :positive-button-props="{ size: 'small', type: 'error' }"
@@ -256,13 +282,23 @@ onUnmounted(() => clearInterval(timer));
           @positive-click="confirmClear"
         >
           <template #trigger>
-            <n-button size="small" type="error" secondary :loading="clearing">清空日志</n-button>
+            <n-button
+              size="small"
+              type="error"
+              secondary
+              :loading="clearing"
+              >清空日志</n-button
+            >
           </template>
           将删除{{ clearScopeText }}，该操作不可恢复。
         </n-popconfirm>
       </div>
 
-      <div v-if="loadError" class="err-banner">加载失败：{{ loadError }}</div>
+      <div
+        v-if="loadError"
+        class="err-banner"
+        >加载失败：{{ loadError }}</div
+      >
 
       <div class="log-wrap">
         <n-spin :show="loading">
@@ -276,18 +312,39 @@ onUnmounted(() => clearInterval(timer));
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in rows" :key="row.id">
+              <tr
+                v-for="row in rows"
+                :key="row.id"
+              >
                 <td class="mono dim time-cell">{{ fmtTs(row.ts) }}</td>
                 <td>
-                  <span class="cp-tag" :class="kindOf(row).cls">{{ kindOf(row).label }}</span>
+                  <span
+                    class="cp-tag"
+                    :class="kindOf(row).cls"
+                    >{{ kindOf(row).label }}</span
+                  >
                 </td>
-                <td class="mono dim model-cell" :title="row.model || ''">{{ row.model || "—" }}</td>
-                <td class="mono dim detail" :title="titleOf(row)">{{ detailOf(row) }}</td>
+                <td
+                  class="mono dim model-cell"
+                  :title="row.model || ''"
+                  >{{ row.model || '—' }}</td
+                >
+                <td
+                  class="mono dim detail"
+                  :title="titleOf(row)"
+                  >{{ detailOf(row) }}</td
+                >
               </tr>
             </tbody>
           </table>
-          <div v-if="!loading && !loadError && rows.length === 0" class="empty-wrap">
-            <n-empty size="small" description="暂无日志" />
+          <div
+            v-if="!loading && !loadError && rows.length === 0"
+            class="empty-wrap"
+          >
+            <n-empty
+              size="small"
+              description="暂无日志"
+            />
           </div>
         </n-spin>
       </div>

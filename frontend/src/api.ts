@@ -23,6 +23,10 @@ export interface Config {
   api_key: string
   tool_mode: string
   model_whitelist: string[]
+  /** 每模型默认思考强度（agent 未显式传思考参数时下发；缺省按 none=关 处理） */
+  thinking_defaults: Record<string, string>
+  /** agent 不传思考参数时的兜底策略：default=假关（按每模型默认值）/ off=真关（一律关思考） */
+  thinking_unset_mode: 'default' | 'off'
 }
 
 export interface OaiModel {
@@ -30,6 +34,10 @@ export interface OaiModel {
   name?: string
   context_window?: number | null
   supports_reasoning?: boolean
+  /** 思考强度档位（上游 thinkingLevels 的 level，即 reasoning_effort 合法取值） */
+  reasoning_efforts?: string[]
+  /** 档位 → 上游中文标签（低/高/极 等，各模型文案可能不同） */
+  reasoning_labels?: Record<string, string>
   is_multimodal?: boolean
 }
 

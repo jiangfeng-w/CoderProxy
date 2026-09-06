@@ -137,3 +137,73 @@ def test_config_post_tool_mode_invalid_keeps_disk(client):
                        headers=_auth()).status_code == 400
     assert settings.tool_mode == "passthrough"  # 非法请求不破坏运行值
     assert _run(storage.get_tool_mode()) == "passthrough"
+
+
+# ─────────────────────────── 每模型默认思考强度 ───────────────────────────
+
+def test_thinking_defaults_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    assert _run(storage.get_thinking_defaults()) == {}
+    _run(storage.save_thinking_defaults({"glm-5.3": "high", "kimi-k3": "none"}))
+    assert _run(storage.get_thinking_defaults()) == {"glm-5.3": "high", "kimi-k3": "none"}
+
+
+def test_thinking_defaults_dirty_values_filtered(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    # 非法档位（大写开头/超长/非字符串）与空模型名被过滤，合法项保留
+    saved = _run(storage.save_thinking_defaults({
+        "glm-5.3": "high", "m1": "High", "m2": "x" * 40, "m3": 1, "": "low",
+    }))
+    assert saved == {"glm-5.3": "high"}
+    assert _run(storage.get_thinking_defaults()) == {"glm-5.3": "high"}
+
+
+def test_config_post_thinking_defaults(client):
+    r = client.post("/v1/auth/config",
+                    json={"thinking_defaults": {"glm-5.3": "max"}}, headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["thinking_defaults"] == {"glm-5.3": "max"}
+    assert _run(storage.get_thinking_defaults()) == {"glm-5.3": "max"}
+
+
+def test_config_post_thinking_defaults_invalid(client):
+    for bad in (["not-a-dict"], {"m": "High"}, {"m": ""}, {"m": 1}):
+        r = client.post("/v1/auth/config",
+                        json={"thinking_defaults": bad}, headers=_auth())
+        assert r.status_code == 400, bad
+    assert _run(storage.get_thinking_defaults()) == {}  # 非法请求不落盘
+
+
+# ─────────────────────────── 思考兜底策略（真关/假关）───────────────────────────
+
+def test_thinking_unset_mode_default_is_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    assert _run(storage.get_thinking_unset_mode()) == "default"  # 缺省=假关
+
+
+def test_thinking_unset_mode_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    _run(storage.save_thinking_unset_mode("off"))
+    assert _run(storage.get_thinking_unset_mode()) == "off"
+
+
+def test_thinking_unset_mode_invalid_falls_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    import json
+
+    p = storage.state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"config": {"thinking_unset_mode": "bogus"}}), "utf-8")
+    assert _run(storage.get_thinking_unset_mode()) == "default"  # 损坏值回退假关
+
+
+def test_config_post_thinking_unset_mode(client):
+    r = client.post("/v1/auth/config",
+                    json={"thinking_unset_mode": "off"}, headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["thinking_unset_mode"] == "off"
+    assert _run(storage.get_thinking_unset_mode()) == "off"
+    # 非法值 400 且不落盘
+    assert client.post("/v1/auth/config", json={"thinking_unset_mode": "bogus"},
+                       headers=_auth()).status_code == 400
+    assert _run(storage.get_thinking_unset_mode()) == "off"

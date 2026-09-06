@@ -39,3 +39,21 @@ const TOOL_MODE_LABELS: Record<string, string> = {
 export function toolModeLabel(mode?: string): string {
   return TOOL_MODE_LABELS[mode ?? ''] ?? mode ?? '—'
 }
+
+/** 思考档位标准集（按强度升序；none 即「关」不入列）。
+ * 依据国产厂商官方文档：智谱 GLM-5.2+ 官方枚举即 minimal/low/medium/high/xhigh/max
+ * （none/minimal=放弃思考，low/medium→high，xhigh→max）；DeepSeek V4=high/max；
+ * Kimi K3=low/high/max。上游目录 thinkingLevels 只是官方客户端 UI 选项集、非网关
+ * 白名单（实测目录外档位如 deepseek 传 low 也被接受），故模型页下拉在目录档位外
+ * 补全此集合并标注「不保证生效」。 */
+export const STANDARD_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** 标准档位的兜底中文名（目录档位优先用上游自带标签，此处仅用于目录外档位/日志兜底）。 */
+export const STANDARD_EFFORT_LABELS: Record<string, string> = {
+  minimal: '微',
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '超高',
+  max: '极致'
+}

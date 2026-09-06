@@ -566,8 +566,10 @@ class Ta3Provider(ModelProvider):
         if self._thinking_enabled(request):
             effort = self._thinking_intensity(request)
             if effort == "none":
-                if not is_kimi:
-                    body["thinking"] = {"type": "disabled"}
+                # 本地修订：kimi 也显式发 thinking disabled，
+                # 对齐牛码官方 anthropicAdapter 的 none 分支（无条件 disabled）；
+                # 原实现对 kimi 什么都不发 → 落上游默认思考，「关」语义失效。
+                body["thinking"] = {"type": "disabled"}
             elif is_kimi:
                 # kimi 官方：output_config.effort 控制思考档位，不发 thinking 块
                 # v29 (plan-78): effort 归一化到 low/high/max，未知档位取保守默认

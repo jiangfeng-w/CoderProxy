@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import threading
 from dataclasses import dataclass, field
@@ -209,6 +210,64 @@ async def apply_persisted_config() -> None:
     m = (state.get("config") or {}).get("tool_mode")
     if m in _VALID_TOOL_MODES:
         settings.tool_mode = m
+
+
+# ─────────────────────────── 每模型默认思考强度 ───────────────────────────
+
+# agent 未显式传 thinking/reasoning_effort 时按此默认值下发；"none" = 关思考
+# （走 ta3.py 的 thinking:disabled 路径）。未配置的模型按 "none" 处理。
+DEFAULT_THINKING_EFFORT = "none"
+_EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+# agent 不传思考参数时的兜底策略：
+# - "default"（假关，默认）：按每模型 thinking_defaults 下发（模型页可调成低/高档）
+# - "off"（真关）：一律显式关思考（thinking:disabled），忽略每模型默认值
+VALID_THINKING_UNSET_MODES = {"default", "off"}
+DEFAULT_THINKING_UNSET_MODE = "default"
+
+
+def valid_thinking_effort(value) -> bool:
+    """档位取值合法性：none 或牛码 thinkingLevels 的 level 形态（小写字母开头短串）。"""
+    return isinstance(value, str) and bool(_EFFORT_RE.match(value))
+
+
+async def get_thinking_defaults() -> dict[str, str]:
+    """每模型默认思考强度映射 {model: effort}（只含合法条目）。"""
+    state = await _io(_load_state)
+    raw = (state.get("config") or {}).get("thinking_defaults") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items()
+            if str(k).strip() and valid_thinking_effort(v)}
+
+
+async def save_thinking_defaults(defaults: dict) -> dict[str, str]:
+    """整体覆盖每模型默认思考强度映射（GUI 模型页下拉写入）。"""
+    clean = {str(k): v for k, v in (defaults or {}).items()
+             if str(k).strip() and valid_thinking_effort(v)}
+    async with _asyncio_lock:
+        state = await _io(_load_state)
+        state.setdefault("config", {})["thinking_defaults"] = clean
+        await _io(_save_state, state)
+    return clean
+
+
+async def get_thinking_unset_mode() -> str:
+    """agent 不传思考参数时的兜底策略（default/off）；损坏值回退默认（假关）。"""
+    state = await _io(_load_state)
+    m = (state.get("config") or {}).get("thinking_unset_mode")
+    return m if m in VALID_THINKING_UNSET_MODES else DEFAULT_THINKING_UNSET_MODE
+
+
+async def save_thinking_unset_mode(mode: str) -> str:
+    """持久化兜底策略（GUI 设置页「真关/假关」开关写入）。"""
+    if mode not in VALID_THINKING_UNSET_MODES:
+        mode = DEFAULT_THINKING_UNSET_MODE
+    async with _asyncio_lock:
+        state = await _io(_load_state)
+        state.setdefault("config", {})["thinking_unset_mode"] = mode
+        await _io(_save_state, state)
+    return mode
 
 
 # ─────────────────────────── 模型白名单（M4）───────────────────────────

@@ -22,7 +22,9 @@ export const useConfigStore = defineStore('config', {
     port: 3601,
     api_key: '',
     tool_mode: 'hybrid',
-    model_whitelist: []
+    model_whitelist: [],
+    thinking_defaults: {},
+    thinking_unset_mode: 'default'
   }),
   actions: {
     /** 用后端返回的完整 config 整体替换本 store（唯一收敛入口）。 */

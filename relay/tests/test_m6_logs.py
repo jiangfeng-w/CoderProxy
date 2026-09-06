@@ -282,10 +282,11 @@ def test_chat_non_stream_logs_request_done(client, monkeypatch):
                              "messages": [{"role": "user", "content": "hi"}]},
                        headers=_auth())
     assert resp.status_code == 200
-    # chat_request：tools 走 detail
+    # chat_request：tools + 思考下发态走 detail（agent 未传思考参数 → 假关默认 none）
     reqs, _ = _run(db.query_logs(kind="chat_request"))
     assert len(reqs) == 1 and reqs[0]["model"] == "glm-x"
-    assert reqs[0]["detail"] == {"tools": 0} and reqs[0]["stream"] == 0
+    assert reqs[0]["detail"] == {"tools": 0, "thinking": True, "thinking_effort": "none"}
+    assert reqs[0]["stream"] == 0
     # chat_done：usage 各 token + duration
     dones, _ = _run(db.query_logs(kind="chat_done"))
     row = dones[0]

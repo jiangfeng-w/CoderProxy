@@ -36,6 +36,30 @@ def test_build_openai_body_temperature_default():
     assert "tools" not in body
 
 
+def test_anthropic_body_thinking_off_for_kimi():
+    """本地修订：kimi 关思考也显式发 thinking:disabled（对齐牛码官方 anthropicAdapter）。"""
+    p = _provider(model="kimi-k3", meta={
+        "anthropic": True, "completionOptions": {"thinkingEnabled": True, "maxTokens": 32768},
+    })
+    req = ChatRequest(model="kimi-k3", messages=[ChatMessage(role="user", content="hi")],
+                      thinking=True, reasoning_effort="none")
+    body = p._build_anthropic_body(req, disguised=[])
+    assert body["thinking"] == {"type": "disabled"}
+    assert "output_config" not in body
+
+
+def test_anthropic_body_kimi_effort_unchanged():
+    """kimi 开思考仍走 output_config.effort（本地修订不影响既有行为）。"""
+    p = _provider(model="kimi-k3", meta={
+        "anthropic": True, "completionOptions": {"thinkingEnabled": True, "maxTokens": 32768},
+    })
+    req = ChatRequest(model="kimi-k3", messages=[ChatMessage(role="user", content="hi")],
+                      thinking=True, reasoning_effort="high")
+    body = p._build_anthropic_body(req, disguised=[])
+    assert body["output_config"] == {"effort": "high"}
+    assert "thinking" not in body
+
+
 def test_restore_tool_calls_mapping():
     """入站：ta3 名 → 真实执行名 + 参数还原。"""
     p = _provider()
