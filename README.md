@@ -30,14 +30,14 @@
 
 | 项 | 状态 |
 |---|---|
-| 方案/路线 | ✅ `docs/CoderProxy-开发计划-2026-09-03.md`（总计划）＋ `docs/spec/`（每里程碑一篇，均本地备忘不入仓库）
+| 方案/路线 | ✅ `docs/CoderProxy-开发计划-2026-09-03.md`（总计划）＋ `docs/spec/`（每需求一篇）
 | 实现 | ⛔ 未开始，按 M1 探针 → M2 relay → M3 工具伪装 → M4 Tauri 壳 → M5 打包 推进 |
 
-> 开发/实现约定见 `AGENTS.md`（本地备忘，不入仓库）。
+> 开发/实现约定见 `AGENTS.md`。
 
 ## 风险提示
 
-逆向 + 伪装登录属于**非官方客户端行为**，牛码可能风控**封号**。请使用小号验证，责任自负。详见 `docs/CoderProxy-开发计划-2026-09-03.md` §10（本地备忘）。
+逆向 + 伪装登录属于**非官方客户端行为**，牛码可能风控**封号**。请使用小号验证，责任自负。详见 `docs/CoderProxy-开发计划-2026-09-03.md` §10。
 
 ## 开发
 
@@ -50,6 +50,6 @@
 src-tauri/        Rust 壳（spawn sidecar / 配置）
 frontend/         Vue3 前端（登录 / 配置 / 模型 / 日志）
 relay/            Python FastAPI 中转（内置 ta3 伪装/登录层）
-docs/             CoderProxy-开发计划 + spec 需求文档（本地备忘，不入仓库）
-AGENTS.md         开发规则（本地备忘）
+docs/             CoderProxy-开发计划 + spec 需求文档 + 已知问题台账
+AGENTS.md         开发规则
 ```
