@@ -55,7 +55,7 @@ relay/relay/platforms/
     ├── billing.py   # get_checkin_status(宽松解析) / perform_checkin(幂等) / fetch_quota(多形态解析)
     └── adapter.py   # WorkBuddyAdapter：编排 oauth/billing/store；ensure_token(per-uid Lock 双检)
 
-frontend/src/views/WorkBuddy.vue       # 账号卡片列表 + 添加账号弹窗（授权 URL + 轮询等待）
+frontend/src/views/WorkBuddy.vue       # 账号卡片列表 + 添加账号弹窗（授权 URL + 轮询等待）；挂接「供应商页」WorkBuddy 分节（见「供应商页-登录与多平台账号入口」；若该页未先落地，以独立页+nav 项过渡，落成后迁入）
 frontend/src/stores/workbuddy.ts       # Pinia store（对齐 stores/config.ts 拆分先例）
 ```
 
@@ -125,7 +125,7 @@ frontend/src/stores/workbuddy.ts       # Pinia store（对齐 stores/config.ts �
 | 3 | `feat: WorkBuddy 设备授权登录流`（oauth.py + adapter.ensure_token/refresh + test_wb_oauth.py） | pytest（MockTransport 全序列） |
 | 4 | `feat: WorkBuddy 签到与配额查询`（billing.py + adapter 编排 + test_wb_billing.py） | pytest |
 | 5 | `feat: /v1/platforms 管理端点`（routes.py + 挂载 + test_wb_routes.py） | pytest 全量 + 源码跑 relay 后 curl |
-| 6 | `feat: 前端 WorkBuddy 账号页`（WorkBuddy.vue + stores/workbuddy.ts + api.ts + Shell.vue） | npm run format:check、npm run build、dev 预览 |
+| 6 | `feat: 前端 WorkBuddy 账号页`（WorkBuddy.vue + stores/workbuddy.ts + api.ts + Shell.vue；**挂接「供应商页」分节**——见 [供应商页](../供应商页-登录与多平台账号入口/)，后端步骤 1–5 不受影响可先行） | npm run format:check、npm run build、dev 预览 |
 | 7 | `chore: 打包登记 platforms 模块`（两个 spec） | `py -3.13 build_sidecar.py` + 产物冒烟 |
 | 8 | 手动小号 e2e：登录→签到→配额→删除；**ta3 回归**（/v1/auth/login/start、/v1/models、一次 /v1/chat/completions） | 硬性规则 5：只用小号 |
 
