@@ -8,6 +8,8 @@
 | 复用来源 | 参考实现仓库（已逆向出的「伪装牛码登录 + 请求指纹伪装」），只做 Ta+3 牛码 |
 | 技术栈 | Tauri(Rust) 壳 + Vue3 前端 + Python FastAPI relay（vendored 的 ta3 伪装/登录库）|
 
+> **快照声明（2026-10-07 补）**：本文是**立项方案快照**，非持续维护的实现文档。M1–M10 及后续需求的实际落地与口径演进**一律以 `docs/spec/` 各需求文档为准**（如 UI 组件库实际为 Naive UI 而非 §6.1 的 Element Plus；relay 实际新增 `monitor.py`/`db.py`/`tool_disguise.py` 之外还有 `cli.py`/`tool_inventory.py`/`platforms/` 等；默认端口为 3601）。本文价值在调研结论（§3）、架构分层（§4）与风险合规（§10）。
+
 ---
 
 ## 0. 一句话目标
@@ -237,7 +239,7 @@ CoderProxy/
 
 ## 11. 待用户拍板的开放项
 
-1. **项目命名**：暂定 `CoderProxy`（牛码中转），目录 `D:\Code\home\own-project\CoderProxy`，可改。
+1. **项目命名**：✅ 已定 `CoderProxy`（牛码中转），目录 `D:\Code\own-project\CoderProxy`。
 2. **工具模式默认值**：✅ 已定（M1 探针）——默认 `hybrid`，长尾=透传保留（见 §3.4）。
 3. **API Key 默认策略**：建议启动随机生成 + GUI 展示/复制（比固定静态更省心），你也能改成固定。
 4. **M1 探针（已做完毕）**：✅ 详见 §3.4，整方案假设已坐实，可进入 M2。

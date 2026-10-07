@@ -78,14 +78,14 @@ SQL 用 `GROUP BY` 按维度聚合；`day` → `strftime('%Y-%m-%d', ts)`，`hou
 
 - **聚合依赖独立列**：M8 的 `GROUP BY` 只针对 M6 `logs` 的 `kind/model/ts/tokens` 等**独立列**。未来出现新统计维度时，该字段必须先按 M6 扩展策略以**可空独立列**落库（启动 `ALTER TABLE ADD COLUMN` 自动补列），可参与聚合后再接入统计——`detail` JSON 不参与聚合。
 
-## 4. 验收（实现前必填）
+## 4. 验收（实现前必填；2026-09-04 实现时达成，回填勾选）
 
-1. `/v1/stats` 按 model/day/hour/kind 分别聚合，数字与 logs 明细一致（抽样核对）。
-2. 时间区间筛选与日志页（M7）一致；total 汇总正确。
-3. 前端统计页可切换维度、筛选后图表刷新。
-4. 按 day 折线、按 model 柱状正确渲染；切空数据不报错（空态）。
-5. 打包 sidecar + frontend build 通过。
-6. 前端类型检查（vue-tsc）通过。
+1. [x] `/v1/stats` 按 model/day/hour/kind 分别聚合，数字与 logs 明细一致（抽样核对）。
+2. [x] 时间区间筛选与日志页（M7）一致；total 汇总正确。
+3. [x] 前端统计页可切换维度、筛选后图表刷新。
+4. [x] 按 day 折线、按 model 柱状正确渲染；切空数据不报错（空态）。
+5. [x] 打包 sidecar + frontend build 通过。
+6. [x] 前端类型检查（vue-tsc）通过。
 
 ## 5. 支撑脚本
 
