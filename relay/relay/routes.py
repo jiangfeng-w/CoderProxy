@@ -40,7 +40,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.models.providers.ta3 import Ta3Provider
 from app.models.schemas import ChatRequest
 
-from relay import auth_flow, db, oai_adapter, storage, tool_disguise, tool_inventory
+from relay import auth_flow, db, oai_adapter, providers_custom, storage, tool_disguise, tool_inventory
 from relay.config import settings
 from relay.middleware import require_api_key
 from relay.monitor import monitor
@@ -564,6 +564,94 @@ async def auth_config_update(request: Request):
         await storage.save_port(port)
 
     return await auth_config()
+
+
+# ─────────────────────────── /v1/providers/custom（供应商页：自定义供应商配置管理）───────────────────────────
+
+async def _json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是对象")
+    return body
+
+
+def _validate_custom_provider(body: dict, *, partial: bool) -> dict:
+    """校验并归一化自定义供应商请求体；非法字段直接 400。
+
+    partial=False（新增）：name/base_url 必填，enabled/models/api_key 可选；
+    partial=True（更新）：仅校验出现的字段；api_key 键缺省 = 保留旧值（不进返回
+    dict），显式传字符串（含空串）= 覆盖。
+    """
+    entry: dict = {}
+    if "name" in body or not partial:
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="名称不能为空")
+        entry["name"] = name.strip()
+    if "base_url" in body or not partial:
+        base_url = body.get("base_url")
+        if (not isinstance(base_url, str)
+                or not base_url.strip().lower().startswith(("http://", "https://"))):
+            raise HTTPException(status_code=400,
+                                detail="base_url 必须以 http:// 或 https:// 开头")
+        entry["base_url"] = base_url.strip()
+    if "api_key" in body:
+        api_key = body.get("api_key")
+        if api_key is not None and not isinstance(api_key, str):
+            raise HTTPException(status_code=400, detail="api_key 必须是字符串")
+        if api_key is not None:
+            entry["api_key"] = api_key.strip()
+    if "enabled" in body:
+        if not isinstance(body.get("enabled"), bool):
+            raise HTTPException(status_code=400, detail="enabled 必须是布尔值")
+        entry["enabled"] = body["enabled"]
+    if "models" in body:
+        models = body.get("models")
+        if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
+            raise HTTPException(status_code=400, detail="模型列表格式不正确")
+        entry["models"] = [m.strip() for m in models if m.strip()]
+    return entry
+
+
+@app.get("/v1/providers/custom", dependencies=[Depends(require_api_key)])
+async def providers_custom_list():
+    """自定义供应商列表（api_key 不回显，以 has_api_key 代替）。"""
+    return {"providers": [providers_custom.public_view(p)
+                          for p in await providers_custom.load_providers()]}
+
+
+@app.post("/v1/providers/custom", dependencies=[Depends(require_api_key)])
+async def providers_custom_create(request: Request):
+    """新增自定义供应商（name/base_url 必填；api_key 仅落盘不回显）。"""
+    entry = _validate_custom_provider(await _json_body(request), partial=False)
+    entry.setdefault("enabled", True)
+    entry.setdefault("models", [])
+    created = await providers_custom.upsert_provider(entry)
+    return {"provider": providers_custom.public_view(created)}
+
+
+@app.post("/v1/providers/custom/{pid}", dependencies=[Depends(require_api_key)])
+async def providers_custom_update(pid: str, request: Request):
+    """更新自定义供应商：仅处理出现的字段（api_key 缺省保留旧值）。
+
+    用 POST 而非 PUT：Tauri 壳 relay 转发只放行 GET/POST/DELETE。
+    """
+    patch = _validate_custom_provider(await _json_body(request), partial=True)
+    existing = await providers_custom.find_provider(pid)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="自定义供应商不存在")
+    updated = await providers_custom.upsert_provider({**existing, **patch})
+    return {"provider": providers_custom.public_view(updated)}
+
+
+@app.delete("/v1/providers/custom/{pid}", dependencies=[Depends(require_api_key)])
+async def providers_custom_delete(pid: str):
+    if not await providers_custom.delete_provider(pid):
+        raise HTTPException(status_code=404, detail="自定义供应商不存在")
+    return {"status": "deleted"}
 
 
 # ─────────────────────────── /v1/service（对 agent 的 OpenAI 服务开关，方案B）───────────────────────────

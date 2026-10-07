@@ -59,8 +59,9 @@ export function setAuthKey(key: string): void {
   _authKey = key
 }
 
-/** 通用中继：只放行 /v1/*，支持 GET/POST/DELETE。 */
-export async function relay(method: 'GET' | 'POST' | 'DELETE', path: string, body?: Record<string, unknown>): Promise<any> {
+/** 通用中继：只放行 /v1/*，支持 GET/POST/DELETE。
+ * body 用 object（非 Record）：接口入参（如 CustomProviderInput）无索引签名也能直传。 */
+export async function relay(method: 'GET' | 'POST' | 'DELETE', path: string, body?: object): Promise<any> {
   return invoke('relay', { method, path, body: body ?? null, apiKey: _authKey })
 }
 
@@ -169,6 +170,33 @@ export const fetchLogModels = (): Promise<{ models: string[] }> => relay('GET', 
 
 /** 按条件清空（无参数 = 全清）。 */
 export const deleteLogs = (q: LogsQuery = {}): Promise<{ status: string; deleted: number }> => relay('DELETE', `/v1/logs${logsQueryString(q)}`)
+
+// ─────────────────────────── /v1/providers/custom（供应商页：自定义供应商配置管理）───────────────────────────
+
+/** 自定义供应商（API 响应视图：api_key 永不回显，以 has_api_key 表达「是否已设置」）。 */
+export interface CustomProvider {
+  id: string
+  name: string
+  base_url: string
+  enabled: boolean
+  models: string[]
+  has_api_key: boolean
+}
+
+/** 新增/更新入参：api_key 仅在显式传入时覆盖（键缺省 = 保留旧值，空串 = 清除）。 */
+export interface CustomProviderInput {
+  name?: string
+  base_url?: string
+  api_key?: string
+  enabled?: boolean
+  models?: string[]
+}
+
+export const listCustomProviders = (): Promise<{ providers: CustomProvider[] }> => relay('GET', '/v1/providers/custom')
+export const createCustomProvider = (body: CustomProviderInput): Promise<{ provider: CustomProvider }> => relay('POST', '/v1/providers/custom', body)
+/** 更新用 POST 而非 PUT：Tauri 壳 relay 转发只放行 GET/POST/DELETE。 */
+export const updateCustomProvider = (id: string, body: CustomProviderInput): Promise<{ provider: CustomProvider }> => relay('POST', `/v1/providers/custom/${id}`, body)
+export const deleteCustomProvider = (id: string): Promise<{ status: string }> => relay('DELETE', `/v1/providers/custom/${id}`)
 
 // ─────────────────────────── /v1/stats（M8：Token 统计页）───────────────────────────
 

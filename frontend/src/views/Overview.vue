@@ -189,7 +189,7 @@ onUnmounted(() => {
       <div class="card">
         <div class="card-title">
           已同步模型
-          <span class="card-extra"><a @click="store.view = 'models'">前往模型页管理 →</a></span>
+          <span class="card-extra"><a @click="store.view = 'providers'">前往供应商页管理 →</a></span>
         </div>
         <div
           v-if="models.length === 0"

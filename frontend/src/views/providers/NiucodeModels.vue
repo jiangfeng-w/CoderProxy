@@ -1,10 +1,11 @@
 <script setup lang="ts">
-// 模型页：列表 + 搜索 + 白名单启用开关 + 全部启用/禁用 + 可用状态检测。
-import { computed, h, onMounted, onUnmounted, ref, type VNodeChild } from 'vue'
+// 牛码 tab 模型区（原模型页功能整体迁入，供应商页 F3）：列表 + 搜索 + 白名单启用开关 +
+// 全部启用/禁用 + 可用状态检测。同步按钮归上方账号区，目录刷新监听 store.syncTick。
+import { computed, h, onMounted, onUnmounted, ref, watch, type VNodeChild } from 'vue'
 import { NSelect, NTooltip, useMessage } from 'naive-ui'
-import { getModels, authSync, type OaiModel } from '../api'
-import { store, useConfigStore, STANDARD_EFFORTS, STANDARD_EFFORT_LABELS } from '../store'
-import { testModel } from '../modelCheck'
+import { getModels, type OaiModel } from '../../api'
+import { store, useConfigStore, STANDARD_EFFORTS, STANDARD_EFFORT_LABELS } from '../../store'
+import { testModel } from '../../modelCheck'
 
 const message = useMessage()
 const config = useConfigStore()
@@ -12,7 +13,6 @@ const DISABLE_ALL = '__none__'
 
 const models = ref<OaiModel[]>([])
 const search = ref('')
-const syncing = ref(false)
 const testing = ref<string | null>(null)
 let timer: number | undefined
 
@@ -98,22 +98,6 @@ async function onAllEnable() {
 async function onAllDisable() {
   await saveWl([DISABLE_ALL])
   message.success('已全部禁用')
-}
-
-/** 同步模型目录并刷新列表（只拉最新目录，不自动做连通性测试——
- * 测试为显式动作，只由用户在模型页点击状态胶囊触发）。 */
-async function onSync() {
-  if (syncing.value) return
-  syncing.value = true
-  try {
-    const res = await authSync()
-    message.success(`同步完成：${res.models.length} 个模型`)
-    models.value = (await getModels(true)).data
-  } catch (e) {
-    message.error(String(e))
-  } finally {
-    syncing.value = false
-  }
 }
 
 /** 点击模型名即复制到剪贴板。 */
@@ -239,9 +223,17 @@ async function load() {
   }
 }
 
+// 账号区「同步模型目录」/ Shell 登录后自动同步完成 → bump syncTick → 刷新列表
+watch(
+  () => store.syncTick,
+  () => {
+    load()
+  }
+)
+
 onMounted(() => {
   load()
-  // 空列表时轮询，感知 Shell 登录后自动同步的结果
+  // 空列表时轮询，感知登录后自动同步的结果
   timer = window.setInterval(() => {
     if (models.value.length === 0) load()
   }, 3000)
@@ -250,130 +242,121 @@ onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
-  <div>
-    <div class="card">
-      <div class="toolbar">
-        <input
-          v-model="search"
-          class="search"
-          placeholder="搜索模型名"
-        />
-        <button
-          class="btn primary"
-          :disabled="syncing"
-          @click="onSync"
-        >
-          同步模型
-        </button>
-        <button
-          class="btn primary"
-          @click="onAllEnable"
-        >
-          全部启用
-        </button>
-        <button
-          class="btn danger"
-          @click="onAllDisable"
-        >
-          全部禁用
-        </button>
-        <span class="count mono">已启用 {{ models.filter(m => isEnabled(m.id)).length }}/{{ models.length }}</span>
-      </div>
-
-      <div
-        v-if="filtered.length === 0"
-        class="empty"
+  <div class="card">
+    <div class="toolbar">
+      <input
+        v-model="search"
+        class="search"
+        placeholder="搜索模型名"
+      />
+      <button
+        class="btn primary"
+        @click="onAllEnable"
       >
-        暂无模型，请先登录并同步模型目录
-      </div>
-      <table
-        v-else
-        class="tbl"
+        全部启用
+      </button>
+      <button
+        class="btn danger"
+        @click="onAllDisable"
       >
-        <thead>
-          <tr>
-            <th>模型名</th>
-            <th class="col-ctx">上下文</th>
-            <th class="col-effort">默认思考强度</th>
-            <th class="col-status">状态（点击测试）</th>
-            <th class="col-toggle">启用</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="m in filtered"
-            :key="m.id"
-          >
-            <td
-              class="mono copyable"
-              title="点击复制模型名"
-              @click="onCopy(m.id)"
-            >
-              {{ m.id }}
-            </td>
-            <td class="mono dim col-ctx">
-              {{ fmtContext(m.context_window) }}
-            </td>
-            <td class="col-effort">
-              <NSelect
-                v-if="(m.reasoning_efforts ?? []).length > 0"
-                size="small"
-                :value="effortValue(m)"
-                :options="effortOptions(m)"
-                :render-option="effortRenderer(m)"
-                :consistent-menu-width="false"
-                title="agent 未传思考参数时按此默认值下发；hover 各选项查看档位说明（仅上游目录档位保证生效）"
-                @update:value="(v: string) => onEffortChange(m, v)"
-              />
-              <span
-                v-else
-                class="dim"
-                >{{ m.supports_reasoning ? '支持（无档位）' : '—' }}</span
-              >
-            </td>
-            <td class="col-status">
-              <div class="st">
-                <button
-                  class="cap"
-                  :class="capClass(m.id)"
-                  :disabled="testing !== null"
-                  :title="capTitle(m.id)"
-                  @click="onTest(m.id)"
-                >
-                  {{ capText(m.id) }}
-                </button>
-                <button
-                  v-if="getStatus(m.id) === 'success' && !isEnabled(m.id)"
-                  class="hint"
-                  title="连通性测试已通过但未在白名单，点击立即启用"
-                  @click="onToggle(m.id, true)"
-                >
-                  点击启用
-                </button>
-                <button
-                  v-else-if="getStatus(m.id) === 'failure' && isEnabled(m.id)"
-                  class="hint danger"
-                  title="测试失败但该模型仍在启用中，点击停用"
-                  @click="onToggle(m.id, false)"
-                >
-                  点击停用
-                </button>
-              </div>
-            </td>
-            <td class="col-toggle">
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  :checked="isEnabled(m.id)"
-                  @change="onToggle(m.id, ($event.target as HTMLInputElement).checked)"
-                />
-                <span class="slider" />
-              </label>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+        全部禁用
+      </button>
+      <span class="count mono">已启用 {{ models.filter(m => isEnabled(m.id)).length }}/{{ models.length }}</span>
     </div>
+
+    <div
+      v-if="filtered.length === 0"
+      class="empty"
+    >
+      暂无模型，请先在上方账号区登录并同步模型目录
+    </div>
+    <table
+      v-else
+      class="tbl"
+    >
+      <thead>
+        <tr>
+          <th>模型名</th>
+          <th class="col-ctx">上下文</th>
+          <th class="col-effort">默认思考强度</th>
+          <th class="col-status">状态（点击测试）</th>
+          <th class="col-toggle">启用</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr
+          v-for="m in filtered"
+          :key="m.id"
+        >
+          <td
+            class="mono copyable"
+            title="点击复制模型名"
+            @click="onCopy(m.id)"
+          >
+            {{ m.id }}
+          </td>
+          <td class="mono dim col-ctx">
+            {{ fmtContext(m.context_window) }}
+          </td>
+          <td class="col-effort">
+            <NSelect
+              v-if="(m.reasoning_efforts ?? []).length > 0"
+              size="small"
+              :value="effortValue(m)"
+              :options="effortOptions(m)"
+              :render-option="effortRenderer(m)"
+              :consistent-menu-width="false"
+              title="agent 未传思考参数时按此默认值下发；hover 各选项查看档位说明（仅上游目录档位保证生效）"
+              @update:value="(v: string) => onEffortChange(m, v)"
+            />
+            <span
+              v-else
+              class="dim"
+              >{{ m.supports_reasoning ? '支持（无档位）' : '—' }}</span
+            >
+          </td>
+          <td class="col-status">
+            <div class="st">
+              <button
+                class="cap"
+                :class="capClass(m.id)"
+                :disabled="testing !== null"
+                :title="capTitle(m.id)"
+                @click="onTest(m.id)"
+              >
+                {{ capText(m.id) }}
+              </button>
+              <button
+                v-if="getStatus(m.id) === 'success' && !isEnabled(m.id)"
+                class="hint"
+                title="连通性测试已通过但未在白名单，点击立即启用"
+                @click="onToggle(m.id, true)"
+              >
+                点击启用
+              </button>
+              <button
+                v-else-if="getStatus(m.id) === 'failure' && isEnabled(m.id)"
+                class="hint danger"
+                title="测试失败但该模型仍在启用中，点击停用"
+                @click="onToggle(m.id, false)"
+              >
+                点击停用
+              </button>
+            </div>
+          </td>
+          <td class="col-toggle">
+            <label class="switch">
+              <input
+                type="checkbox"
+                :checked="isEnabled(m.id)"
+                @change="onToggle(m.id, ($event.target as HTMLInputElement).checked)"
+              />
+              <span class="slider" />
+            </label>
+          </td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 </template>
 
@@ -570,25 +553,6 @@ onUnmounted(() => clearInterval(timer))
 .switch input:checked + .slider::before {
   transform: translateX(16px);
   background: #04121a;
-}
-.cp-tag {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 500;
-}
-.cp-tag.green {
-  background: rgba(34, 197, 94, 0.2);
-  color: var(--cp-green);
-}
-.cp-tag.red {
-  background: rgba(239, 68, 68, 0.2);
-  color: var(--cp-red);
-}
-.cp-tag.gray {
-  background: rgba(100, 116, 139, 0.2);
-  color: var(--cp-dim);
 }
 .col-status {
   width: 124px;

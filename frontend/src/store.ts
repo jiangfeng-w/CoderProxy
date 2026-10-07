@@ -19,7 +19,9 @@ export const useRuntimeStore = defineStore('runtime', {
     /** 模型连通状态：success / failure / testing（无记录 = 未测试）。跨页面共享，
      * 不持久化；与白名单启用无关——启用与否看 model_whitelist（isEnabled）。
      * 只由模型页手动测试写入（2026-10-07 起不再有登录后自动批量测试）。 */
-    modelStatus: {} as Record<string, string>
+    modelStatus: {} as Record<string, string>,
+    /** 模型目录同步信号：账号区/Shell 自动同步成功后自增，牛码模型区 watch 它刷新列表。 */
+    syncTick: 0
   })
 })
 

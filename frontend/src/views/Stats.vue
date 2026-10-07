@@ -2,199 +2,211 @@
 // 统计页（M8）：/v1/stats 数据源，按 维度（天/小时/模型）聚合 token 与请求数。
 // 顶部：时间区间 + 模型 + 类型筛选；维度切换按钮；指标卡；一张自适应图表 + 明细表。
 // 图表用 ECharts（dark 主题），折线（天/小时：请求 + token 双轴）、柱状（模型/类型：token）。
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import * as echarts from "echarts";
-import {
-  NButton, NDatePicker, NEmpty, NSelect, NSpin,
-} from "naive-ui";
-import {
-  fetchStats, fetchLogKinds, fetchLogModels,
-  type StatsGroupBy, type StatsRow, type StatsTotal, type StatsQuery,
-} from "../api";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import * as echarts from 'echarts'
+import { NButton, NDatePicker, NEmpty, NSelect, NSpin } from 'naive-ui'
+import { fetchStats, fetchLogKinds, fetchLogModels, type StatsGroupBy, type StatsRow, type StatsTotal, type StatsQuery } from '../api'
 
 // ── 类型元信息（与日志页同口径；stat 筛选下拉用）──
 const kindMeta: Record<string, { label: string; cls: string }> = {
-  chat_request: { label: "请求", cls: "cyan" },
-  chat_done: { label: "完成", cls: "green" },
-  chat_error: { label: "错误", cls: "red" },
-  auth_401_refresh: { label: "401刷新", cls: "yellow" },
-};
+  chat_request: { label: '请求', cls: 'cyan' },
+  chat_done: { label: '完成', cls: 'green' },
+  chat_error: { label: '错误', cls: 'red' },
+  auth_401_refresh: { label: '401刷新', cls: 'yellow' }
+}
 
 // ── 维度切换（模型/日/小时；kind 由后端支持，页面主切换不暴露）──
 const dimOptions: { label: string; value: StatsGroupBy }[] = [
-  { label: "按天", value: "day" },
-  { label: "按小时", value: "hour" },
-  { label: "按模型", value: "model" },
-];
-const groupBy = ref<StatsGroupBy>("day");
+  { label: '按天', value: 'day' },
+  { label: '按小时', value: 'hour' },
+  { label: '按模型', value: 'model' }
+]
+const groupBy = ref<StatsGroupBy>('day')
 
 // ── 筛选 ──
-const kinds = ref<string[]>([]);
-const models = ref<string[]>([]);
-const kind = ref<string | null>(null); // null = 全部类型
-const model = ref<string | null>(null); // null = 全部模型
-const timeRange = ref<[number, number] | null>(null); // naive 时间戳（ms）
+const kinds = ref<string[]>([])
+const models = ref<string[]>([])
+const kind = ref<string | null>(null) // null = 全部类型
+const model = ref<string | null>(null) // null = 全部模型
+const timeRange = ref<[number, number] | null>(null) // naive 时间戳（ms）
 
 // ── 数据 ──
-const rows = ref<StatsRow[]>([]);
+const rows = ref<StatsRow[]>([])
 const total = ref<StatsTotal>({
-  requests: 0, success: 0, failed: 0,
-  prompt_tokens: 0, completion_tokens: 0,
-  cached_tokens: 0, reasoning_tokens: 0, total_tokens: 0,
-});
-const loading = ref(false);
-const loadError = ref("");
+  requests: 0,
+  success: 0,
+  failed: 0,
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  cached_tokens: 0,
+  reasoning_tokens: 0,
+  total_tokens: 0
+})
+const loading = ref(false)
+const loadError = ref('')
 
 // ── ECharts ──
-const chartEl = ref<HTMLDivElement | null>(null);
-let chart: echarts.ECharts | null = null;
-let resizeObs: ResizeObserver | null = null;
+const chartEl = ref<HTMLDivElement | null>(null)
+let chart: echarts.ECharts | null = null
+let resizeObs: ResizeObserver | null = null
 
 const kindOptions = computed(() => {
-  const opts = Object.entries(kindMeta).map(([key, m]) => ({ label: m.label, value: key }));
-  const extra = kinds.value.filter((k) => !(k in kindMeta));
-  return [...opts, ...extra.map((k) => ({ label: k, value: k }))];
-});
-const modelOptions = computed(() => models.value.map((m) => ({ label: m, value: m })));
+  const opts = Object.entries(kindMeta).map(([key, m]) => ({ label: m.label, value: key }))
+  const extra = kinds.value.filter(k => !(k in kindMeta))
+  return [...opts, ...extra.map(k => ({ label: k, value: k }))]
+})
+const modelOptions = computed(() => models.value.map(m => ({ label: m, value: m })))
 
 /** naive 时间戳（ms）→ UTC ISO，后缀与后端存储一致（毫秒 +00:00）。 */
 function toUtcIso(ts: number): string {
-  return new Date(ts).toISOString().replace("Z", "+00:00");
+  return new Date(ts).toISOString().replace('Z', '+00:00')
 }
 
 async function fetchKindsModels() {
   try {
-    const [k, m] = await Promise.all([fetchLogKinds(), fetchLogModels()]);
-    kinds.value = k.kinds;
-    models.value = m.models;
+    const [k, m] = await Promise.all([fetchLogKinds(), fetchLogModels()])
+    kinds.value = k.kinds
+    models.value = m.models
   } catch {
     /* 下拉失败不阻断；列表接口同源数据亦兜底 */
   }
 }
 
 async function fetchData(silent = false): Promise<void> {
-  if (!silent) loading.value = true;
-  loadError.value = "";
+  if (!silent) loading.value = true
+  loadError.value = ''
   try {
-    const r = timeRange.value;
+    const r = timeRange.value
     const q: StatsQuery = {
       groupBy: groupBy.value,
       model: model.value ?? undefined,
       kind: kind.value ?? undefined,
       timeFrom: r ? toUtcIso(r[0]) : undefined,
-      timeTo: r ? toUtcIso(r[1]) : undefined,
-    };
-    const res = await fetchStats(q);
-    rows.value = res.rows;
-    total.value = res.total;
-    await nextTick();
-    renderChart();
+      timeTo: r ? toUtcIso(r[1]) : undefined
+    }
+    const res = await fetchStats(q)
+    rows.value = res.rows
+    total.value = res.total
+    await nextTick()
+    renderChart()
   } catch (e) {
-    loadError.value = String(e);
+    loadError.value = String(e)
   } finally {
-    if (!silent) loading.value = false;
+    if (!silent) loading.value = false
   }
 }
 
 function onFilterChange() {
-  void fetchData();
+  void fetchData()
 }
 
 function resetFilter() {
-  kind.value = null;
-  model.value = null;
-  timeRange.value = null;
-  onFilterChange();
+  kind.value = null
+  model.value = null
+  timeRange.value = null
+  onFilterChange()
 }
 
 // ── 图表：按维度组装 option ──
 function chartOption(group: StatsGroupBy, data: StatsRow[]): echarts.EChartsOption {
-  const keys = data.map((r) => r.key);
-  const rotate = keys.length > 8 ? 30 : 0;
+  const keys = data.map(r => r.key)
+  const rotate = keys.length > 8 ? 30 : 0
   const base = {
-    backgroundColor: "transparent",
-    tooltip: { trigger: "axis" as const },
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis' as const },
     grid: { left: 56, right: 64, top: 40, bottom: 36 },
-    textStyle: { color: "#94a3b8" },
-  };
-  if (group === "model" || group === "kind") {
+    textStyle: { color: '#94a3b8' }
+  }
+  if (group === 'model' || group === 'kind') {
     return {
       ...base,
-      legend: { data: ["总 Token"], textStyle: { color: "#94a3b8" } },
-      xAxis: { type: "category" as const, data: keys, axisLabel: { rotate } },
-      yAxis: { type: "value" as const, name: "Token",
-               splitLine: { lineStyle: { color: "#334155" } } },
-      series: [{
-        type: "bar" as const,
-        name: "总 Token",
-        data: data.map((r) => r.total_tokens),
-        itemStyle: { color: "#22d3ee", borderRadius: [3, 3, 0, 0] },
-      }],
-    };
+      legend: { data: ['总 Token'], textStyle: { color: '#94a3b8' } },
+      xAxis: { type: 'category' as const, data: keys, axisLabel: { rotate } },
+      yAxis: { type: 'value' as const, name: 'Token', splitLine: { lineStyle: { color: '#334155' } } },
+      series: [
+        {
+          type: 'bar' as const,
+          name: '总 Token',
+          data: data.map(r => r.total_tokens),
+          itemStyle: { color: '#22d3ee', borderRadius: [3, 3, 0, 0] }
+        }
+      ]
+    }
   }
   // 天/小时：请求数（左轴）+ 总 Token（右轴）
   return {
     ...base,
-    legend: { data: ["请求数", "总 Token"], textStyle: { color: "#94a3b8" } },
-    xAxis: { type: "category" as const, data: keys, axisLabel: { rotate } },
+    legend: { data: ['请求数', '总 Token'], textStyle: { color: '#94a3b8' } },
+    xAxis: { type: 'category' as const, data: keys, axisLabel: { rotate } },
     yAxis: [
-      { type: "value" as const, name: "请求数",
-        splitLine: { lineStyle: { color: "#334155" } } },
-      { type: "value" as const, name: "Token", splitLine: { show: false } },
+      { type: 'value' as const, name: '请求数', splitLine: { lineStyle: { color: '#334155' } } },
+      { type: 'value' as const, name: 'Token', splitLine: { show: false } }
     ],
     series: [
       {
-        type: "line" as const, name: "请求数", yAxisIndex: 0, smooth: true,
-        data: data.map((r) => r.requests), symbol: "circle", symbolSize: 6,
-        itemStyle: { color: "#22d3ee" }, lineStyle: { width: 2 },
-        areaStyle: { opacity: 0.12 },
+        type: 'line' as const,
+        name: '请求数',
+        yAxisIndex: 0,
+        smooth: true,
+        data: data.map(r => r.requests),
+        symbol: 'circle',
+        symbolSize: 6,
+        itemStyle: { color: '#22d3ee' },
+        lineStyle: { width: 2 },
+        areaStyle: { opacity: 0.12 }
       },
       {
-        type: "line" as const, name: "总 Token", yAxisIndex: 1, smooth: true,
-        data: data.map((r) => r.total_tokens), symbol: "circle", symbolSize: 6,
-        itemStyle: { color: "#f97316" }, lineStyle: { width: 2 },
-      },
-    ],
-  };
+        type: 'line' as const,
+        name: '总 Token',
+        yAxisIndex: 1,
+        smooth: true,
+        data: data.map(r => r.total_tokens),
+        symbol: 'circle',
+        symbolSize: 6,
+        itemStyle: { color: '#f97316' },
+        lineStyle: { width: 2 }
+      }
+    ]
+  }
 }
 
 function renderChart() {
-  if (!chartEl.value) return;
+  if (!chartEl.value) return
   if (!chart) {
-    chart = echarts.init(chartEl.value);
+    chart = echarts.init(chartEl.value)
   }
   if (rows.value.length === 0) {
-    chart.clear();
-    return;
+    chart.clear()
+    return
   }
-  chart.setOption(chartOption(groupBy.value, rows.value), true);
+  chart.setOption(chartOption(groupBy.value, rows.value), true)
 }
 
 watch(groupBy, () => {
-  void fetchData();
-});
+  void fetchData()
+})
 
 onMounted(() => {
-  void Promise.all([fetchKindsModels(), fetchData()]);
+  void Promise.all([fetchKindsModels(), fetchData()])
   if (chartEl.value) {
-    resizeObs = new ResizeObserver(() => chart?.resize());
-    resizeObs.observe(chartEl.value);
+    resizeObs = new ResizeObserver(() => chart?.resize())
+    resizeObs.observe(chartEl.value)
   }
-});
+})
 
 onUnmounted(() => {
-  resizeObs?.disconnect();
-  chart?.dispose();
-  chart = null;
-});
+  resizeObs?.disconnect()
+  chart?.dispose()
+  chart = null
+})
 
 // ── 指标/表格格式化 ──
-const n = (v?: number) => (v ?? 0).toLocaleString();
+const n = (v?: number) => (v ?? 0).toLocaleString()
 
 function fmtKey(key: string, group: StatsGroupBy): string {
-  if (group === "day") return key;
-  if (group === "hour") return key.slice(5);
-  return key;
+  if (group === 'day') return key
+  if (group === 'hour') return key.slice(5)
+  return key
 }
 </script>
 
@@ -204,7 +216,12 @@ function fmtKey(key: string, group: StatsGroupBy): string {
       <div class="head">
         <span class="card-title">Token 统计</span>
         <span class="spacer" />
-        <n-button size="small" :loading="loading" @click="fetchData()">刷新</n-button>
+        <n-button
+          size="small"
+          :loading="loading"
+          @click="fetchData()"
+          >刷新</n-button
+        >
       </div>
 
       <div class="filters">
@@ -251,27 +268,52 @@ function fmtKey(key: string, group: StatsGroupBy): string {
             {{ d.label }}
           </button>
         </div>
-        <n-button size="small" quaternary @click="resetFilter">重置筛选</n-button>
+        <n-button
+          size="small"
+          quaternary
+          @click="resetFilter"
+          >重置筛选</n-button
+        >
       </div>
 
-      <div v-if="loadError" class="err-banner">加载失败：{{ loadError }}</div>
+      <div
+        v-if="loadError"
+        class="err-banner"
+        >加载失败：{{ loadError }}</div
+      >
 
       <!-- 指标卡：总计 -->
       <div class="kpi-grid">
         <div class="kpi">
-          <div class="kpi-num" style="color: var(--cp-cyan)">{{ n(total.requests) }}</div>
+          <div
+            class="kpi-num"
+            style="color: var(--cp-cyan)"
+            >{{ n(total.requests) }}</div
+          >
           <div class="kpi-label">请求数</div>
         </div>
         <div class="kpi">
-          <div class="kpi-num" style="color: var(--cp-green)">{{ n(total.success) }}</div>
+          <div
+            class="kpi-num"
+            style="color: var(--cp-green)"
+            >{{ n(total.success) }}</div
+          >
           <div class="kpi-label">成功</div>
         </div>
         <div class="kpi">
-          <div class="kpi-num" style="color: var(--cp-red)">{{ n(total.failed) }}</div>
+          <div
+            class="kpi-num"
+            style="color: var(--cp-red)"
+            >{{ n(total.failed) }}</div
+          >
           <div class="kpi-label">失败</div>
         </div>
         <div class="kpi">
-          <div class="kpi-num" style="color: var(--cp-orange)">{{ n(total.total_tokens) }}</div>
+          <div
+            class="kpi-num"
+            style="color: var(--cp-orange)"
+            >{{ n(total.total_tokens) }}</div
+          >
           <div class="kpi-label">总 Token</div>
         </div>
       </div>
@@ -279,10 +321,20 @@ function fmtKey(key: string, group: StatsGroupBy): string {
       <!-- 图表 -->
       <div class="chart-wrap">
         <n-spin :show="loading">
-          <div v-if="rows.length === 0 && !loading" class="empty-wrap">
-            <n-empty size="small" description="暂无统计数据" />
+          <div
+            v-if="rows.length === 0 && !loading"
+            class="empty-wrap"
+          >
+            <n-empty
+              size="small"
+              description="暂无统计数据"
+            />
           </div>
-          <div v-show="rows.length > 0" ref="chartEl" class="chart" />
+          <div
+            v-show="rows.length > 0"
+            ref="chartEl"
+            class="chart"
+          />
         </n-spin>
       </div>
 
@@ -291,7 +343,7 @@ function fmtKey(key: string, group: StatsGroupBy): string {
         <table class="tbl">
           <thead>
             <tr>
-              <th class="w-key">{{ groupBy === "hour" ? "小时" : groupBy === "day" ? "日期" : groupBy === "model" ? "模型" : "类型" }}</th>
+              <th class="w-key">{{ groupBy === 'hour' ? '小时' : groupBy === 'day' ? '日期' : groupBy === 'model' ? '模型' : '类型' }}</th>
               <th class="num">请求数</th>
               <th class="num">成功</th>
               <th class="num">失败</th>
@@ -303,7 +355,10 @@ function fmtKey(key: string, group: StatsGroupBy): string {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="row in rows" :key="row.key">
+            <tr
+              v-for="row in rows"
+              :key="row.key"
+            >
               <td class="mono dim">{{ fmtKey(row.key, groupBy) }}</td>
               <td class="num mono">{{ n(row.requests) }}</td>
               <td class="num mono">{{ n(row.success) }}</td>
@@ -366,7 +421,9 @@ function fmtKey(key: string, group: StatsGroupBy): string {
   padding: 4px 12px;
   border-radius: 6px;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 .dim-btn:hover {
   color: var(--cp-text);

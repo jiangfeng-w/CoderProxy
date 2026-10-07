@@ -1,13 +1,15 @@
 <script setup lang="ts">
-// 顶栏（服务状态/启停/登录态）+ 左侧导航 + 四页内容区。深色主题，全局轮询服务与登录态。
+// 顶栏（纯服务语义：运行状态/端口/启停）+ 左侧导航 + 页面内容区。深色主题，全局轮询服务与登录态。
+// 供应商页（2026-10-07 定稿）：顶栏完全去牛码态——登录/登出按钮、账号名、未登录门控文案全部
+// 移除（登录入口迁入供应商页牛码 tab）；重启按钮解除牛码登录态绑定。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { NButton, NModal, useMessage } from 'naive-ui'
 import { listen } from '@tauri-apps/api/event'
-import { relayStatus, relayRestart, authStatus, authLoginStart, authLogout, authSync, openAuthorizeUrl, windowHide, appExit, serviceStatus, serviceEnable, serviceDisable } from './api'
+import { relayStatus, relayRestart, authStatus, authSync, windowHide, appExit, serviceStatus, serviceEnable, serviceDisable } from './api'
 import { store, configStore, toolModeLabel } from './store'
 import Overview from './views/Overview.vue'
 import Config from './views/Config.vue'
-import Models from './views/Models.vue'
+import Providers from './views/Providers.vue'
 import Logs from './views/Logs.vue'
 import Stats from './views/Stats.vue'
 
@@ -15,10 +17,10 @@ const message = useMessage()
 
 const views: Record<string, { name: string; comp: any }> = {
   overview: { name: '总览', comp: Overview },
-  config: { name: '配置', comp: Config },
-  models: { name: '模型', comp: Models },
   logs: { name: '日志', comp: Logs },
-  stats: { name: '统计', comp: Stats }
+  stats: { name: '统计', comp: Stats },
+  providers: { name: '供应商', comp: Providers },
+  config: { name: '配置', comp: Config }
 }
 
 const busy = ref(false)
@@ -35,11 +37,8 @@ const showCloseDlg = ref(false)
 const serviceRunning = computed(() => store.relay.running && store.serviceEnabled)
 
 function serviceStatusText(): string {
-  if (serviceRunning.value) return '运行中'
-  if (store.auth.status === 'logged_in') return '已停止'
-  if (store.auth.status === 'pending') return '登录中 · 登录后自动启动服务'
-  if (store.auth.status === 'failed') return '登录未完成 · 登录后自动启动服务'
-  return '未登录 · 登录后自动启动服务'
+  // 纯服务语义：未登录导致的停止不再由顶栏解释（登录引导在供应商页牛码 tab）
+  return serviceRunning.value ? '运行中' : '已停止'
 }
 
 async function chooseHide() {
@@ -66,8 +65,10 @@ async function syncModels() {
   syncing = true
   try {
     await authSync()
+    // 同步成功 → bump syncTick，供应商页牛码模型区 watch 刷新列表
+    store.syncTick++
   } catch {
-    /* 同步失败不打扰：模型页可手动重试 */
+    /* 同步失败不打扰：账号区可手动重试 */
   } finally {
     syncing = false
   }
@@ -102,7 +103,7 @@ async function pollStatus() {
   if (store.auth.status === 'logged_in' && lastAuthStatus !== 'logged_in') {
     syncModels()
   }
-  // 登出：清空模型可用状态（连通性测试只在模型页手动触发，无需重置批量标记）
+  // 登出：清空模型可用状态（连通性测试只在供应商页牛码 tab 手动触发，无需重置批量标记）
   if (store.auth.status === 'not_logged_in' && lastAuthStatus === 'logged_in') {
     Object.keys(store.modelStatus).forEach(k => delete store.modelStatus[k])
   }
@@ -135,39 +136,6 @@ async function onRestart() {
     } catch (e) {
       message.error(String(e))
     }
-  } finally {
-    busy.value = false
-    await pollStatus()
-  }
-}
-
-async function onLogin() {
-  busy.value = true
-  try {
-    const res = await authLoginStart()
-    if (res.status === 'pending' && res.authorize_url) {
-      openAuthorizeUrl(res.authorize_url)
-      message.info('已在浏览器打开授权页，登录完成后自动同步')
-    } else if (res.status === 'logged_in') {
-      message.success('已登录')
-    } else {
-      message.warning(res.error || '登录未完成')
-    }
-  } catch (e) {
-    message.error(String(e))
-  } finally {
-    busy.value = false
-    await pollStatus()
-  }
-}
-
-async function onLogout() {
-  busy.value = true
-  try {
-    await authLogout()
-    message.info('已登出')
-  } catch (e) {
-    message.error(String(e))
   } finally {
     busy.value = false
     await pollStatus()
@@ -226,31 +194,11 @@ onUnmounted(() => {
         </button>
         <button
           class="btn primary"
-          :disabled="busy || store.auth.status !== 'logged_in'"
+          :disabled="busy"
           @click="onRestart"
         >
           重启服务
         </button>
-        <template v-if="store.auth.status === 'logged_in'">
-          <span class="user">
-            已登录
-            <b>{{ store.auth.account?.label || store.auth.account?.id || '' }}</b>
-          </span>
-          <button
-            class="btn ghost"
-            :disabled="busy"
-            @click="onLogout"
-            >登出</button
-          >
-        </template>
-        <template v-else>
-          <button
-            class="btn ghost"
-            :disabled="busy"
-            @click="onLogin"
-            >登录</button
-          >
-        </template>
       </div>
     </header>
 
@@ -264,7 +212,7 @@ onUnmounted(() => {
             :class="{ active: store.view === key }"
             @click="store.view = key"
           >
-            <span class="nav-ico">{{ { overview: '◉', config: '⚙', models: '◈', logs: '☰', stats: '≡' }[key] }}</span>
+            <span class="nav-ico">{{ { overview: '◉', config: '⚙', providers: '◈', logs: '☰', stats: '≡' }[key] }}</span>
             {{ v.name }}
           </a>
         </nav>
@@ -467,15 +415,6 @@ onUnmounted(() => {
   padding: 6px 12px;
   color: #475569;
   font-size: 12px;
-}
-
-.user {
-  color: var(--cp-dim);
-  font-size: 13px;
-  margin-left: 8px;
-}
-.user b {
-  color: var(--cp-text);
 }
 
 .content {

@@ -11,7 +11,7 @@
   --cp-red: #ef4444;
   --cp-orange: #f97316;
   --cp-yellow: #eab308;
-  --cp-mono: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+  --cp-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
 }
 
 * {
@@ -28,7 +28,7 @@ body,
 body {
   background: var(--cp-bg);
   color: var(--cp-text);
-  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   font-size: 14px;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
