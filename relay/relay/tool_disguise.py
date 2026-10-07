@@ -59,6 +59,15 @@ EXT_TO_TA3: dict[str, str] = {
     # 子代理 / 图片
     "subagent": "SubAgent",
     "view_image": "ViewImage",
+    # TRAE 桌面端工具（2026-09-05 牛码目录核对实证；无牛码对应工具的走透传）
+    # 同名工具（Read/Write/TodoWrite/WebSearch）也映射：修正参数键差异（file_path→filepath 等）
+    "Read": "Read",
+    "Write": "Write",
+    "SearchReplace": "Edit",
+    "RunCommand": "Bash",
+    "Grep": "Search",
+    "LS": "List",
+    "Skill": "ReadSkill",
 }
 
 # agent 参数键名 → ta3 键名（None=丢弃）；键名一致的省略（disguise 逻辑按原名保留）。
@@ -78,6 +87,14 @@ EXT_ARGS_TO_TA3: dict[str, dict[str, str | None]] = {
     "search": {"pattern": "query"},
     "list_dir": {"path": "dirPath"},
     "subagent": {"task_description": "prompt", "task_title": "description"},
+    # TRAE（牛码目录实证）：按牛码真实字段做键名适配；未列的其余参数丢弃
+    "Read": {"file_path": "filepath"},
+    "Write": {"file_path": "filepath"},
+    "SearchReplace": {"file_path": "filepath", "old_str": "oldString", "new_str": "newString"},
+    "RunCommand": {"command": "command"},
+    "Grep": {"pattern": "query", "path": "path"},
+    "LS": {"path": "dirPath"},
+    "Skill": {"name": "skillName"},
 }
 
 
@@ -127,6 +144,7 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
     outbound: list[dict] = []
     restore_map: dict[str, str] = {}
     passthrough_names: set[str] = set()
+    seen_native: set[str] = set()
     map_hits = 0
     longtail = 0
     dropped = 0
@@ -155,6 +173,11 @@ def build_disguise_context(tools, mode: str = MODE_HYBRID) -> DisguiseContext:
             outbound.append(schema)
             passthrough_names.add(agent_name)
             continue
+        if alias in seen_native:
+            # 多对一同一个牛码工具（如 Grep/SearchCodebase→Search）：出站只保留一份，
+            # OpenAI 工具名须唯一，否则牛码模型收到重复同名工具会 0 输出
+            continue
+        seen_native.add(alias)
         map_hits += 1
         restore_map[alias] = agent_name  # 请求级：入站按 agent 实际名精确还原
         outbound.append(native)

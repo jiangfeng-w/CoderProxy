@@ -125,35 +125,35 @@ def test_passthrough_restore_keeps_name():
 
 
 def test_restore_hybrid_native_name_passthrough_not_mismapped():
-    """回归：hybrid 下 agent 直接用 ta3 原生英文名（Read/Edit）长尾透传，模型返回
-    同名工具调用时不可被 FROM_TA3 误还原成 fs_read（否则 agent 收到不认识的工具，
-    「调用工具直接停」）。"""
-    tools = [_tool("Read"), _tool("Edit")]
+    """回归：hybrid 下 agent 直接用 ta3 原生英文名（Edit）走长尾透传，模型返回
+    同名工具调用时不可被 FROM_TA3 误还原成 editor_apply_diff（否则 agent 收到
+    不认识的工具，「调用工具直接停」）。"""
+    tools = [_tool("Edit"), _tool("Glob")]
     ctx = tool_disguise.build_disguise_context(tools, "hybrid")
     # 长尾透传：出站保留原名 schema
-    assert [t["function"]["name"] for t in ctx.outbound_tools] == ["Read", "Edit"]
-    assert "Read" in ctx.passthrough_names
+    assert [t["function"]["name"] for t in ctx.outbound_tools] == ["Edit", "Glob"]
+    assert {"Edit", "Glob"} <= ctx.passthrough_names
     p = _provider(ctx)
     out = p._restore_tool_calls([
-        {"id": "c1", "name": "Read", "arguments": '{"file_path": "a.py"}'},
-        {"id": "c2", "name": "Edit", "arguments": '{"file_path": "a.py"}'},
+        {"id": "c1", "name": "Edit", "arguments": '{"file_path": "a.py"}'},
+        {"id": "c2", "name": "Glob", "arguments": '{"pattern": "*.py"}'},
     ])
-    # 名字不被误映射成 fs_read / editor_apply_diff，参数也原样保留
-    assert [t["name"] for t in out] == ["Read", "Edit"]
+    # 名字不被误映射成 editor_apply_diff，参数也原样保留
+    assert [t["name"] for t in out] == ["Edit", "Glob"]
     assert out[0]["arguments"] == {"file_path": "a.py"}
-    assert out[1]["arguments"] == {"file_path": "a.py"}
+    assert out[1]["arguments"] == {"pattern": "*.py"}
 
 
 def test_history_hybrid_native_name_passthrough_kept():
     """回归：hybrid 透传工具的历史 tool_calls 多轮回传时原名保留（不降级成文本）。"""
-    tools = [_tool("Read")]
+    tools = [_tool("Glob")]
     ctx = tool_disguise.build_disguise_context(tools, "hybrid")
     p = _provider(ctx)
     out = p._disguise_message(ChatMessage(role="assistant", content="",
-        tool_calls=[{"id": "c1", "name": "Read", "arguments": {"file_path": "a.py"}}]))
+        tool_calls=[{"id": "c1", "name": "Glob", "arguments": {"pattern": "*.py"}}]))
     assert "tool_calls" in out
-    assert out["tool_calls"][0]["function"]["name"] == "Read"
-    assert json.loads(out["tool_calls"][0]["function"]["arguments"]) == {"file_path": "a.py"}
+    assert out["tool_calls"][0]["function"]["name"] == "Glob"
+    assert json.loads(out["tool_calls"][0]["function"]["arguments"]) == {"pattern": "*.py"}
 
 
 # ─────────────────────────── 历史消息伪装 ───────────────────────────
@@ -237,3 +237,60 @@ def test_prepare_tools_pre_disguised_passthrough():
                       tools=tools)
     names = [t["function"]["name"] for t in p._prepare_tools(req)]
     assert names == ["Bash", "glob_file_search"]
+
+
+# ─────────────────────────── TRAE 全量映射（牛码目录实证）───────────────────────────
+
+def test_trae_full_mapping_hybrid():
+    """hybrid：TRAE 生产工具命中映射，无对应工具透传保留；多对一去重不压缩工具数。"""
+    tools = [_tool("Read"), _tool("Write"), _tool("SearchReplace"), _tool("RunCommand"),
+             _tool("Grep"), _tool("SearchCodebase"), _tool("LS"), _tool("TodoWrite"),
+             _tool("WebSearch"), _tool("Skill"), _tool("Glob"), _tool("Task")]
+    ctx = tool_disguise.build_disguise_context(tools, "hybrid")
+    names = [t["function"]["name"] for t in ctx.outbound_tools]
+    assert names == ["Read", "Write", "Edit", "Bash", "Search", "SearchCodebase",
+                     "List", "TodoWrite", "WebSearch", "ReadSkill", "Glob", "Task"]
+    # Grep→Search 唯一，不因 SearchCodebase 造成重复（避免牛码 0 输出）
+    assert names.count("Search") == 1
+    # 同名工具映射后改用牛码 schema（filepath 而非 file_path）
+    read = next(t for t in ctx.outbound_tools if t["function"]["name"] == "Read")
+    assert "filepath" in read["function"]["parameters"]["properties"]
+    # SearchCodebase/Glob/Task 无映射 → 透传保留
+    assert {"SearchCodebase", "Glob", "Task"} <= ctx.passthrough_names
+
+
+def test_trae_full_mapping_restore():
+    """入站：牛码名还原为 TRAE 原名 + 参数键还原；透传工具原名保留。"""
+    tools = [_tool("Read"), _tool("Write"), _tool("SearchReplace"), _tool("RunCommand"),
+             _tool("Grep"), _tool("SearchCodebase"), _tool("LS"), _tool("TodoWrite"),
+             _tool("WebSearch"), _tool("Skill"), _tool("Glob")]
+    ctx = tool_disguise.build_disguise_context(tools, "hybrid")
+    p = _provider(ctx)
+    out = p._restore_tool_calls([
+        {"id": "c1", "name": "Read", "arguments": '{"filepath": "a.py"}'},
+        {"id": "c2", "name": "Write", "arguments": '{"filepath": "a.py", "content": "x"}'},
+        {"id": "c3", "name": "Edit",
+         "arguments": '{"filepath": "a.py", "oldString": "x", "newString": "y"}'},
+        {"id": "c4", "name": "Bash", "arguments": '{"command": "echo hi"}'},
+        {"id": "c5", "name": "Search", "arguments": '{"query": "foo", "path": "src"}'},
+        {"id": "c6", "name": "List", "arguments": '{"dirPath": "src"}'},
+        {"id": "c7", "name": "TodoWrite", "arguments": '{"todos": [{"content": "t", "status": "pending"}]}'},
+        {"id": "c8", "name": "WebSearch", "arguments": '{"query": "q"}'},
+        {"id": "c9", "name": "ReadSkill", "arguments": '{"skillName": "s"}'},
+        {"id": "c10", "name": "Glob", "arguments": '{"pattern": "*.py"}'},
+        {"id": "c11", "name": "SearchCodebase", "arguments": '{"information_request": "foo"}'},
+    ])
+    assert [t["name"] for t in out] == [
+        "Read", "Write", "SearchReplace", "RunCommand", "Grep", "LS",
+        "TodoWrite", "WebSearch", "Skill", "Glob", "SearchCodebase"]
+    assert out[0]["arguments"] == {"file_path": "a.py"}             # Read: filepath→file_path
+    assert out[1]["arguments"] == {"file_path": "a.py", "content": "x"}
+    assert out[2]["arguments"] == {"file_path": "a.py", "old_str": "x", "new_str": "y"}
+    assert out[3]["arguments"] == {"command": "echo hi"}
+    assert out[4]["arguments"] == {"pattern": "foo", "path": "src"}  # Grep: query→pattern
+    assert out[5]["arguments"] == {"path": "src"}                    # LS: dirPath→path
+    assert out[6]["arguments"] == {"todos": [{"content": "t", "status": "pending"}]}
+    assert out[7]["arguments"] == {"query": "q"}
+    assert out[8]["arguments"] == {"name": "s"}                      # Skill: skillName→name
+    assert out[9]["arguments"] == {"pattern": "*.py"}                # Glob 透传保留
+    assert out[10]["arguments"] == {"information_request": "foo"}    # SearchCodebase 透传保留

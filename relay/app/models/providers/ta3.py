@@ -332,7 +332,9 @@ class Ta3Provider(ModelProvider):
             if not isinstance(args, dict):
                 args = {"_raw": str(args)}
             real = self._restore_name(name)
-            if real is not name:
+            if real != name or self._args_from_ta3.get(name):
+                # 名字变化（改映射）或该工具存在参数映射表（同名工具如 Read filepath→file_path）
+                # 都要还原参数；无映射的透传工具（Glob）保持原样
                 args = self._restore_args(name, args)
             out.append({
                 "id": str(tc.get("id") or ""),
