@@ -70,7 +70,7 @@ async function saveWl(next: string[]) {
 
 /** 启用开关：纯白名单成员管理（即时生效）。不再内嵌连通性预检——
  * 「先测后启用」在 probe 落地后与「测试」按钮重复；诊断职责收敛到
- * 「测试」按钮与登录/同步后的自动批量测试（见需求连通性测试-白名单豁免）。 */
+ * 「测试」按钮（见需求连通性测试-白名单豁免）。 */
 async function onToggle(id: string, on: boolean) {
   const w = wl.value
   let next: string[]
@@ -101,7 +101,7 @@ async function onAllDisable() {
 }
 
 /** 同步模型目录并刷新列表（只拉最新目录，不自动做连通性测试——
- * 测试为显式动作；登录后每会话一次的自动摸底仍由概览页负责）。 */
+ * 测试为显式动作，只由用户在模型页点击状态胶囊触发）。 */
 async function onSync() {
   if (syncing.value) return
   syncing.value = true

@@ -4,7 +4,6 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import { getStats, getModels, getEvents, type MonitorStats, type OaiModel } from '../api'
 import { store } from '../store'
-import { batchTestAll } from '../modelCheck'
 
 const message = useMessage()
 const stats = ref<MonitorStats>({})
@@ -37,15 +36,6 @@ async function loadModels() {
   try {
     // GUI 用完整目录（all=1），不受白名单过滤，失败模型仍需可见以便重新启用
     models.value = (await getModels(true)).data
-    // 登录后首次：模型同步完成后顺序测试一轮（会话内只测一次，跨页面挂载保持）
-    if (!store.batchTested && models.value.length > 0) {
-      store.batchTested = true
-      batchTestAll(models.value).then(failed => {
-        if (failed.length > 0) {
-          message.warning(`${failed.length} 个模型连接失败`)
-        }
-      })
-    }
   } catch (e) {
     console.error('[overview] loadModels', e)
   }

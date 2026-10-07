@@ -102,9 +102,8 @@ async function pollStatus() {
   if (store.auth.status === 'logged_in' && lastAuthStatus !== 'logged_in') {
     syncModels()
   }
-  // 登出：重置批量测试标记与模型可用状态，下次登录后重新测试
+  // 登出：清空模型可用状态（连通性测试只在模型页手动触发，无需重置批量标记）
   if (store.auth.status === 'not_logged_in' && lastAuthStatus === 'logged_in') {
-    store.batchTested = false
     Object.keys(store.modelStatus).forEach(k => delete store.modelStatus[k])
   }
   lastAuthStatus = store.auth.status

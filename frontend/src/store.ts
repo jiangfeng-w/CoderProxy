@@ -17,10 +17,9 @@ export const useRuntimeStore = defineStore('runtime', {
     serviceEnabled: false,
     view: 'overview' as string,
     /** 模型连通状态：success / failure / testing（无记录 = 未测试）。跨页面共享，
-     * 不持久化；与白名单启用无关——启用与否看 model_whitelist（isEnabled）。 */
-    modelStatus: {} as Record<string, string>,
-    /** 会话级标记：本轮登录后是否已跑过批量测试，跨组件挂载保持，登出时重置。 */
-    batchTested: false
+     * 不持久化；与白名单启用无关——启用与否看 model_whitelist（isEnabled）。
+     * 只由模型页手动测试写入（2026-10-07 起不再有登录后自动批量测试）。 */
+    modelStatus: {} as Record<string, string>
   })
 })
 
