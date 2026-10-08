@@ -1,14 +1,135 @@
 <script setup lang="ts">
 // WorkBuddy tab（供应商页 F4）：账号区=多账号卡片（昵称/配额/签到状态/连签天数）+
 // 添加（设备授权弹窗+轮询）/删除（二次确认）/签到（loading/已签到态）/配额刷新；
-// 模型区占位空态——转发由「WorkBuddy聊天反代与多平台聚合」需求提供。
+// 模型区（本需求落地）：WorkBuddy 目录（/v1/models?all=1 过滤 WorkBuddy/ 前缀——
+// 目录来自 relay 的 v3/config 并集，转发已由聊天反代提供）+ 白名单启停 + 手动连通性测试。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NButton, NCard, NEmpty, NModal, NPagination, NPopconfirm, NTag, useMessage } from 'naive-ui'
-import { openAuthorizeUrl, type WbAccount } from '../../api'
+import { getModels, openAuthorizeUrl, type OaiModel, type WbAccount } from '../../api'
 import { workbuddyStore } from '../../stores/workbuddy'
+import { store, useConfigStore } from '../../store'
+import { testModel } from '../../modelCheck'
 
 const message = useMessage()
 const wb = workbuddyStore
+const config = useConfigStore()
+const DISABLE_ALL = '__none__'
+
+// ── 模型区（WorkBuddy 目录：全名前缀过滤 + 白名单 + 手动测试） ──
+const wbModels = ref<OaiModel[]>([])
+const modelSearch = ref('')
+const testingModel = ref<string | null>(null)
+const WB_PREFIX = 'WorkBuddy/'
+
+const filteredModels = computed(() => {
+  const q = modelSearch.value.trim().toLowerCase()
+  return q ? wbModels.value.filter(m => m.id.toLowerCase().includes(q)) : wbModels.value
+})
+
+function isModelEnabled(id: string): boolean {
+  const w = config.model_whitelist
+  if (w.length === 0) return true
+  if (w.length === 1 && w[0] === DISABLE_ALL) return false
+  return w.includes(id)
+}
+
+async function loadWbModels() {
+  try {
+    const all = (await getModels(true)).data
+    wbModels.value = all.filter(m => m.id.startsWith(WB_PREFIX))
+  } catch (e) {
+    message.error(String(e))
+  }
+  if (!config.loaded) {
+    try {
+      await config.load()
+    } catch (e) {
+      message.error(String(e))
+    }
+  }
+}
+
+async function onToggleModel(id: string) {
+  try {
+    const w = config.model_whitelist
+    let next: string[]
+    if (w.length === 0) {
+      // 全部启用 → 显式列出除该模型外的全部（含本 tab 与牛码条目，保证语义不变）
+      const all = (await getModels(true)).data.map(m => m.id)
+      next = all.filter(x => x !== id)
+    } else if (w.length === 1 && w[0] === DISABLE_ALL) {
+      next = [id]
+    } else {
+      next = w.includes(id) ? w.filter(x => x !== id) : [...w, id]
+    }
+    await config.update({ model_whitelist: next })
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+async function onAllEnableModels() {
+  try {
+    const w = config.model_whitelist
+    if (w.length === 0) return
+    if (w.length === 1 && w[0] === DISABLE_ALL) {
+      await config.update({ model_whitelist: wbModels.value.map(m => m.id) })
+      return
+    }
+    const wbIds = new Set(wbModels.value.map(m => m.id))
+    const kept = w.filter(x => !wbIds.has(x))
+    await config.update({ model_whitelist: [...kept, ...wbIds] })
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+async function onAllDisableModels() {
+  try {
+    const w = config.model_whitelist
+    const wbIds = new Set(wbModels.value.map(m => m.id))
+    if (w.length === 0) {
+      // 全部启用 → 全禁用语义：列表只剩其它前缀之外没有 → 用哨兵（全局全禁）；
+      // 有其它供应商条目时显式列出非 WorkBuddy 条目，避免误停牛码/自定义。
+      const all = (await getModels(true)).data.map(m => m.id)
+      const others = all.filter(x => !wbIds.has(x))
+      await config.update({ model_whitelist: others.length ? others : [DISABLE_ALL] })
+      return
+    }
+    await config.update({ model_whitelist: w.filter(x => !wbIds.has(x)) })
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+async function onTestModel(id: string) {
+  testingModel.value = id
+  store.modelStatus[id] = 'testing'
+  try {
+    const ok = await testModel(id)
+    store.modelStatus[id] = ok ? 'success' : 'failure'
+    if (ok) message.success(`模型 ${id} 连通`)
+    else message.error(`模型 ${id} 连接失败`)
+  } finally {
+    testingModel.value = null
+  }
+}
+
+function modelStatusText(id: string): string {
+  const s = store.modelStatus[id]
+  if (s === 'testing') return '测试中…'
+  if (s === 'success') return '成功'
+  if (s === 'failure') return '失败'
+  return '未测试'
+}
+
+function modelStatusClass(id: string): string {
+  const s = store.modelStatus[id]
+  if (s === 'testing') return 'busy'
+  if (s === 'success') return 'green'
+  if (s === 'failure') return 'red'
+  return 'gray'
+}
 
 // ── 登录弹窗与轮询 ──
 const showLoginDlg = ref(false)
@@ -164,7 +285,13 @@ async function onRemove(a: WbAccount) {
 
 onMounted(() => {
   void wb.load().catch(e => message.error(String(e)))
+  void loadWbModels()
 })
+// 账号区「添加账号」成功后 / 其它页面同步目录 → 刷新模型列表
+watch(
+  () => wb.accounts.length,
+  () => void loadWbModels()
+)
 onUnmounted(stopPolling)
 </script>
 
@@ -281,16 +408,80 @@ onUnmounted(stopPolling)
       </div>
     </div>
 
-    <!-- 模型区：占位 -->
+    <!-- 模型区：WorkBuddy 目录（前缀过滤）+ 白名单启停 + 手动连通性测试 -->
     <NCard
       size="small"
       :bordered="true"
       class="zone-card"
     >
       <template #header>
-        <span class="zone-title">模型</span>
+        <div class="head">
+          <span class="zone-title">模型</span>
+          <span class="note">目录来自 WorkBuddy（v3/config），请求模型名用 WorkBuddy/ 前缀</span>
+          <div class="spacer" />
+          <input
+            v-model="modelSearch"
+            class="search"
+            placeholder="搜索模型名"
+          />
+          <NButton
+            size="small"
+            :disabled="wbModels.length === 0"
+            @click="onAllEnableModels"
+          >
+            全部启用
+          </NButton>
+          <NButton
+            size="small"
+            :disabled="wbModels.length === 0"
+            @click="onAllDisableModels"
+          >
+            全部禁用
+          </NButton>
+        </div>
       </template>
-      <NEmpty description="WorkBuddy 模型转发由「WorkBuddy聊天反代与多平台聚合」需求提供，本页暂为占位" />
+      <NEmpty
+        v-if="wbModels.length === 0"
+        description="暂无 WorkBuddy 模型目录（请先添加账号；relay 会从上游拉取目录）"
+        size="small"
+      />
+      <table
+        v-else
+        class="tbl"
+      >
+        <thead>
+          <tr>
+            <th>模型名</th>
+            <th class="col-status">状态（点击测试）</th>
+            <th class="col-toggle">启用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="m in filteredModels"
+            :key="m.id"
+          >
+            <td class="mono">{{ m.id }}</td>
+            <td class="col-status">
+              <span
+                class="wp-cap pressable"
+                :class="modelStatusClass(m.id)"
+                :title="modelStatusText(m.id)"
+                @click="onTestModel(m.id)"
+              >
+                {{ testingModel === m.id ? '测试中…' : modelStatusText(m.id) }}
+              </span>
+            </td>
+            <td class="col-toggle">
+              <input
+                type="checkbox"
+                :checked="isModelEnabled(m.id)"
+                @change="onToggleModel(m.id)"
+              />
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </NCard>
 
     <!-- 添加账号弹窗（设备授权 + 轮询等待） -->
@@ -604,6 +795,69 @@ onUnmounted(stopPolling)
 }
 .mono {
   font-family: var(--cp-mono, monospace);
+}
+/* 模型区（WorkBuddy 目录表；样式对齐牛码 tab 的模型表口径） */
+.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.tbl th {
+  text-align: left;
+  color: var(--cp-dim);
+  font-weight: 500;
+  padding: 8px;
+  border-bottom: 1px solid var(--cp-border);
+}
+.tbl td {
+  padding: 8px;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+}
+.search {
+  width: 200px;
+  background: var(--cp-panel-2);
+  border: 1px solid var(--cp-border);
+  border-radius: 6px;
+  color: var(--cp-text);
+  padding: 5px 10px;
+  font-size: 13px;
+}
+.wp-cap {
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  line-height: 16px;
+  display: inline-block;
+}
+.wp-cap.green {
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--cp-green);
+}
+.wp-cap.red {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--cp-red);
+}
+.wp-cap.busy {
+  background: rgba(34, 211, 238, 0.2);
+  color: var(--cp-cyan);
+}
+.wp-cap.gray {
+  background: rgba(100, 116, 139, 0.2);
+  color: var(--cp-dim);
+}
+.pressable {
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.pressable:hover {
+  filter: brightness(1.2);
+}
+.col-status {
+  width: 124px;
+}
+.col-toggle {
+  width: 60px;
 }
 .dlg-text {
   margin: 0 0 8px;
