@@ -90,6 +90,60 @@ def test_logout_resets_service_disabled(client, monkeypatch):
     assert routes_mod._service_disabled is False
 
 
+# ─────────────────────────── 门控：任一上游可用（§4.4）───────────────────────────
+
+def test_service_on_with_workbuddy_accounts_only(client, monkeypatch):
+    """纯 WorkBuddy 用户（无牛码登录）：账号池非空 → 服务可用。"""
+    from relay.platforms import store
+
+    async def _seed():
+        await store.upsert_account("workbuddy", {
+            "uid": "u_svc", "access_token": "at", "refresh_token": "rt",
+            "expires_at": 9_999_999_999_999, "status": "normal"})
+
+    _run(_seed())
+    # 未登录（fixture 默认 not_logged_in）但 WorkBuddy 池非空
+    assert client.get("/v1/service", headers=_auth()).json()["enabled"] is True
+    assert client.get("/v1/models", headers=_auth()).status_code == 200
+
+
+def test_service_off_when_account_all_non_normal(client, monkeypatch):
+    """WorkBuddy 账号全非 normal（如 disabled）→ 不算可用上游。"""
+    from relay.platforms import store
+
+    async def _seed():
+        await store.upsert_account("workbuddy", {
+            "uid": "u_dis", "access_token": "at", "refresh_token": "rt",
+            "expires_at": 9_999_999_999_999, "status": "disabled"})
+
+    _run(_seed())
+    assert client.get("/v1/service", headers=_auth()).json()["enabled"] is False
+    assert client.get("/v1/models", headers=_auth()).status_code == 503
+
+
+def test_service_on_with_custom_provider_only(client, monkeypatch):
+    """纯自定义供应商用户：有启用且带模型的条目 → 服务可用。"""
+    from relay.providers_custom import _save_sync
+
+    _save_sync([{"id": "p1", "name": "基元律动", "base_url": "https://x.com/v1",
+                 "api_key": "sk", "enabled": True, "models": ["m1"]}])
+    assert client.get("/v1/service", headers=_auth()).json()["enabled"] is True
+
+
+def test_service_manual_stop_still_stops_all(client, monkeypatch):
+    """M9 语义不变：手动停 = 全停（即便 WorkBuddy 池非空）。"""
+    from relay.platforms import store
+
+    async def _seed():
+        await store.upsert_account("workbuddy", {
+            "uid": "u_svc2", "access_token": "at", "refresh_token": "rt",
+            "expires_at": 9_999_999_999_999, "status": "normal"})
+
+    _run(_seed())
+    client.post("/v1/service/disable", headers=_auth())
+    assert client.get("/v1/service", headers=_auth()).json()["enabled"] is False
+
+
 # ─────────────────────────── login_status 归一化（无会话 vs 浏览器授权中）───────────────────────────
 
 async def _stub(status: str, error: str | None = None) -> dict:

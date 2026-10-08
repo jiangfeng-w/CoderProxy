@@ -71,11 +71,36 @@ _service_disabled = False
 
 
 async def _serving() -> bool:
-    """/v1 OpenAI 服务是否可用：未被手动停止 且 已登录。"""
+    """/v1 OpenAI 服务是否可用：未被手动停止 且 **任一上游可用**（§4.4 定稿）。
+
+    上游可用 = 牛码已登录 or WorkBuddy 账号池非空（有 normal 号）or 有启用的自定义
+    供应商。纯 WorkBuddy / 纯自定义供应商用户（无牛码账号）也可用 /v1；M9 手动
+    「停止服务」语义不变（停 = 全停）。
+    """
     if _service_disabled:
         return False
     status = await auth_flow.login_status()
-    return status.get("status") == "logged_in"
+    if status.get("status") == "logged_in":
+        return True
+    return await _any_platform_available()
+
+
+async def _any_platform_available() -> bool:
+    """非牛码上游可用性：WorkBuddy 账号池非空 / 启用的自定义供应商非空。"""
+    try:
+        from relay.platforms import store
+        accounts = await store.load_accounts("workbuddy")
+        if any(str(a.get("status") or "normal") == "normal" for a in accounts):
+            return True
+    except Exception as exc:  # noqa: BLE001（存储异常不阻断服务决策）
+        logger.warning("[relay] 检查 WorkBuddy 账号池失败: %s", exc)
+    try:
+        for entry in await providers_custom.load_providers():
+            if entry.get("enabled", True) and entry.get("models"):
+                return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[relay] 检查自定义供应商失败: %s", exc)
+    return False
 
 
 @app.on_event("startup")
