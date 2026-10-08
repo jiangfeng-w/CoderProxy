@@ -198,6 +198,74 @@ export const createCustomProvider = (body: CustomProviderInput): Promise<{ provi
 export const updateCustomProvider = (id: string, body: CustomProviderInput): Promise<{ provider: CustomProvider }> => relay('POST', `/v1/providers/custom/${id}`, body)
 export const deleteCustomProvider = (id: string): Promise<{ status: string }> => relay('DELETE', `/v1/providers/custom/${id}`)
 
+// ─────────────────────────── /v1/platforms（WorkBuddy 多账号登录与签到）───────────────────────────
+
+/** 平台元信息（GET /v1/platforms）。 */
+export interface PlatformInfo {
+  id: string
+  display_name: string
+  supports_checkin: boolean
+  supports_quota: boolean
+}
+
+/** WorkBuddy 账号视图（后端不回传任何 token）。 */
+/** 逐包配额明细（quota.packages，后端归一：到期已转 CN 时间串，cycle=周期刷新包）。 */
+export interface WbQuotaPackage {
+  name: string
+  total: number
+  used: number
+  remaining: number
+  expire_at: string
+  cycle: boolean
+}
+
+export interface WbAccount {
+  uid: string
+  nickname: string
+  email: string
+  domain: string
+  status: string
+  checkin: { last_checkin_date?: string; streak_days?: number; today_checked_in?: boolean }
+  quota: {
+    total?: number
+    remaining?: number
+    used?: number
+    expire_at?: string
+    fetched_at?: string
+    packages?: WbQuotaPackage[]
+  }
+}
+
+export interface WbCheckinResult {
+  success: boolean
+  message: string
+  streak_days?: number
+  credit?: number | null
+  today_checked_in?: boolean
+}
+
+export interface WbLoginStart {
+  login_id: string
+  authorize_url: string
+  expires_in: number
+}
+
+export interface WbLoginStatus {
+  status: 'pending' | 'success' | 'failed'
+  uid?: string
+  error?: string
+}
+
+export const listPlatforms = (): Promise<{ platforms: PlatformInfo[] }> => relay('GET', '/v1/platforms')
+export const listWbAccounts = (): Promise<{ accounts: WbAccount[] }> => relay('GET', '/v1/platforms/workbuddy/accounts')
+export const wbLoginStart = (): Promise<WbLoginStart> => relay('POST', '/v1/platforms/workbuddy/login/start')
+export const wbLoginStatus = (loginId: string): Promise<WbLoginStatus> => relay('GET', `/v1/platforms/workbuddy/login/status?login_id=${encodeURIComponent(loginId)}`)
+export const wbLoginCancel = (loginId: string): Promise<{ status: string }> => relay('POST', `/v1/platforms/workbuddy/login/cancel?login_id=${encodeURIComponent(loginId)}`)
+export const wbDeleteAccount = (uid: string): Promise<{ status: string }> => relay('DELETE', `/v1/platforms/workbuddy/accounts/${uid}`)
+export const wbCheckin = (uid: string): Promise<{ result: WbCheckinResult; account: WbAccount }> => relay('POST', `/v1/platforms/workbuddy/accounts/${uid}/checkin`)
+export const wbCheckinStatus = (uid: string): Promise<WbAccount> => relay('GET', `/v1/platforms/workbuddy/accounts/${uid}/checkin-status`)
+export const wbRefreshQuota = (uid: string): Promise<WbAccount> => relay('POST', `/v1/platforms/workbuddy/accounts/${uid}/quota`)
+
 // ─────────────────────────── /v1/stats（M8：Token 统计页）───────────────────────────
 
 /** 统计维度：模型 / 类型 / 按天 / 按小时。 */
