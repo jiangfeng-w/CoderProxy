@@ -11,9 +11,12 @@ import CustomProvidersTab from './providers/CustomProvidersTab.vue'
 
 <template>
   <div class="providers-page">
+    <!-- show:lazy：首次激活挂载后常驻（切换不重建、数据保留）；
+         不加 animated：pane wrapper 的 max-height 0.2s 过渡在高度不等的 tab 间切换
+         时表现为「先矮后拉长」的闪烁（实测定位 2026-10-08），去掉后高度瞬时切换 -->
     <NTabs
       type="line"
-      animated
+      display-directive="show:lazy"
     >
       <NTabPane
         name="niucode"

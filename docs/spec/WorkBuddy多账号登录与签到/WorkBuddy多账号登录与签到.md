@@ -1,6 +1,6 @@
 # WorkBuddy 多账号登录与签到
 
-> **状态**：方案已定稿（2026-10-07，由 2026-10-04 三方可行性分析 + 2026-10-06 实施计划定稿转化）
+> **状态**：已实现（2026-10-08 小号 e2e 通过；牛码 chat 真实对话回归因主账号封禁待解封补测；e2e 实测契约修正见文末）
 > **优先级**：核心
 > **来源**：多平台扩展调研（WorkBuddy/Trae/Qoder 可行性分析 → 用户决策：本期只做 WorkBuddy，Trae/Qoder 留扩展位）
 > **隐私声明**：本文档仅含公开开源项目信息与占位符示例，不含任何真实账号、凭证、token。
@@ -64,7 +64,8 @@ frontend/src/stores/workbuddy.ts       # Pinia store（对齐 stores/config.ts �
 ### WorkBuddy API 契约（三方逆向交叉验证，client.py 内常量化）
 
 - base `https://copilot.tencent.com`（`WB_API_BASE`），web 域 `https://www.codebuddy.cn`（`WB_WEB_BASE`，refresh 用）；均入 config.py 新增 `wb_*` 配置项（env 覆盖，独立于 ta3_user_agent）
-- **登录**：`POST {base}/v2/plugin/auth/state?platform=CLI` → state+authUrl；轮询 `GET {base}/v2/plugin/auth/token?state=`；`GET {base}/v2/plugin/login/account?state=` 取 uid/nickname/domain
+- **登录**：`POST {base}/v2/plugin/auth/state?platform=workbuddy` → state+authUrl；轮询 `GET {base}/v2/plugin/auth/token?state=`；`GET {base}/v2/plugin/login/account?state=` 取 uid/nickname/domain
+  - **platform 档位口径修正（2026-10-07，e2e 前复查）**：初版跟随 workbuddy-cockpit 写 `CLI`；复查发现该值仅 2api 谱系（workbuddy-cockpit 1★ / workbuddy2api-panel 2.1k★）使用，而最大众化的做法是官方桌面客户端档位 **`workbuddy`**（cockpit-tools 18.7k★ 的 workbuddy_oauth.rs:9 与 workbuddy-switch 1.0k★ 的 variant.rs 同用，后者即从桌面客户端逆向的档位单一事实来源），已改并常量化 `OAUTH_PLATFORM`
 - **刷新**：`POST {WB_WEB_BASE}/v2/plugin/auth/token/refresh`（`X-Refresh-Token` 头；该头**只允许出现在 refresh 请求**）
 - **签到**：状态 `POST {base}/v2/billing/meter/checkin-activity-status`（失败回退 `checkin-status`）；执行 `POST {base}/v2/billing/meter/daily-checkin` body `{}`；已签到判定 = code 10001/14001 **或** msg 含「已签到」/「already」→ 幂等成功
 - **配额**：`POST {base}/v2/billing/meter/get-user-resource`（body 含 PageNumber/PageSize/ProductCode:"p_tcaca"/Status:[0,3]/PackageEndTimeRange...），响应按 `data/resources` / `data/data/resources` / `Response/Data/Accounts` 多形态找数组，聚合 remaining/used/total/expire_at
@@ -142,9 +143,19 @@ frontend/src/stores/workbuddy.ts       # Pinia store（对齐 stores/config.ts �
 
 ## 验收
 
-- [ ] `pytest tests/ -x -q` 全绿（含 5 个新测试文件；test_wb_routes 含安全断言：响应序列化后不含 access_token/refresh_token 子串；含 ta3 路由回归断言）
-- [ ] `npm run format:check` + `npm run build` 通过
-- [ ] `py -3.13 build_sidecar.py` 产物冒烟：`curl -H "Authorization: Bearer <key>" http://127.0.0.1:3601/v1/platforms` 返回 200
-- [ ] 小号 e2e：登录（设备授权全流程）→ 签到（含重复签到幂等提示）→ 配额刷新 → 删除账号
-- [ ] ta3 回归三项：/v1/auth/login/start、/v1/models、一次 /v1/chat/completions 完整对话
-- [ ] 前端：账号卡片（昵称/配额/签到状态/连签天数）、添加账号弹窗、签到按钮 loading/已签到态、删除二次确认
+- [x] `pytest tests/ -x -q` 全绿（216 passed，含 5 个新测试文件；test_wb_routes 含安全断言：响应序列化后不含 access_token/refresh_token 子串；含 ta3 路由回归断言）
+- [x] `npm run format:check` + `npm run build` 通过
+- [x] `py -3.13 build_sidecar.py` 产物冒烟：打包态 `/v1/platforms` 200、wb accounts 200、ta3 `/v1/models` 不受影响
+- [x] 小号 e2e（2026-10-08）：登录（设备授权全流程）×2 → 签到（含重复签到幂等提示）→ 配额刷新（逐包明细与官方套餐页逐项一致）→ 删除账号
+- [x] ta3 回归（降级范围）：登录态 + 模型目录 + 模型页功能正常（**主账号封禁一周，`/v1/chat/completions` 真实对话待解封补测**）
+- [x] 前端：账号卡片（昵称/配额/签到状态/连签天数）、添加账号弹窗（授权链接+复制+整行打开按钮，对齐 cockpit-tools 形态）、签到按钮 loading/已签到态、删除二次确认
+
+## e2e 实测契约修正（2026-10-08，全部已落码并有测试锁定）
+
+| # | 修正 | 依据 |
+|---|---|---|
+| 1 | 登录 platform `CLI` → **`workbuddy`** | 用户复查 star 数：cockpit-tools 18.7k★ WorkBuddy 模块与 workbuddy-switch 均用桌面客户端档位；`CLI` 仅 2api 谱系（1★/2.1k★） |
+| 2 | 登录归档后 **best-effort 预拉签到状态+配额** | e2e：已签到账号首屏误显「今日未签」；弹窗文案本承诺「授权完成后自动刷新」 |
+| 3 | 配额 **两级编排**：summary（空 body + 桌面指纹 + `X-Client-Platform: web`）主路径 → 旧 get-user-resource（空 body + SaaS/CLI 头）回退 | 用户免费号实测：cockpit-tools 大 body 回全 0，9router 空 body 能拿到；workbuddy-switch 证实 summary 配对形态（身份一致优先） |
+| 4 | 到期时间 **多形态归一**（epoch 秒/毫秒→CN 时间串）+ **>730 天占位过滤** + 周期包取 CycleEndTime（=官方页「下次权益周期更新」） | e2e：免费号到期显示为 epoch 时间戳且换算错误（2035 占位）；官方页显示 2026-10-31 周期更新 |
+| 5 | quota 增加 **packages 逐包列表**（名称/已用/总量/到期/cycle），前端表格+分页展示 | 用户拍板：各包额度/到期不同，聚合一刀切丢信息（对照官方套餐页逐包展示） |
