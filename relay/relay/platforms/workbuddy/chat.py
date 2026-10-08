@@ -226,25 +226,32 @@ class WorkBuddyChatAdapter:
                                  transport=self._transport)
 
     async def _stream_once(self, account: dict, body: dict) -> AsyncIterator[dict]:
-        """单号单次调用：HTTP 错误分类抛错（401/403 → 换号信号）。"""
+        """单号单次调用：HTTP 错误分类抛错（401/403 → 换号信号）。
+
+        网络层错误（断连/超时/DNS）包成 PlatformUpstreamError(502)——与自定义供应商
+        链路同口径，不把 httpx 异常裸露成 500（步骤 8 小号 e2e 断网实测暴露）。
+        """
         url = f"{settings.wb_api_base}{CHAT_PATH}"
-        async with self._new_client() as client:
-            async with client.stream("POST", url, headers=self._headers(account),
-                                     json=body) as resp:
-                if resp.status_code != 200:
-                    text = (await resp.aread()).decode("utf-8", "replace")
-                    err = self.parse_error(resp.status_code, text)
-                    if resp.status_code in (401, 403):
-                        raise _CredentialRejected(str(err)) from None
-                    raise err
-                async for line in resp.aiter_lines():
-                    frame = _parse_frame(line)
-                    if frame is None:
-                        continue
-                    if "__error__" in frame:
-                        status, text = frame["__error__"]
-                        raise self.parse_error(status, text)
-                    yield frame
+        try:
+            async with self._new_client() as client:
+                async with client.stream("POST", url, headers=self._headers(account),
+                                         json=body) as resp:
+                    if resp.status_code != 200:
+                        text = (await resp.aread()).decode("utf-8", "replace")
+                        err = self.parse_error(resp.status_code, text)
+                        if resp.status_code in (401, 403):
+                            raise _CredentialRejected(str(err)) from None
+                        raise err
+                    async for line in resp.aiter_lines():
+                        frame = _parse_frame(line)
+                        if frame is None:
+                            continue
+                        if "__error__" in frame:
+                            status, text = frame["__error__"]
+                            raise self.parse_error(status, text)
+                        yield frame
+        except httpx.HTTPError as exc:
+            raise PlatformUpstreamError(f"上游网络错误: {exc}", status=502) from exc
 
     async def _frames_with_rotation(self, request: ChatRequest) -> AsyncIterator[dict]:
         """账号池换号编排：单号 401/403 → 换下一号（每号一次）；全试完 → 503 语义。

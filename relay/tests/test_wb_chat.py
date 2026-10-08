@@ -265,6 +265,19 @@ def test_http_error_raises_mapped(data_dir):
     assert "11128" in str(ei.value)
 
 
+def test_network_error_maps_502(data_dir):
+    """网络层错误（断连/超时）→ PlatformUpstreamError(502)，不裸露成 500。"""
+    _run(_seed_account())
+
+    def _boom(request):
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response")
+
+    with pytest.raises(PlatformUpstreamError) as ei:
+        _run(_collect(_adapter(_boom), REQ))
+    assert ei.value.status == 502
+    assert "网络错误" in str(ei.value)
+
+
 # ─────────────────────────── 账号池轮转（§4.3） ───────────────────────────
 
 def test_no_account_raises_no_available(data_dir):
