@@ -34,7 +34,8 @@ _SSE_TOOLS = [
     'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_47","type":"function",'
     '"function":{"name":"get_weather","arguments":"{\\""},"index":0}]},"finish_reason":""}]}',
     'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"type":"function",'
-    '"function":{"name":"","arguments":"city\\":\\"Beijing\\"}"},"index":0}]},"finish_reason":""}]}',
+    '"function":{"name":"","arguments":"city\\":\\"Beijing\\"}"},"index":0}]},'
+    '"finish_reason":""}]}',
     'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],'
     '"usage":{"prompt_tokens":5,"completion_tokens":9,"total_tokens":14}}',
     "data: [DONE]",

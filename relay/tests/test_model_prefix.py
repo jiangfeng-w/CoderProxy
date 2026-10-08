@@ -220,6 +220,13 @@ def test_whitelist_full_name_filter(client):
 
 # ─────────────────────────── 注册表路由（WorkBuddy 链路） ───────────────────────────
 
+def test_workbuddy_registered_on_import():
+    """导入 relay.routes 后注册表应有 WorkBuddy 的目录加载器与 adapter 工厂。"""
+    from relay import adapter_registry, routes  # noqa: F401（导入即注册）
+    assert adapter_registry.has_provider("WorkBuddy")
+    assert adapter_registry.adapter_factory("WorkBuddy") is not None
+
+
 def test_registry_routed_workbuddy_endpoint(client, monkeypatch):
     """`WorkBuddy/…` 前缀 → 注册表工厂构造 adapter 并转发（假 adapter，不触网）。"""
     from relay import adapter_registry

@@ -520,7 +520,9 @@ def factory(bare_model: str, *, ctx=None, model_entry: dict | None = None,
     return WorkBuddyChatAdapter(bare_model, ctx=ctx, model_entry=model_entry)
 
 
-# 注册到出站 adapter 注册表（导入即生效；目录加载器在「步骤 3」追加）
+# 注册到出站 adapter 注册表（导入即生效）
 from relay import adapter_registry  # noqa: E402
+from relay.platforms.workbuddy import catalog as _catalog  # noqa: E402
 
-adapter_registry.register_provider("WorkBuddy", factory=factory)
+adapter_registry.register_provider("WorkBuddy", directory=_catalog.load_models,
+                                   factory=factory)
