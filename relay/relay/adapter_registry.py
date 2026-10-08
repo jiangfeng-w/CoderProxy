@@ -36,15 +36,20 @@ _providers: dict[str, dict] = {}
 
 def register_provider(prefix: str, *,
                       directory: Callable[[], Awaitable[list[dict]]] | None = None,
-                      factory: Callable[..., object] | None = None) -> None:
-    """注册（或覆盖）某供应商前缀的目录加载器 / adapter 工厂。
+                      factory: Callable[..., object] | None = None,
+                      availability: Callable[[], Awaitable[bool]] | None = None) -> None:
+    """注册（或覆盖）某供应商前缀的目录加载器 / adapter 工厂 / 可用性探测。
 
     实现模块在**导入时**调用（重复注册以最后一次为准；测试可借此替换替身）。
+
+    availability（可选）：async () -> bool，账号池/凭证是否就绪。routes 在目录
+    查不到模型时用它区分「池不可用（→ 503 引导配置）」与「模型不存在（→ 404）」。
     """
     key = model_ref.canonical_prefix(prefix)
-    _providers[key] = {"directory": directory, "factory": factory}
-    logger.debug("[registry] 注册供应商 %s（directory=%s, factory=%s）",
-                 key, bool(directory), bool(factory))
+    _providers[key] = {"directory": directory, "factory": factory,
+                       "availability": availability}
+    logger.debug("[registry] 注册供应商 %s（directory=%s, factory=%s, availability=%s）",
+                 key, bool(directory), bool(factory), bool(availability))
 
 
 def unregister_provider(prefix: str) -> None:
@@ -59,6 +64,18 @@ def has_provider(prefix: str) -> bool:
 def known_prefixes() -> list[str]:
     """已注册供应商前缀（/v1/models 合并用）。"""
     return list(_providers)
+
+
+async def provider_available(prefix: str) -> bool | None:
+    """供应商可用性：True/False；未注册探测钩子 → None（调用方按 404 处理）。"""
+    hook = (_providers.get(model_ref.canonical_prefix(prefix)) or {}).get("availability")
+    if hook is None:
+        return None
+    try:
+        return bool(await hook())
+    except Exception as exc:  # noqa: BLE001（探测异常不炸请求路径）
+        logger.warning("[registry] 可用性探测失败 %s: %s", prefix, exc)
+        return None
 
 
 def adapter_factory(prefix: str) -> Callable[..., object] | None:

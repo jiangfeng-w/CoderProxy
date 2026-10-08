@@ -70,6 +70,21 @@ app.include_router(platforms_router)
 _service_disabled = False
 
 
+class PlatformUnavailableError(Exception):
+    """平台池不可用（如 WorkBuddy 无账号）→ 503 + Retry-After（§4.3 语义）。"""
+
+    def __init__(self, detail: str = "账号不可用", retry_after: str = "60") -> None:
+        self.detail = detail
+        self.retry_after = retry_after
+        super().__init__(detail)
+
+
+@app.exception_handler(PlatformUnavailableError)
+async def _platform_unavailable_handler(_request: Request, exc: PlatformUnavailableError):
+    return JSONResponse(status_code=503, content={"detail": exc.detail},
+                        headers={"Retry-After": exc.retry_after})
+
+
 async def _serving() -> bool:
     """/v1 OpenAI 服务是否可用：未被手动停止 且 **任一上游可用**（§4.4 定稿）。
 
@@ -361,6 +376,9 @@ async def _ensure_provider_model(ref: model_ref.ModelRef, probe: bool) -> dict:
         raise HTTPException(status_code=404, detail=f"未知供应商: {ref.prefix}")
     found = await adapter_registry.find_provider_model(ref.prefix, ref.bare)
     if found is None or (not probe and not await storage.is_model_enabled(ref.canonical)):
+        # 池不可用（如无 WorkBuddy 账号）与模型不存在语义区分：前者 503 引导配置
+        if found is None and await adapter_registry.provider_available(ref.prefix) is False:
+            raise PlatformUnavailableError(f"{ref.prefix} 账号不可用，请到供应商页添加账号")
         raise HTTPException(
             status_code=404, detail=f"未知或未启用的模型: {ref.canonical}")
     return {"name": ref.bare, "provider": ref.prefix, **found}
@@ -531,6 +549,12 @@ async def get_model(model_id: str):
             raise HTTPException(status_code=404, detail="Model not found")
         return oai_adapter.model_to_openai(model, prefix=model_ref.PREFIX_NIUCODE)
     found = await adapter_registry.find_provider_model(ref.prefix, ref.bare)
+    if found is None and not adapter_registry.has_provider(ref.prefix):
+        # 自定义供应商（配置清单，不在注册表）
+        entry = await providers_custom.find_provider_by_name(ref.prefix)
+        if entry is not None and entry.get("enabled", True) and \
+                ref.bare in [str(m).strip() for m in (entry.get("models") or [])]:
+            found = {"name": ref.bare}
     if found is None:
         raise HTTPException(status_code=404, detail="Model not found")
     return oai_adapter.model_to_openai(found, prefix=ref.prefix)

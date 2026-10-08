@@ -46,6 +46,12 @@ hiddenimports = [
     # 平台插件包（/v1/platforms/*，WorkBuddy）：routes 挂载点 + 子包注册（漏登记踩坑史，双保险）
     "relay.platforms",
     "relay.platforms.workbuddy",
+    # WorkBuddy 聊天反代与多平台聚合：前缀路由 + adapter 注册表 + 三 provider 实现
+    "relay.model_ref",
+    "relay.adapter_registry",
+    "relay.custom_openai",
+    "relay.platforms.workbuddy.chat",
+    "relay.platforms.workbuddy.catalog",
 ]
 
 a = Analysis(

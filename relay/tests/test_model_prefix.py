@@ -154,17 +154,18 @@ def test_ensure_model_unknown_prefix_404(client, monkeypatch):
     assert "未知供应商" in ei.value.detail
 
 
-def test_ensure_model_workbuddy_not_loaded_404(client, monkeypatch):
-    """WorkBuddy 聊天 adapter 未注册（步骤 2 前）：报未知供应商而非误路由牛码。"""
+def test_ensure_model_workbuddy_no_accounts_503(client, monkeypatch):
+    """WorkBuddy 已注册但账号池为空：503（§4.3 引导到供应商页），非 404 未知模型。"""
     _run(storage.save_models(_MODELS))
 
     async def _no_sync():
         return []
 
     monkeypatch.setattr(routes_mod.auth_flow, "sync_models", _no_sync)
-    with pytest.raises(HTTPException) as ei:
+    with pytest.raises(routes_mod.PlatformUnavailableError) as ei:
         _run(routes_mod._ensure_model("WorkBuddy/glm-5.3-flash"))
-    assert ei.value.status_code == 404
+    assert ei.value.retry_after == "60"
+    assert "供应商页" in ei.value.detail
 
 
 def test_bare_name_provider_gets_bare_model(client, monkeypatch):

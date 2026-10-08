@@ -192,6 +192,11 @@ def test_routes_custom_provider_end_to_end(tmp_path, monkeypatch):
         ids = [m["id"] for m in r.json()["data"]]
         assert "基元律动/glm-5.3-flash" in ids
 
+        # 单模型端点（自定义供应商全名）
+        r = client.get("/v1/models/基元律动/glm-5.3-flash",
+                       headers={"Authorization": "Bearer custom-test-key"})
+        assert r.status_code == 200 and r.json()["id"] == "基元律动/glm-5.3-flash"
+
         r = client.post("/v1/chat/completions",
                         json={"model": "基元律动/glm-5.3-flash",
                               "messages": [{"role": "user", "content": "hi"}]},

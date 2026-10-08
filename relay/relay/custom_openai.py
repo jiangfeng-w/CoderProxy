@@ -100,32 +100,36 @@ class OpenAICompatProvider:
         usage: Usage | None = None
         raw_tail: list[str] = []
 
-        async with self._new_client() as client:
-            async with client.stream("POST", self._url(), headers=self._headers(),
-                                     json=self._body(request, stream=True)) as resp:
-                if resp.status_code != 200:
-                    text = (await resp.aread()).decode("utf-8", "replace")
-                    raise UpstreamHttpError(_error_text(resp.status_code, text),
-                                            status=resp.status_code)
-                async for line in resp.aiter_lines():
-                    frame = _parse_sse_line(line)
-                    if frame is None:
-                        continue
-                    raw_tail = [*raw_tail[-7:],
-                                json.dumps(frame, ensure_ascii=False, default=str)[:300]]
-                    if frame.get("usage"):
-                        usage = _usage_from_upstream(frame["usage"])
-                    if frame.get("finish_reason"):
-                        finish_reason = str(frame["finish_reason"])
-                    if frame.get("content"):
-                        content_parts.append(frame["content"])
-                        yield {"type": "content", "delta": frame["content"]}
-                    if frame.get("reasoning_content"):
-                        thinking_parts.append(frame["reasoning_content"])
-                        yield {"type": "thinking", "delta": frame["reasoning_content"]}
-                    for tc in frame.get("tool_calls") or []:
-                        _merge_tool_call(tool_calls, tc)
-                        yield {"type": "tool_call", "delta": tc}
+        try:
+            async with self._new_client() as client:
+                async with client.stream("POST", self._url(), headers=self._headers(),
+                                         json=self._body(request, stream=True)) as resp:
+                    if resp.status_code != 200:
+                        text = (await resp.aread()).decode("utf-8", "replace")
+                        raise UpstreamHttpError(_error_text(resp.status_code, text),
+                                                status=resp.status_code)
+                    async for line in resp.aiter_lines():
+                        frame = _parse_sse_line(line)
+                        if frame is None:
+                            continue
+                        raw_tail = [*raw_tail[-7:],
+                                    json.dumps(frame, ensure_ascii=False, default=str)[:300]]
+                        if frame.get("usage"):
+                            usage = _usage_from_upstream(frame["usage"])
+                        if frame.get("finish_reason"):
+                            finish_reason = str(frame["finish_reason"])
+                        if frame.get("content"):
+                            content_parts.append(frame["content"])
+                            yield {"type": "content", "delta": frame["content"]}
+                        if frame.get("reasoning_content"):
+                            thinking_parts.append(frame["reasoning_content"])
+                            yield {"type": "thinking", "delta": frame["reasoning_content"]}
+                        for tc in frame.get("tool_calls") or []:
+                            _merge_tool_call(tool_calls, tc)
+                            yield {"type": "tool_call", "delta": tc}
+        except httpx.HTTPError as exc:
+            # 网络层错误（DNS/连接/超时）：502 语义（上游不可达），不裸露 httpx 类型
+            raise UpstreamHttpError(f"上游网络错误: {exc}", status=502) from exc
 
         yield {
             "type": "done",
@@ -140,21 +144,24 @@ class OpenAICompatProvider:
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """非流式：优先原样转发上游 JSON；上游不支持非流式（4xx）再退回流式聚合。"""
         body = self._body(request, stream=False)
-        async with self._new_client() as client:
-            resp = await client.post(self._url(), headers=self._headers(), json=body)
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                except ValueError as exc:
-                    raise UpstreamHttpError("上游响应非 JSON", status=502) from exc
-                return _chat_response_from_json(data, self._model)
-            text = resp.text
-            # 4xx（如「不支持非流式」）：退回流式聚合，宽容供应商差异
-            if 400 <= resp.status_code < 500:
-                logger.info("[custom] 非流式被拒（%d），退回流式聚合", resp.status_code)
-                return await _aggregate_stream(self, request)
-            raise UpstreamHttpError(_error_text(resp.status_code, text),
-                                    status=resp.status_code)
+        try:
+            async with self._new_client() as client:
+                resp = await client.post(self._url(), headers=self._headers(), json=body)
+        except httpx.HTTPError as exc:
+            raise UpstreamHttpError(f"上游网络错误: {exc}", status=502) from exc
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                raise UpstreamHttpError("上游响应非 JSON", status=502) from exc
+            return _chat_response_from_json(data, self._model)
+        text = resp.text
+        # 4xx（如「不支持非流式」）：退回流式聚合，宽容供应商差异
+        if 400 <= resp.status_code < 500:
+            logger.info("[custom] 非流式被拒（%d），退回流式聚合", resp.status_code)
+            return await _aggregate_stream(self, request)
+        raise UpstreamHttpError(_error_text(resp.status_code, text),
+                                status=resp.status_code)
 
 
 async def _aggregate_stream(adapter: OpenAICompatProvider,

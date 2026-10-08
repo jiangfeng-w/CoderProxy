@@ -524,5 +524,12 @@ def factory(bare_model: str, *, ctx=None, model_entry: dict | None = None,
 from relay import adapter_registry  # noqa: E402
 from relay.platforms.workbuddy import catalog as _catalog  # noqa: E402
 
+
+async def _available() -> bool:
+    """可用性探测：账号池是否有 normal 号（routes 区分 503/404 用）。"""
+    accounts = await store.load_accounts(PLATFORM_ID)
+    return any(str(a.get("status") or "normal") == "normal" for a in accounts)
+
+
 adapter_registry.register_provider("WorkBuddy", directory=_catalog.load_models,
-                                   factory=factory)
+                                   factory=factory, availability=_available)
