@@ -6,10 +6,19 @@
 
 工具调用在 M2 阶段沿用 vendored ta3.py 内置的 disguise/restore（strict 式），
 relay 层不做双向翻译（双向工具伪装归 M3）。
+
+上游空响应（空流）防御（BUG-001 修复，2026-10-08）：牛码网关间歇性 HTTP 200 后
+立即干净关流（0 token 空流）。此处统一做空响应判定 + relay 内自动重试
+（settings.empty_stream_retries）；耗尽仍空抛 EmptyStreamError，由 routes 层
+如实记 chat_error 并以 502 透传——不再向 agent 发假成功的空流/空 JSON。
+判定先于产出：流式在任何帧（含 role 帧）yield 之前完成判定，保证重试时响应头
+未发、且不重发 role 帧。
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import time
 import uuid
@@ -18,7 +27,100 @@ from collections.abc import AsyncIterator
 from app.models.providers.ta3 import Ta3Provider
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
+from relay.config import settings
+
+logger = logging.getLogger(__name__)
+
 DEFAULT_MODEL_OWNED_BY = "ta3"
+
+# ─────────────────────────── 上游空响应防御（BUG-001） ───────────────────────────
+
+_EMPTY_STREAM_MSG = "上游返回空响应"
+
+
+class EmptyStreamError(RuntimeError):
+    """上游 HTTP 200 后干净关流的空响应（零产出）。
+
+    raw_tail 为上游原始 SSE 行尾巴（本地诊断用）：只允许进 logger / chat_error
+    落库 detail，**不得**拼进面向 agent 的错误消息（硬性规则 2：不把上游内部
+    协议行泄漏给 agent）。
+    """
+
+    def __init__(self, message: str = _EMPTY_STREAM_MSG, *,
+                 raw_tail: list | str | None = None) -> None:
+        super().__init__(message)
+        self.raw_tail = raw_tail
+
+
+def empty_stream_exhausted_message(retried: int) -> str:
+    """重试耗尽（或 retries=0 直接失败）时的错误消息；不含 raw_tail（硬性规则 2）。"""
+    if retried <= 0:
+        return _EMPTY_STREAM_MSG
+    return f"{_EMPTY_STREAM_MSG}（已重试 {retried} 次仍为空）"
+
+
+async def empty_stream_retry_wait(attempt: int) -> None:
+    """第 attempt 次重试前的退避等待（1s/2s 封顶），测试可 monkeypatch 掉。"""
+    await asyncio.sleep(min(attempt, 2) * 1.0)
+
+
+def _is_empty_usage(usage) -> bool:
+    """usage 缺失或零 token——上游没真处理这次请求的硬指标。
+
+    兼容 Usage 模型与 dict（adapter 注册表接入的其它上游可能直接给 dict）。
+    """
+    if usage is None:
+        return True
+    if isinstance(usage, dict):
+        total = usage.get("total_tokens") or 0
+    else:
+        total = getattr(usage, "total_tokens", 0) or 0
+    return not total
+
+
+def _tool_call_is_shell(tc) -> bool:
+    """工具调用是否只有壳（有 name 但 arguments 空/占位）。
+
+    上游 tool_use 只发了 content_block_start（id/name）就关流时，仍会产出
+    {id,name,arguments:{}} 的占位 tool_call；这种不算真实产出，按空响应处理。
+    """
+    if not isinstance(tc, dict):
+        return True
+    args = tc.get("arguments")
+    if isinstance(args, dict):
+        # 空 dict / 仅 {"_raw": ""} 的降级占位都算壳
+        return set(args.keys()) <= {"_raw"} and not args.get("_raw")
+    return not args
+
+
+def _is_empty_done(done: dict) -> bool:
+    """done 事件是否为空响应。
+
+    硬指标：usage.total_tokens == 0（上游没真处理这次请求，input 都没计费）。
+    此时即便 content/thinking/tool_calls 非空（网关发了壳帧就关流，如 tool_use
+    只有 id/name、无 arguments），也按空响应重试——占位产出对客户端同样无用。
+    usage 缺失（None）视为空。total_tokens > 0 或存在真实产出时按非空放行。
+    """
+    if not _is_empty_usage(done.get("usage")):
+        return False
+    if done.get("content") or done.get("thinking"):
+        return False
+    tool_calls = done.get("tool_calls") or []
+    if any(not _tool_call_is_shell(tc) for tc in tool_calls):
+        return False
+    return True
+
+
+def _is_empty_chat_response(response: ChatResponse) -> bool:
+    """非流式聚合响应的空响应判定（与 _is_empty_done 同口径）。"""
+    if not _is_empty_usage(response.usage):
+        return False
+    if response.content or response.thinking:
+        return False
+    tool_calls = response.tool_calls or []
+    if any(not _tool_call_is_shell(tc) for tc in tool_calls):
+        return False
+    return True
 
 
 def _parse_content_block(content) -> tuple[str | None, list[dict] | None]:
@@ -271,24 +373,86 @@ class UsageCollector:
         self.duration_ms = None
 
 
+async def chat_with_empty_retry(provider: Ta3Provider, request: ChatRequest) -> ChatResponse:
+    """非流式聚合 + 上游空响应重试（独立预算 settings.empty_stream_retries）。
+
+    与流式 path 同口径：网关 200 后干净关流会产出全 0 的 ChatResponse，此前被
+    如实透传给 agent（假成功空 JSON）。此处对空响应重发上游请求；耗尽仍空抛
+    EmptyStreamError，由 routes 记 chat_error 并以 502 透传。真 401 等其它
+    RuntimeError 不归本函数处理，原样抛给外层 _chat_with_retry。
+    """
+    max_retries = max(0, int(getattr(settings, "empty_stream_retries", 3) or 0))
+    last: ChatResponse | None = None
+    for attempt in range(max_retries + 1):
+        if attempt:
+            logger.warning("[oai] 上游空响应，第 %d/%d 次重试: %s",
+                           attempt, max_retries,
+                           request.model or provider._model_name)  # noqa: SLF001
+            await empty_stream_retry_wait(attempt)
+        response = await provider.chat(request)
+        if not _is_empty_chat_response(response):
+            return response
+        last = response
+    raise EmptyStreamError(empty_stream_exhausted_message(max_retries))
+
+
 async def stream_openai_sse(provider: Ta3Provider, request: ChatRequest,
                             include_usage: bool = False,
                             usage_collector: UsageCollector | None = None) -> AsyncIterator[str]:
-    """把 provider 的流式事件翻译为 OpenAI SSE 帧（含 [DONE]）。"""
+    """把 provider 的流式事件翻译为 OpenAI SSE 帧（含 [DONE]）。
+
+    BUG-001 防御——判定先于产出：任何帧（含 role 首帧）yield 之前先完成空响应
+    判定，期间只缓冲零值 delta 帧；收到真实产出信号（非空 content/thinking 或
+    真实工具调用）才释放 role 首帧与缓冲。整个流零产出且 done 判定为空（usage
+    全 0）时抛 EmptyStreamError——一帧未发，调用方重试时响应头未发、且重试不会
+    重复发送 role 帧。
+    """
     model = request.model or provider._model_name  # noqa: SLF001（vendored 内部字段）
-    # 首帧声明 role，兼容多数 agent 对 assistant 角色帧的要求
-    yield _sse_chunk(model=model, delta={"role": "assistant", "content": ""})
 
     tool_call_ids: list[str] = []
     finish_reason: str | None = None
     usage: Usage | None = None
+    pending: list[str] = []   # 判定前缓冲的帧（零值 delta）；确认非空后按序补发
+    released = False          # 已确认非空：role 首帧与缓冲可（或已）发出
+    done_event: dict | None = None
+
+    def _release() -> list[str]:
+        """确认非空 → 返回需补发的前置帧（role 首帧 + 缓冲）；只补发一次。"""
+        nonlocal released
+        if released:
+            return []
+        released = True
+        frames = [_sse_chunk(model=model, delta={"role": "assistant", "content": ""})]
+        frames.extend(pending)
+        pending.clear()
+        return frames
+
     async for event in provider.stream_structured(request):
         etype = event["type"]
         if etype == "thinking":
-            yield _sse_chunk(model=model, delta={"reasoning_content": event["delta"]})
+            frame = _sse_chunk(model=model, delta={"reasoning_content": event["delta"]})
+            if not released and not event["delta"]:
+                pending.append(frame)  # 零值 delta：先缓冲，待判定非空再释放
+                continue
+            for head in _release():
+                yield head
+            yield frame
         elif etype == "content":
-            yield _sse_chunk(model=model, delta={"content": event["delta"]})
+            frame = _sse_chunk(model=model, delta={"content": event["delta"]})
+            if not released and not event["delta"]:
+                pending.append(frame)
+                continue
+            for head in _release():
+                yield head
+            yield frame
         elif etype == "done":
+            done_event = event
+            if not released and _is_empty_done(event):
+                # 零产出 + usage 全 0：一帧未发即判空抛错；raw_tail 只随异常给
+                # 调用方落日志（不得进面向 agent 的错误消息，硬性规则 2）
+                raise EmptyStreamError(raw_tail=event.get("raw_tail"))
+            for head in _release():
+                yield head
             tool_calls = event.get("tool_calls") or []
             if tool_calls:
                 for i, tc in enumerate(tool_calls):
@@ -312,6 +476,10 @@ async def stream_openai_sse(provider: Ta3Provider, request: ChatRequest,
             # M6：落库通道——无论 include_usage 与否都收集 usage，并打点 done 时刻
             if usage_collector is not None:
                 usage_collector.record(usage)
+
+    if not released:
+        # provider 未发 done 即结束（或全程零事件）：同样按空响应处理，不再假成功
+        raise EmptyStreamError(raw_tail=(done_event or {}).get("raw_tail"))
 
     yield _sse_chunk(model=model, delta={},
                      finish_reason=_finish_reason_to_openai(finish_reason) or "stop")

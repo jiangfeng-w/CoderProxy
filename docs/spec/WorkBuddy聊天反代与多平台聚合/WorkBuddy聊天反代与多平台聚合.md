@@ -69,7 +69,7 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
 
 | 优化点 | 现状 | 时机 |
 |---|---|---|
-| BUG-001 空流假成功 | [已知问题](../../已知问题.md)已定位根因与修复方向 | 独立缺陷，随时可修，不依赖本架构 |
+| BUG-001 空流假成功 | [已知问题](../../已知问题.md)已定位根因与修复方向；**已修复 2026-10-08** | 已闭环（独立重试预算 + 耗尽必抛 502 + 判定先于产出 + raw_tail 只进日志） |
 | 上游错误非结构化 | vendored ta3.py 抛 `RuntimeError("模型请求失败 {status}：{body}")` 文本，`routes.py` 被迫正则 `_UPSTREAM_ERR_RE` 反解析 | 随 adapter 抽象一起做（ta3.py 加结构化异常，加「本地修订」注释） |
 | 401 刷新重试下沉 | `_sse_with_retry`/`_chat_with_retry` 耦合牛码语义（重跑 sync_models） | 随 adapter 抽象下沉到各 provider 实现 |
 

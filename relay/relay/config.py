@@ -3,6 +3,7 @@
 - 服务：RELAY_HOST / RELAY_PORT / RELAY_API_KEY
 - ta3：TA3_API_BASE / TA3_USER_AGENT / TA3_STREAM_IDLE_TIMEOUT /
        TA3_KIMI_THINKING_EFFORT / TA3_THINKING_WATCHDOG
+- 空响应：RELAY_EMPTY_STREAM_RETRIES（上游 200+空流自动重试次数，0 关闭）
 - 工具：TOOL_MODE（hybrid|strict|passthrough，M3 生效，M2 仅占位）
 - 数据：RELAY_DATA_DIR（token/模型/config 落盘目录）
 - 日志：RELAY_LOG_MAX_ROWS（logs 保留行数上限，默认 100000）
@@ -41,6 +42,10 @@ class Settings:
     ta3_stream_idle_timeout: float = 300.0
     ta3_kimi_thinking_effort: str = "low"
     ta3_thinking_watchdog: float = 240.0
+    # 上游空响应自动重试（BUG-001：网关间歇性 200 后立即干净关流，0 token 空流）。
+    # relay 内对空响应重发上游请求（独立预算，不与 401 刷新共用）；耗尽仍空则抛错，
+    # 由 routes 记 chat_error——不再向 agent 发假成功的空流/空 JSON。
+    empty_stream_retries: int = 3
     # WorkBuddy（CodeBuddy CN）平台插件（/v1/platforms/workbuddy/*）。
     # API 域双口径：契约参考（workbuddy-switch）用 copilot.tencent.com，
     # cockpit-tools 实测全走 www.codebuddy.cn——两个配置项兜底，小号冒烟后定默认。
@@ -95,6 +100,11 @@ class Settings:
             pass
         try:
             s.ta3_thinking_watchdog = float(_env("TA3_THINKING_WATCHDOG", str(s.ta3_thinking_watchdog)))
+        except ValueError:
+            pass
+        try:
+            s.empty_stream_retries = max(0, int(_env(
+                "RELAY_EMPTY_STREAM_RETRIES", str(s.empty_stream_retries))))
         except ValueError:
             pass
         return s

@@ -25,6 +25,8 @@
 3. 构造 Ta3Provider（llm- key / apiBase / anthropic 协议），转发到牛码
 4. 流式 → OpenAI SSE；非流式 → 聚合 JSON
 5. 牛码 401 → 重新同步目录（刷新 llm- key）后重试一次
+6. 上游空响应（HTTP 200 后干净关流，BUG-001）→ 独立预算重试
+   （settings.empty_stream_retries）；耗尽以 502 透传，不再发假成功空流/空 JSON
 """
 from __future__ import annotations
 
@@ -156,6 +158,32 @@ def _upstream_error_response(exc: Exception) -> JSONResponse | None:
                         content=_openai_error_payload(text[:1000], status))
 
 
+def _is_empty_stream_error(exc: Exception) -> bool:
+    """是否为空响应错误（oai_adapter 判定层抛出，BUG-001）——与上游 401 分开处理。"""
+    return isinstance(exc, oai_adapter.EmptyStreamError)
+
+
+def _empty_stream_log_detail(exc: Exception) -> dict:
+    """chat_error 落库 detail：面向 agent 的 message 不含 raw_tail（硬性规则 2），
+    上游原始行尾巴只进日志 detail 供排查（如 error 帧被解析器丢弃的场景）。"""
+    detail: dict = {"error": str(exc)[:500]}
+    raw = getattr(exc, "raw_tail", None)
+    if raw:
+        detail["upstream_raw_tail"] = raw[:8] if isinstance(raw, list) else [str(raw)[:300]]
+    return detail
+
+
+def _empty_stream_response(exc: Exception) -> JSONResponse:
+    """空响应重试耗尽 → 502 OpenAI 风格错误体（本机判定，非上游状态码）。
+
+    判定先于产出（oai_adapter 在任何帧 yield 前完成判定），此时响应头未发，
+    可像 401/403 一样透传真状态码；不再向 agent 发「200 + 空流」假成功。
+    """
+    return JSONResponse(
+        status_code=502,
+        content=_openai_error_payload(str(exc)[:1000], 502, "upstream_empty_response"))
+
+
 async def _log_db(kind: str, **fields) -> None:
     """落库旁路：失败只告警，不影响 chat 主链路（monitor.emit 的持久化镜像）。"""
     try:
@@ -206,20 +234,44 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
                           usage_collector: oai_adapter.UsageCollector | None = None,
                           *, probe: bool = False,
                           ) -> AsyncIterator[str]:
-    """流式转发；上游 401 时重新同步目录（刷新 llm- key）后重试一次。"""
+    """流式转发；两类重试**各自独立预算**（BUG-001：原实现挤占同一个循环）。
+
+    - 上游 401：重新同步目录（刷新 llm- key）后重试一次（预算 1，与空响应无关）；
+    - 上游空响应（200 后干净关流）：relay 内重发，最多 settings.empty_stream_retries
+      次；耗尽**必抛** EmptyStreamError（while True 无 fall-through），由端点层
+      记 chat_error + 502 透传。
+
+    重试安全性：oai_adapter 判定先于产出（空响应在任何帧 yield 之前抛出），故
+    重试只发生在响应头未发时，且不会重复发送 role 帧。
+    """
     model = await _ensure_model(model_name, probe=probe)
     provider = build_provider(model, model_name, ctx)
-    for attempt in range(2):
+    empty_retries = max(0, int(getattr(settings, "empty_stream_retries", 3) or 0))
+    refreshed_401 = False
+    empty_attempt = 0
+    while True:
         if usage_collector is not None:
-            usage_collector.reset()  # 每次 attempt 独立计 usage/duration，成功后取最后一次
+            usage_collector.reset()  # 每次上游调用独立计 usage/duration，成功后取最后一次
         try:
             async for chunk in oai_adapter.stream_openai_sse(
                     provider, chat_request, include_usage,
                     usage_collector=usage_collector):
                 yield chunk
             return
+        except oai_adapter.EmptyStreamError as exc:
+            if empty_attempt < empty_retries:
+                empty_attempt += 1
+                logger.warning("[relay] 上游空响应，重试 %d/%d: %s",
+                               empty_attempt, empty_retries, model_name)
+                await oai_adapter.empty_stream_retry_wait(empty_attempt)
+                continue
+            # 预算耗尽：必抛（保留最近一次的 raw_tail 供端点层落日志）
+            raise oai_adapter.EmptyStreamError(
+                oai_adapter.empty_stream_exhausted_message(empty_attempt),
+                raw_tail=getattr(exc, "raw_tail", None)) from exc
         except RuntimeError as exc:
-            if attempt == 0 and _is_upstream_401(exc):
+            if not refreshed_401 and _is_upstream_401(exc):
+                refreshed_401 = True
                 logger.warning("[relay] 上游 401，重新同步目录后重试一次: %s", model_name)
                 monitor.emit("auth_401_refresh", model=model_name)
                 await _log_db("auth_401_refresh", model=model_name)
@@ -238,14 +290,22 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
 async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
                            ctx: tool_disguise.DisguiseContext, *,
                            probe: bool = False):
-    """非流式；上游 401 时重试一次（同 _sse_with_retry）。"""
+    """非流式；两类重试独立预算（同 _sse_with_retry）：
+
+    - 上游 401：重新同步目录后重试一次；
+    - 上游空响应：oai_adapter.chat_with_empty_retry 内重发
+      （settings.empty_stream_retries 次）；耗尽抛 EmptyStreamError，
+      由端点层记 chat_error + 502 透传。
+    """
     model = await _ensure_model(model_name, probe=probe)
     provider = build_provider(model, model_name, ctx)
-    for attempt in range(2):
+    refreshed_401 = False
+    while True:
         try:
-            return await provider.chat(chat_request)
+            return await oai_adapter.chat_with_empty_retry(provider, chat_request)
         except RuntimeError as exc:
-            if attempt == 0 and _is_upstream_401(exc):
+            if not refreshed_401 and _is_upstream_401(exc):
+                refreshed_401 = True
                 logger.warning("[relay] 上游 401，重新同步目录后重试一次: %s", model_name)
                 monitor.emit("auth_401_refresh", model=model_name)
                 await _log_db("auth_401_refresh", model=model_name)
@@ -381,7 +441,11 @@ async def chat_completions(request: Request):
             monitor.emit("chat_error", model=chat_request.model,
                          error=str(exc)[:200])
             await _log_db("chat_error", model=chat_request.model, stream=1,
-                          detail={"error": str(exc)[:500]})
+                          detail=_empty_stream_log_detail(exc))
+            if _is_empty_stream_error(exc):
+                # 空响应重试耗尽：响应头未发（判定先于产出），502 透传；
+                # 不再向 agent 发「200 + 空流」假成功（BUG-001）
+                return _empty_stream_response(exc)
             err_resp = _upstream_error_response(exc)
             if err_resp is not None:
                 return err_resp
@@ -405,7 +469,7 @@ async def chat_completions(request: Request):
                 monitor.emit("chat_error", model=chat_request.model,
                              error=str(exc)[:200])
                 await _log_db("chat_error", model=chat_request.model, stream=1,
-                              detail={"error": str(exc)[:500]})
+                              detail=_empty_stream_log_detail(exc))
                 # 流中途失败：响应头已发无法改状态。补一帧 OpenAI 风格错误帧再干净
                 # 收尾，替代此前 raise 导致的连接硬断（客户端只见 "terminated"）。
                 extracted = _extract_upstream_error(exc)
@@ -421,7 +485,10 @@ async def chat_completions(request: Request):
     except Exception as exc:  # noqa: BLE001
         monitor.emit("chat_error", model=chat_request.model, error=str(exc)[:200])
         await _log_db("chat_error", model=chat_request.model, stream=0,
-                      detail={"error": str(exc)[:500]})
+                      detail=_empty_stream_log_detail(exc))
+        if _is_empty_stream_error(exc):
+            # 空响应重试耗尽：502 透传（不再回假成功空 JSON，BUG-001）
+            return _empty_stream_response(exc)
         err_resp = _upstream_error_response(exc)
         if err_resp is not None:
             return err_resp

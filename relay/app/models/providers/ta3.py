@@ -50,6 +50,12 @@ _KIMI_IDENT = ("kimi",)
 _QWEN_IDENT = ("qwen", "dashscope", "tongyi", "通义")
 _ZAI_IDENT = ("zai",)
 
+# 本地修订（原实现无此诊断）：上游原始 SSE 行环形尾巴容量。仅空响应时随 done
+# 事件透出，供 relay 层日志排查「网关关流前最后发了什么」（如 error 帧被解析器
+# 静默丢弃的场景）；正常响应不带，避免大流量场景内存/诊断开销。
+_RAW_TAIL_MAX = 8
+_RAW_TAIL_LINE_MAX = 300
+
 _OPENAI_THINKING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 # v29 (plan-78): kimi 官方思考档位只有 low/high/max（output_config.effort）。
@@ -683,6 +689,7 @@ class Ta3Provider(ModelProvider):
             "anthropic_tools": {},     # Anthropic 增量
             "usage": Usage(),
             "last_heartbeat_at": None,  # v28: Anthropic ping 心跳时间（诊断用）
+            "raw_tail": [],            # 本地修订：上游原始行尾巴（空响应诊断）
         }
 
     async def _stream_llm(self, request: ChatRequest,
@@ -741,6 +748,13 @@ class Ta3Provider(ModelProvider):
                             time.monotonic() - _started_at,
                         )
                         break
+                    # 本地修订（原实现无 raw_tail）：保留上游原始行尾巴（环形截断，
+                    # 防长流内存膨胀）；仅空响应时随 done 透出供 relay 诊断落库。
+                    # 先于 parse_fn 记录——解析器抛错（如未来加错误帧抛出）时该行仍在尾巴里。
+                    _rt = monitor["raw_tail"]
+                    _rt.append(line[:_RAW_TAIL_LINE_MAX])
+                    if len(_rt) > _RAW_TAIL_MAX:
+                        del _rt[:-_RAW_TAIL_MAX]
                     terminal = parse_fn(line, monitor)
                     # 实时产出（内容/思考逐段 yield）——parts 全量保留供 done 组装，
                     # 用游标消费避免 pop 丢失终态文本
@@ -795,10 +809,18 @@ class Ta3Provider(ModelProvider):
             len(thinking or ""), len(content or ""), len(tool_calls),
             _usage_desc, time.monotonic() - _started_at,
         )
-        if not content and not thinking and not tool_calls and monitor["finish_reason"] == "stop":
+        # 本地修订（原实现仅 logger.warning 且要求 finish=stop）：空响应判定放宽为
+        # 「无任何产出」（finish_reason 默认即 stop，原追加条件等价），打 warning 时
+        # 附上游原始行尾巴，并把 raw_tail 透出 done 事件——relay 层据此做自动重试
+        # 与诊断落库（只进日志，不进面向 agent 的错误消息）。
+        raw_tail: list[str] | None = None
+        if not content and not thinking and not tool_calls:
+            raw_tail = list(monitor["raw_tail"])
             logger.warning(
-                "[ta3] model=%s 空响应流: 无 content/thinking/tool_calls, finish=stop, 耗时 %.1fs",
-                request.model or self._model_name, time.monotonic() - _started_at,
+                "[ta3] model=%s 空响应流: 无 content/thinking/tool_calls, finish=%s, "
+                "耗时 %.1fs, upstream_raw_tail=%s",
+                request.model or self._model_name, monitor["finish_reason"],
+                time.monotonic() - _started_at, raw_tail,
             )
 
         yield {
@@ -808,6 +830,7 @@ class Ta3Provider(ModelProvider):
             "tool_calls": tool_calls,
             "finish_reason": monitor["finish_reason"],
             "usage": monitor["usage"],
+            "raw_tail": raw_tail,  # 本地修订：仅空响应时非 None
         }
 
     async def stream_structured(self, request: ChatRequest) -> AsyncIterator[dict]:
