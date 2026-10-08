@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from relay import model_ref
 from relay.config import settings
 
 logger = logging.getLogger(__name__)
@@ -232,18 +233,21 @@ def valid_thinking_effort(value) -> bool:
 
 
 async def get_thinking_defaults() -> dict[str, str]:
-    """每模型默认思考强度映射 {model: effort}（只含合法条目）。"""
+    """每模型默认思考强度映射 {model: effort}（只含合法条目）。
+
+    读时归一（§4.1）：存量裸名键 → `牛码/<name>`（不改落盘，仅在读视图归一）。
+    """
     state = await _io(_load_state)
     raw = (state.get("config") or {}).get("thinking_defaults") or {}
     if not isinstance(raw, dict):
         return {}
-    return {str(k): v for k, v in raw.items()
+    return {model_ref.canonical_key(str(k)): v for k, v in raw.items()
             if str(k).strip() and valid_thinking_effort(v)}
 
 
 async def save_thinking_defaults(defaults: dict) -> dict[str, str]:
-    """整体覆盖每模型默认思考强度映射（GUI 模型页下拉写入）。"""
-    clean = {str(k): v for k, v in (defaults or {}).items()
+    """整体覆盖每模型默认思考强度映射（GUI 模型页下拉写入；键存规范全名）。"""
+    clean = {model_ref.canonical_key(str(k)): v for k, v in (defaults or {}).items()
              if str(k).strip() and valid_thinking_effort(v)}
     async with _asyncio_lock:
         state = await _io(_load_state)
@@ -277,15 +281,22 @@ DISABLE_ALL = "__none__"
 
 
 async def get_model_whitelist() -> list[str]:
-    """已启用的模型名列表；空列表 = 全部启用（默认，兼容 M2/M3）。"""
+    """已启用的模型名列表；空列表 = 全部启用（默认，兼容 M2/M3）。
+
+    读时归一（§4.1）：存量裸名 → `牛码/<name>`（仅读视图归一，不改落盘）；
+    哨兵 [DISABLE_ALL] 原样保留。
+    """
     state = await _io(_load_state)
     wl = (state.get("config") or {}).get("model_whitelist") or []
-    return wl if isinstance(wl, list) else []
+    return model_ref.normalize_whitelist(wl) if isinstance(wl, list) else []
 
 
 async def set_model_whitelist(names: list[str]) -> list[str]:
-    """写入白名单（GUI 模型页勾选结果）。传 [] 表示全部启用；[DISABLE_ALL] 表示全部禁用。"""
-    clean = [str(n) for n in names if str(n).strip()]
+    """写入白名单（GUI 模型页勾选结果）。传 [] 表示全部启用；[DISABLE_ALL] 表示全部禁用。
+
+    写入前归一（§4.1）：键一律存规范全名（`牛码/…`、`WorkBuddy/…`、`<自定义名>/…`）。
+    """
+    clean = model_ref.normalize_whitelist([str(n) for n in names if str(n).strip()])
     async with _asyncio_lock:
         state = await _io(_load_state)
         state.setdefault("config", {})["model_whitelist"] = clean
@@ -294,13 +305,16 @@ async def set_model_whitelist(names: list[str]) -> list[str]:
 
 
 async def is_model_enabled(name: str) -> bool:
-    """白名单为空 → 全部启用；[DISABLE_ALL] → 全部禁用；否则只放行列表内模型。"""
+    """白名单为空 → 全部启用；[DISABLE_ALL] → 全部禁用；否则只放行列表内模型。
+
+    入参可为裸名或全名（§4.1 前缀命名空间）：比较前统一归一为规范全名。
+    """
     wl = await get_model_whitelist()
     if not wl:
         return True
     if wl == [DISABLE_ALL]:
         return False
-    return name in wl
+    return model_ref.canonical_key(name) in wl
 
 
 # ─────────────────────────── ta3 登录态 ───────────────────────────

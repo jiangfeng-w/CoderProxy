@@ -30,10 +30,13 @@ def _tool(name: str, parameters: dict | None = None) -> dict:
 
 def test_model_whitelist_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    # §4.1 前缀命名空间：裸名写入归一到规范全名（牛码/…）
     saved = _run(storage.set_model_whitelist(["glm-x", "kimi-y"]))
-    assert saved == ["glm-x", "kimi-y"]
-    assert _run(storage.get_model_whitelist()) == ["glm-x", "kimi-y"]
+    assert saved == ["牛码/glm-x", "牛码/kimi-y"]
+    assert _run(storage.get_model_whitelist()) == ["牛码/glm-x", "牛码/kimi-y"]
+    # 比较侧同归一：裸名 / 全名 / 前缀大小写不同均命中
     assert _run(storage.is_model_enabled("glm-x")) is True
+    assert _run(storage.is_model_enabled("牛码/glm-x")) is True
     assert _run(storage.is_model_enabled("other")) is False
 
 
@@ -216,12 +219,13 @@ def test_models_endpoint_whitelist_filter(client):
         {"name": "glm-x", "api_key": "k", "base_url": "b", "anthropic": False},
         {"name": "kimi-y", "api_key": "k", "base_url": "b", "anthropic": True},
     ]))
+    # §4.1：牛码条目以「牛码/裸名」全名暴露
     names = [m["id"] for m in client.get("/v1/models", headers=_auth()).json()["data"]]
-    assert set(names) == {"glm-x", "kimi-y"}
-    # 白名单子集 → 只暴露勾选模型
+    assert set(names) == {"牛码/glm-x", "牛码/kimi-y"}
+    # 白名单子集 → 只暴露勾选模型（写入裸名亦归一）
     _run(storage.set_model_whitelist(["glm-x"]))
     names = [m["id"] for m in client.get("/v1/models", headers=_auth()).json()["data"]]
-    assert names == ["glm-x"]
+    assert names == ["牛码/glm-x"]
 
 
 def test_models_endpoint_requires_auth(client):
@@ -246,10 +250,11 @@ def test_config_get_and_post(client):
     body = r.json()
     assert body["api_key"] == "new-key"
     assert body["tool_mode"] == "strict"
-    assert body["model_whitelist"] == ["glm-x"]
+    # §4.1：写入归一为规范全名（裸名 → 牛码/…）
+    assert body["model_whitelist"] == ["牛码/glm-x"]
     assert settings.tool_mode == "strict"
-    # 落盘持久化（GUI 重启后仍生效）：白名单 + 工具模式均读回
-    assert _run(storage.get_model_whitelist()) == ["glm-x"]
+    # 落盘持久化（GUI 重启后仍生效）：白名单 + 工具模式均读回（全名形态）
+    assert _run(storage.get_model_whitelist()) == ["牛码/glm-x"]
     assert _run(storage.get_tool_mode()) == "strict"
 
 

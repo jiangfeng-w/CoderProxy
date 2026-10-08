@@ -144,26 +144,31 @@ def test_config_post_tool_mode_invalid_keeps_disk(client):
 def test_thinking_defaults_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
     assert _run(storage.get_thinking_defaults()) == {}
+    # §4.1 前缀命名空间：裸名写入归一到规范全名（牛码/…）
     _run(storage.save_thinking_defaults({"glm-5.3": "high", "kimi-k3": "none"}))
-    assert _run(storage.get_thinking_defaults()) == {"glm-5.3": "high", "kimi-k3": "none"}
+    assert _run(storage.get_thinking_defaults()) == {
+        "牛码/glm-5.3": "high", "牛码/kimi-k3": "none"}
+    # 规范性：全名写入原样读回；WorkBuddy 前缀大小写规范化
+    _run(storage.save_thinking_defaults({"WorkBuddy/glm-5.3-flash": "low"}))
+    assert _run(storage.get_thinking_defaults()) == {"WorkBuddy/glm-5.3-flash": "low"}
 
 
 def test_thinking_defaults_dirty_values_filtered(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
-    # 非法档位（大写开头/超长/非字符串）与空模型名被过滤，合法项保留
+    # 非法档位（大写开头/超长/非字符串）与空模型名被过滤，合法项保留（归一为全名）
     saved = _run(storage.save_thinking_defaults({
         "glm-5.3": "high", "m1": "High", "m2": "x" * 40, "m3": 1, "": "low",
     }))
-    assert saved == {"glm-5.3": "high"}
-    assert _run(storage.get_thinking_defaults()) == {"glm-5.3": "high"}
+    assert saved == {"牛码/glm-5.3": "high"}
+    assert _run(storage.get_thinking_defaults()) == {"牛码/glm-5.3": "high"}
 
 
 def test_config_post_thinking_defaults(client):
     r = client.post("/v1/auth/config",
                     json={"thinking_defaults": {"glm-5.3": "max"}}, headers=_auth())
     assert r.status_code == 200
-    assert r.json()["thinking_defaults"] == {"glm-5.3": "max"}
-    assert _run(storage.get_thinking_defaults()) == {"glm-5.3": "max"}
+    assert r.json()["thinking_defaults"] == {"牛码/glm-5.3": "max"}
+    assert _run(storage.get_thinking_defaults()) == {"牛码/glm-5.3": "max"}
 
 
 def test_config_post_thinking_defaults_invalid(client):

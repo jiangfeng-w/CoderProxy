@@ -75,6 +75,30 @@ async def find_provider(pid: str) -> dict | None:
     return None
 
 
+async def find_provider_by_name(name: str) -> dict | None:
+    """按供应商名称查（§4.1 前缀命名空间：前缀即 name）。大小写不敏感精确匹配。"""
+    target = str(name or "").strip().casefold()
+    if not target:
+        return None
+    for p in await load_providers():
+        if str(p.get("name") or "").strip().casefold() == target:
+            return p
+    return None
+
+
+def name_conflicts(name: str) -> bool:
+    """名称冲突校验（新建/改名时）：与内置前缀（牛码/WorkBuddy）同名 → True。
+
+    内置前缀是硬冲突（会与内置路由抢命名空间）；自定义之间重名不阻断
+    （读取按首个命中，写入侧不强制唯一）。
+    """
+    from relay import model_ref
+    key = str(name or "").strip().casefold()
+    if not key:
+        return False
+    return key in model_ref.base_prefix_table()
+
+
 async def upsert_provider(entry: dict) -> dict:
     """新增（无 id）或按 id 覆盖更新；返回落盘后的完整条目。id 不存在时抛 KeyError。"""
     async with _asyncio_lock:

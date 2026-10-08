@@ -27,6 +27,7 @@ from collections.abc import AsyncIterator
 from app.models.providers.ta3 import Ta3Provider
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
+from relay import model_ref
 from relay.config import settings
 
 logger = logging.getLogger(__name__)
@@ -225,6 +226,9 @@ def apply_thinking_default(body: dict, request: ChatRequest, defaults: dict,
     - unset_mode="default"（假关）：按每模型默认档位下发（未配置 = "none" 关）。
     "none" → thinking=True + reasoning_effort="none"，走 ta3.py 的
     thinking:disabled 路径显式关思考（上游默认行为可能是高档位思考，烧 token）。
+
+    键比较统一走前缀命名空间归一（§4.1）：request.model 与 defaults 的键都可能是
+    「裸名 / `牛码/x` / `WorkBuddy/x`」形态，先归一到规范全名再比较。
     """
     if (body.get("thinking") is not None or body.get("enable_thinking") is not None
             or body.get("reasoning_effort")):
@@ -232,7 +236,9 @@ def apply_thinking_default(body: dict, request: ChatRequest, defaults: dict,
     if unset_mode == "off":
         effort = "none"
     else:
-        effort = str((defaults or {}).get(request.model) or "none")
+        key = model_ref.canonical_key(request.model)
+        table = {model_ref.canonical_key(k): v for k, v in (defaults or {}).items()}
+        effort = str(table.get(key) or "none")
     request.thinking = True
     request.reasoning_effort = effort
 
@@ -398,8 +404,12 @@ async def chat_with_empty_retry(provider: Ta3Provider, request: ChatRequest) -> 
 
 async def stream_openai_sse(provider: Ta3Provider, request: ChatRequest,
                             include_usage: bool = False,
-                            usage_collector: UsageCollector | None = None) -> AsyncIterator[str]:
+                            usage_collector: UsageCollector | None = None,
+                            *, display_model: str | None = None) -> AsyncIterator[str]:
     """把 provider 的流式事件翻译为 OpenAI SSE 帧（含 [DONE]）。
+
+    display_model：回显给 agent 的 model 字段（§4.1 前缀命名空间——agent 请求的是
+    全名 `牛码/glm-5.3`，而上游请求体用的是裸名）。缺省回退 request.model。
 
     BUG-001 防御——判定先于产出：任何帧（含 role 首帧）yield 之前先完成空响应
     判定，期间只缓冲零值 delta 帧；收到真实产出信号（非空 content/thinking 或
@@ -407,7 +417,7 @@ async def stream_openai_sse(provider: Ta3Provider, request: ChatRequest,
     全 0）时抛 EmptyStreamError——一帧未发，调用方重试时响应头未发、且重试不会
     重复发送 role 帧。
     """
-    model = request.model or provider._model_name  # noqa: SLF001（vendored 内部字段）
+    model = display_model or request.model or provider._model_name  # noqa: SLF001
 
     tool_call_ids: list[str] = []
     finish_reason: str | None = None
@@ -502,19 +512,26 @@ def _tool_calls_to_openai(tool_calls: list[dict]) -> list[dict]:
     return out
 
 
-def chat_response_to_openai(provider: Ta3Provider, request: ChatRequest,
-                            response: ChatResponse) -> dict:
-    """非流式聚合 → OpenAI 标准 chat.completion JSON。"""
+def chat_response_to_openai(provider: Ta3Provider | None, request: ChatRequest,
+                            response: ChatResponse, *,
+                            display_model: str | None = None) -> dict:
+    """非流式聚合 → OpenAI 标准 chat.completion JSON。
+
+    display_model：回显给 agent 的 model 字段（§4.1 前缀命名空间——请求全名与
+    上游裸名分离）；缺省回退 request.model / provider 内部模型名。
+    """
     message: dict = {"role": "assistant", "content": response.content}
     if response.thinking:
         message["reasoning_content"] = response.thinking
     if response.tool_calls:
         message["tool_calls"] = _tool_calls_to_openai(response.tool_calls)
+    model = display_model or request.model or (provider._model_name if provider  # noqa: SLF001
+                                               else "")
     return {
         "id": _new_id(),
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": request.model or provider._model_name,  # noqa: SLF001
+        "model": model,
         "choices": [{
             "index": 0,
             "message": message,
@@ -524,8 +541,11 @@ def chat_response_to_openai(provider: Ta3Provider, request: ChatRequest,
     }
 
 
-def model_to_openai(model: dict) -> dict:
+def model_to_openai(model: dict, *, prefix: str | None = None) -> dict:
     """目录模型条目 → OpenAI /v1/models data 项（附额外元数据字段）。
+
+    prefix：供应商前缀（§4.1）——给出时 id 用「前缀/裸名」规范全名（agent 请求该
+    全名）；缺省 = 裸名（兼容既有单测与内部调用）。
 
     reasoning_efforts（思考强度档位）：取自上游目录 completion_options.thinkingLevels
     （牛码官方配置，实测各模型档位不同，如 glm-5.3 有 low/high/max、deepseek-v4 仅
@@ -533,6 +553,7 @@ def model_to_openai(model: dict) -> dict:
     上游自带的中文标签（GUI 展示用）。不查 vendored 内置目录——其数据来源不可靠。
     """
     name = model.get("name") or model.get("id") or ""
+    model_id = model_ref.full_name(prefix, name) if prefix else name
     completion_options = model.get("completion_options") or {}
     levels = completion_options.get("thinkingLevels") or []
     efforts: list[str] = []
@@ -553,7 +574,7 @@ def model_to_openai(model: dict) -> dict:
         or bool(efforts)
     )
     return {
-        "id": name,
+        "id": model_id,
         "object": "model",
         "created": 0,
         "owned_by": DEFAULT_MODEL_OWNED_BY,

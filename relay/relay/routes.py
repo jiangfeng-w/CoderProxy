@@ -49,8 +49,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.models.providers.ta3 import Ta3Provider
 from app.models.schemas import ChatRequest
 
-from relay import (auth_flow, db, oai_adapter, protocol_adapter, providers_custom, storage,
-                   tool_disguise, tool_inventory)
+from relay import (adapter_registry, auth_flow, db, model_ref, oai_adapter, protocol_adapter,
+                   providers_custom, storage, tool_disguise, tool_inventory)
 from relay.config import settings
 from relay.middleware import require_api_key
 from relay.monitor import monitor
@@ -101,6 +101,8 @@ def build_provider(model: dict, model_name: str,
 
     M3：传入 DisguiseContext → provider 按请求级映射做历史伪装与入站还原，
     tools 已预伪装（tools_pre_disguised），不再二次 disguise_tools。
+
+    注意：model_name 是**上游裸名**（无供应商前缀）——前缀剥离在 build_adapter。
     """
     meta = {
         "anthropic": bool(model.get("anthropic")),
@@ -122,6 +124,25 @@ def build_provider(model: dict, model_name: str,
         tools_pre_disguised=bool(ctx),
         passthrough_names=ctx.passthrough_names if ctx else None,
     )
+
+
+def build_adapter(model: dict, model_name: str,
+                  ctx: tool_disguise.DisguiseContext | None = None):
+    """按模型名前缀选择出站 adapter（§4.1 前缀命名空间的路由层）。
+
+    - 牛码（`牛码/…` 或裸名）→ Ta3Provider（零行为变化；剥前缀传裸名）；
+    - 其它前缀 → adapter 注册表（WorkBuddy / 自定义供应商，各实现模块导入时注册）；
+      未注册前缀 → HTTPException 404「未知供应商」（_ensure_model 已先行拦截目录层）。
+    返回对象遵循出站事件契约：`chat(request)` / `stream_structured(request)`
+    /（可选）`refresh_credentials()`。
+    """
+    ref = model_ref.parse_model_ref_lenient(model_name)
+    if ref.is_niucode:
+        return build_provider(model, ref.bare, ctx)
+    adapter = adapter_registry.build_adapter(model, ref.raw)
+    if adapter is None:
+        raise HTTPException(status_code=404, detail=f"未知供应商: {ref.prefix}")
+    return adapter
 
 
 def _is_upstream_401(exc: Exception) -> bool:
@@ -231,21 +252,27 @@ def _usage_log_fields(usage) -> dict:
 
 
 async def _ensure_model(model_name: str, probe: bool = False) -> dict:
-    """查本地模型；未找到时先同步一次目录；白名单外模型视为不可用（M4）。
+    """查模型条目；未找到时先同步（牛码）目录；白名单外模型视为不可用（M4）。
+
+    §4.1 前缀命名空间：`牛码/…` 或裸名 → 牛码目录（storage）；`WorkBuddy/…` 等
+    已注册前缀 → 注册表目录。前缀未知 → 404「未知供应商」。
 
     probe=True（GUI 连通性探测，请求 body 带 `probe: true`）：跳过白名单启用判定，
     只要求模型存在于目录——探测请求必须真实到达上游，否则「先测后启用」对未启用
     模型永远 404、无法经 GUI 开关启用（需求：连通性测试-白名单豁免）。
     """
-    model = await storage.find_model(model_name)
-    if model is not None and (probe or await storage.is_model_enabled(model_name)):
+    ref = model_ref.parse_model_ref_lenient(model_name)
+    if not ref.is_niucode:
+        return await _ensure_provider_model(ref, probe)
+    model = await storage.find_model(ref.bare)
+    if model is not None and (probe or await storage.is_model_enabled(ref.canonical)):
         return model
     try:
         await auth_flow.sync_models()
     except Exception:  # noqa: BLE001（同步失败以 404 提示为准）
         pass
-    model = await storage.find_model(model_name)
-    if model is None or (not probe and not await storage.is_model_enabled(model_name)):
+    model = await storage.find_model(ref.bare)
+    if model is None or (not probe and not await storage.is_model_enabled(ref.canonical)):
         raise HTTPException(
             status_code=404,
             detail=f"未知或未启用的模型: {model_name}"
@@ -253,6 +280,54 @@ async def _ensure_model(model_name: str, probe: bool = False) -> dict:
                    "若已同步但被白名单过滤，请到配置页启用）",
         )
     return model
+
+
+async def _ensure_provider_model(ref: model_ref.ModelRef, probe: bool) -> dict:
+    """非牛码前缀的模型查找（注册表目录 + 白名单；未注册前缀 → 404 未知供应商）。
+
+    自定义供应商（供应商页 F5 手填清单）在注册表 miss 后回退查配置（步骤 4）。
+    """
+    if not adapter_registry.has_provider(ref.prefix):
+        entry = await providers_custom.find_provider_by_name(ref.prefix)
+        if entry is not None and entry.get("enabled", True):
+            allow = [str(m).strip() for m in (entry.get("models") or [])]
+            if probe or ref.bare in allow:
+                if probe or await storage.is_model_enabled(ref.canonical):
+                    return {"name": ref.bare, "provider": ref.prefix,
+                            "custom_entry": entry.get("id") or ""}
+        raise HTTPException(status_code=404, detail=f"未知供应商: {ref.prefix}")
+    found = await adapter_registry.find_provider_model(ref.prefix, ref.bare)
+    if found is None or (not probe and not await storage.is_model_enabled(ref.canonical)):
+        raise HTTPException(
+            status_code=404, detail=f"未知或未启用的模型: {ref.canonical}")
+    return {"name": ref.bare, "provider": ref.prefix, **found}
+
+
+async def _refresh_provider_credentials(model_name: str, model: dict, ctx):
+    """401 后刷新凭证并重建 adapter（§4.5.5：401 刷新重试下沉到 provider 钩子）。
+
+    - 牛码：重新同步模型目录（刷新 llm- key）后重建 Ta3Provider（原行为）；
+    - 其它 provider：调用 adapter 的 `refresh_credentials()` 钩子（如 WorkBuddy 账号池
+      刷新）；无钩子 → 上抛原错误。
+    """
+    ref = model_ref.parse_model_ref_lenient(model_name)
+    if ref.is_niucode:
+        try:
+            await auth_flow.sync_models()
+        except Exception:  # noqa: BLE001
+            pass
+        fresh = await storage.find_model(ref.bare)
+        if fresh is None:
+            raise RuntimeError(f"模型目录中找不到 {model_name}")
+        return build_adapter(fresh, model_name, ctx)
+    adapter = build_adapter(model, model_name, ctx)
+    refresh = getattr(adapter, "refresh_credentials", None)
+    if refresh is None:
+        raise RuntimeError(f"{ref.prefix} 不支持凭证刷新")
+    ok = await refresh()
+    if ok is False:
+        raise RuntimeError(f"{ref.prefix} 凭证刷新失败")
+    return adapter
 
 
 async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
@@ -263,7 +338,8 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
                           ) -> AsyncIterator[str]:
     """流式转发；两类重试**各自独立预算**（BUG-001：原实现挤占同一个循环）。
 
-    - 上游 401：重新同步目录（刷新 llm- key）后重试一次（预算 1，与空响应无关）；
+    - 上游 401：刷新凭证（牛码 sync_models / 平台账号池 refresh）后重试一次
+      （预算 1，与空响应无关）；
     - 上游空响应（200 后干净关流）：relay 内重发，最多 settings.empty_stream_retries
       次；耗尽**必抛** EmptyStreamError（while True 无 fall-through），由端点层
       记 chat_error + 502 透传。
@@ -272,7 +348,7 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
     重试只发生在响应头未发时，且不会重复发送 role 帧。
     """
     model = await _ensure_model(model_name, probe=probe)
-    provider = build_provider(model, model_name, ctx)
+    provider = build_adapter(model, model_name, ctx)
     empty_retries = max(0, int(getattr(settings, "empty_stream_retries", 3) or 0))
     refreshed_401 = False
     empty_attempt = 0
@@ -282,7 +358,8 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
         try:
             async for chunk in oai_adapter.stream_openai_sse(
                     provider, chat_request, include_usage,
-                    usage_collector=usage_collector):
+                    usage_collector=usage_collector,
+                    display_model=model_name):
                 yield chunk
             return
         except oai_adapter.EmptyStreamError as exc:
@@ -299,17 +376,10 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
         except RuntimeError as exc:
             if not refreshed_401 and _is_upstream_401(exc):
                 refreshed_401 = True
-                logger.warning("[relay] 上游 401，重新同步目录后重试一次: %s", model_name)
+                logger.warning("[relay] 上游 401，刷新凭证后重试一次: %s", model_name)
                 monitor.emit("auth_401_refresh", model=model_name)
                 await _log_db("auth_401_refresh", model=model_name)
-                try:
-                    await auth_flow.sync_models()
-                except Exception:  # noqa: BLE001
-                    pass
-                model = await storage.find_model(model_name)
-                if model is None:
-                    raise
-                provider = build_provider(model, model_name, ctx)
+                provider = await _refresh_provider_credentials(model_name, model, ctx)
                 continue
             raise
 
@@ -319,13 +389,13 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
                            probe: bool = False):
     """非流式；两类重试独立预算（同 _sse_with_retry）：
 
-    - 上游 401：重新同步目录后重试一次；
+    - 上游 401：刷新凭证后重试一次；
     - 上游空响应：oai_adapter.chat_with_empty_retry 内重发
       （settings.empty_stream_retries 次）；耗尽抛 EmptyStreamError，
       由端点层记 chat_error + 502 透传。
     """
     model = await _ensure_model(model_name, probe=probe)
-    provider = build_provider(model, model_name, ctx)
+    provider = build_adapter(model, model_name, ctx)
     refreshed_401 = False
     while True:
         try:
@@ -333,17 +403,10 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
         except RuntimeError as exc:
             if not refreshed_401 and _is_upstream_401(exc):
                 refreshed_401 = True
-                logger.warning("[relay] 上游 401，重新同步目录后重试一次: %s", model_name)
+                logger.warning("[relay] 上游 401，刷新凭证后重试一次: %s", model_name)
                 monitor.emit("auth_401_refresh", model=model_name)
                 await _log_db("auth_401_refresh", model=model_name)
-                try:
-                    await auth_flow.sync_models()
-                except Exception:  # noqa: BLE001
-                    pass
-                model = await storage.find_model(model_name)
-                if model is None:
-                    raise
-                provider = build_provider(model, model_name, ctx)
+                provider = await _refresh_provider_credentials(model_name, model, ctx)
                 continue
             raise
 
@@ -352,34 +415,62 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
 
 @app.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models(all: bool = False):
-    """模型目录。默认按白名单过滤（OpenAI 兼容语义）；all=1 返回完整目录（GUI 管理用）。"""
+    """模型目录（§4.1 前缀命名空间）。默认按白名单过滤；all=1 返回完整目录（GUI 用）。
+
+    数据源 = 牛码目录（`牛码/…`；裸名条目加前缀）+ 已注册平台目录（`WorkBuddy/…` 等）
+    + 已启用自定义供应商（`<name>/…`，模型清单手填）。
+    """
     if not all and not await _serving():
         raise HTTPException(status_code=503, detail="服务已停止，请登录并启动服务")
-    models = await storage.load_models()
+    entries = await _all_model_entries()
     if all:
-        return {
-            "object": "list",
-            "data": [oai_adapter.model_to_openai(m) for m in models],
-        }
+        return {"object": "list", "data": entries}
     wl = await storage.get_model_whitelist()
     if wl == [storage.DISABLE_ALL]:
         data = []
     elif wl:
-        data = [m for m in models if m.get("name") in wl]
+        data = [m for m in entries if m["id"] in wl]
     else:
-        data = models
-    return {
-        "object": "list",
-        "data": [oai_adapter.model_to_openai(m) for m in data],
-    }
+        data = entries
+    return {"object": "list", "data": data}
 
 
-@app.get("/v1/models/{model_id}", dependencies=[Depends(require_api_key)])
+async def _all_model_entries() -> list[dict]:
+    """合并全部供应商目录为 OpenAI /v1/models 条目（含前缀 id；顺序：牛码在前）。
+
+    同名前缀冲突（自定义供应商名撞内置前缀）：注册表命中者优先，自定义条目跳过
+    （供应商页创建时已做 400 校验，此处为防御口径）。
+    """
+    entries = [oai_adapter.model_to_openai(m, prefix=model_ref.PREFIX_NIUCODE)
+               for m in await storage.load_models()]
+    for prefix in adapter_registry.known_prefixes():
+        if prefix == model_ref.PREFIX_NIUCODE:
+            continue
+        for m in await adapter_registry.provider_models(prefix):
+            entries.append(oai_adapter.model_to_openai(m, prefix=prefix))
+    for entry in await providers_custom.load_providers():
+        if not entry.get("enabled", True):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name or adapter_registry.has_provider(name):
+            continue
+        for m in entry.get("models") or []:
+            entries.append(oai_adapter.model_to_openai({"name": str(m)}, prefix=name))
+    return entries
+
+
+@app.get("/v1/models/{model_id:path}", dependencies=[Depends(require_api_key)])
 async def get_model(model_id: str):
-    model = await storage.find_model(model_id)
-    if model is None:
+    ref = model_ref.parse_model_ref_lenient(model_id)
+    if ref.is_niucode:
+        model = await storage.find_model(ref.bare)
+        if model is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+        return oai_adapter.model_to_openai(model, prefix=model_ref.PREFIX_NIUCODE)
+    found = await adapter_registry.find_provider_model(ref.prefix, ref.bare)
+    if found is None:
         raise HTTPException(status_code=404, detail="Model not found")
-    return oai_adapter.model_to_openai(model)
+    return oai_adapter.model_to_openai(found, prefix=ref.prefix)
 
 
 @app.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
@@ -665,9 +756,8 @@ async def _handle_chat(request: Request, path_protocol: str):
     if response_protocol == PROTOCOL_ANTHROPIC:
         return JSONResponse(protocol_adapter.chat_response_to_anthropic(
             chat_request, response))
-    model = await storage.find_model(chat_request.model)
-    provider = build_provider(model, chat_request.model, ctx) if model else None
-    return JSONResponse(oai_adapter.chat_response_to_openai(provider, chat_request, response))
+    return JSONResponse(oai_adapter.chat_response_to_openai(
+        None, chat_request, response, display_model=chat_request.model))
 
 
 # ─────────────────────────── /v1/auth/* ───────────────────────────
@@ -826,6 +916,12 @@ def _validate_custom_provider(body: dict, *, partial: bool) -> dict:
         name = body.get("name")
         if not isinstance(name, str) or not name.strip():
             raise HTTPException(status_code=400, detail="名称不能为空")
+        if "/" in name:
+            raise HTTPException(status_code=400,
+                                detail="名称不能包含 /（模型名前缀解析用）")
+        if providers_custom.name_conflicts(name):
+            raise HTTPException(status_code=400,
+                                detail="名称与内置供应商前缀冲突（牛码/WorkBuddy）")
         entry["name"] = name.strip()
     if "base_url" in body or not partial:
         base_url = body.get("base_url")

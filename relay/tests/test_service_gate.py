@@ -64,7 +64,7 @@ def test_service_after_login_then_stop_and_reopen(client, monkeypatch):
     # 登录后：服务开，/v1/models（agent 视角）可访问
     assert client.get("/v1/service", headers=_auth()).json()["enabled"] is True
     m = client.get("/v1/models", headers=_auth()).json()["data"]
-    assert [x["id"] for x in m] == ["glm-x"]
+    assert [x["id"] for x in m] == ["牛码/glm-x"]  # §4.1 前缀命名空间
 
     # 手动停止：服务关，agent 入口 503（GUI 用 all=1 不受影响）
     r = client.post("/v1/service/disable", headers=_auth())
