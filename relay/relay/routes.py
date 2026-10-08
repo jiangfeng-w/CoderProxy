@@ -141,9 +141,14 @@ def build_adapter(model: dict, model_name: str,
     if ref.is_niucode:
         return build_provider(model, ref.bare, ctx)
     adapter = adapter_registry.build_adapter(model, ref.raw)
-    if adapter is None:
-        raise HTTPException(status_code=404, detail=f"未知供应商: {ref.prefix}")
-    return adapter
+    if adapter is not None:
+        return adapter
+    # 自定义供应商：模型条目带条目 id（_ensure_provider_model 已校验）→ 纯配置转发
+    entry_id = str(model.get("custom_entry_id") or "")
+    if entry_id:
+        from relay import custom_openai
+        return custom_openai.build_by_entry_id(entry_id, ref.bare)
+    raise HTTPException(status_code=404, detail=f"未知供应商: {ref.prefix}")
 
 
 def _is_upstream_401(exc: Exception) -> bool:
@@ -194,9 +199,15 @@ def _upstream_error_response(exc: Exception,
     网络错误做指数退避，403/402 这类终态错误被盲目重放到放弃；透传状态码后
     客户端按语义处理（4xx 终态直接报错，429 才重试）。
 
-    平台 provider（WorkBuddy 等）：PlatformUpstreamError 自带 status（B6 映射结果）；
-    账号池无可用 → 503 + Retry-After（§4.3）。
+    平台 provider：PlatformUpstreamError 自带 status（B6 映射结果）；账号池无可用
+    → 503 + Retry-After（§4.3）。自定义供应商：UpstreamHttpError 透传上游状态码。
     """
+    from relay.custom_openai import UpstreamHttpError
+    if isinstance(exc, UpstreamHttpError):
+        status = exc.status if 400 <= exc.status <= 599 else 502
+        return JSONResponse(status_code=status,
+                            content=_protocol_error_payload(protocol, str(exc)[:1000],
+                                                            status))
     from relay.platforms.base import PlatformError, PlatformUpstreamError
     if isinstance(exc, PlatformUpstreamError):
         status = exc.status if 400 <= exc.status <= 599 else 502
@@ -321,7 +332,7 @@ async def _ensure_provider_model(ref: model_ref.ModelRef, probe: bool) -> dict:
             if probe or ref.bare in allow:
                 if probe or await storage.is_model_enabled(ref.canonical):
                     return {"name": ref.bare, "provider": ref.prefix,
-                            "custom_entry": entry.get("id") or ""}
+                            "custom_entry_id": str(entry.get("id") or "")}
         raise HTTPException(status_code=404, detail=f"未知供应商: {ref.prefix}")
     found = await adapter_registry.find_provider_model(ref.prefix, ref.bare)
     if found is None or (not probe and not await storage.is_model_enabled(ref.canonical)):

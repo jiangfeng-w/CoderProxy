@@ -68,6 +68,14 @@ async def load_providers() -> list[dict]:
     return await asyncio.to_thread(_load_sync)
 
 
+def load_entry_sync(pid: str) -> dict | None:
+    """同步按 id 读条目（routes.build_adapter 同步路径用；配置很小，读文件代价可忽略）。"""
+    for p in _load_sync():
+        if p.get("id") == pid:
+            return p
+    return None
+
+
 async def find_provider(pid: str) -> dict | None:
     for p in await load_providers():
         if p.get("id") == pid:
