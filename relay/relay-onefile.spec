@@ -28,6 +28,9 @@ hiddenimports = [
     "h11",
     "pydantic",
     "relay.routes",
+    # 平台插件包（/v1/platforms/*，WorkBuddy）：routes 挂载点 + 子包注册（漏登记踩坑史，双保险）
+    "relay.platforms",
+    "relay.platforms.workbuddy",
 ]
 
 a = Analysis(
