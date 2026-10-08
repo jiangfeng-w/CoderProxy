@@ -1,10 +1,10 @@
 # WorkBuddy 聊天反代与多平台聚合
 
-> **状态**：**方案已定稿**（2026-10-08——转发架构 2026-10-07 定稿 + 本期细化定稿：A 类产品决策四项拍板、B 类聊天契约小号实测 8 项全部落证、C 类实现口径写实）
+> **状态**：**已实现**（2026-10-09——实现步骤 1–8 全部落地；pytest 367 passed；e2e/打包产物冒烟 19 项全绿；三协议真客户端回填多协议需求 A 段）
 > **优先级**：核心
 > **来源**：用户最终愿景：对标 9router 的多平台账号聚合网关（牛码 + WorkBuddy 双上游聊天反代，对外统一 OpenAI 兼容 /v1），附带签到功能；2026-10-07 用户拍板转发架构路线——「入站做功夫，牛码单独用 Ta3Provider，其他借鉴 9router」；2026-10-08 用户拍板模型命名前缀体系（A1）与其余按建议推进
 > **依赖**：WorkBuddy多账号登录与签到（账号池底座，已实现 2026-10-08）；与[多协议端点兼容](../多协议端点兼容-三协议入站统一/)共享入站归一层（正交）
-> **定稿日期**：2026-10-07（架构）/ 2026-10-08（细化）
+> **定稿日期**：2026-10-07（架构）/ 2026-10-08（细化）；**实现完成**：2026-10-09
 > **隐私声明**：本文档仅含公开开源项目信息与占位符示例，不含任何真实账号、凭证、token、uid。
 
 ## 1. 背景 / 目标
@@ -168,21 +168,21 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
 | 4 | `feat: 自定义供应商转发生效` | OpenAICompatProvider 默认实现 + `adapter_for` 命中转发 + `/v1/models` 合并 | pytest（假上游）+ 真 baseurl 冒烟 |
 | 5 | `feat: 服务门控任一上游可用` + 401 下沉 | `_serving()` 语义 + adapter `refresh_credentials` 钩子 | pytest（test_service_gate 扩展） |
 | 6 | `feat: 供应商页模型区（WorkBuddy/自定义）` | WorkBuddy tab 模型区 = 目录列表 + 白名单启停 + 手动测试；自定义供应商模型区接线 | npm run format:check + build |
-| 7 | `chore: 打包登记` | 两个 spec 的 hiddenimports | `py -3.13 build_sidecar.py` + 产物冒烟 |
-| 8 | 小号 e2e + 回归 | WorkBuddy 三协议真客户端（兼回填多协议 A 段）+ 牛码回归（登录/模型列表/一次对话，规则 5 小号） | 见 §5 |
+| 7 | `chore: 打包登记` | 两个 spec 的 hiddenimports（+ 产物冒烟发现的 502/503/全名单模型端点三处修复） | `py -3.13 build_sidecar.py` + 产物冒烟 |
+| 8 | `feat: 三 provider e2e 冒烟脚本落地` | WorkBuddy 三协议真客户端（兼回填多协议 A 段）+ 牛码回归（登录态/模型列表/单模型端点，规则 5：对话待解封用小号）+ 自定义真转发 + 网络层错误 502 映射修复 | 冒烟 19/19 + 见 §5 |
 
 ## 5. 验收
 
 - [x] 转发架构定稿（2026-10-07：adapter 注册表分层 + Ta3Provider 保留 + 9router executor 模式借鉴，见 §3）
 - [x] 细化定稿（2026-10-08）：A1 前缀体系（用户拍板）/ A2 选号策略 / A3 目录与模型区 / A4 服务门控与自定义供应商；B1–B8 聊天契约小号实测全部落证（[探针-wb聊天契约.py](探针-wb聊天契约.py)）
-- [ ] 实现后补全：双 provider 路由正确性（adapter_for 注册表）/ 账号池轮转与 401 刷新下沉 / 牛码完整回归（登录/模型列表/一次完整对话）/ WorkBuddy 小号聊天冒烟 / 自定义供应商转发冒烟
-- [ ] 打包产物冒烟（三 provider 模型列表 + WorkBuddy 一次对话）
+- [x] 实现后补全（2026-10-09）：双 provider 路由正确性（adapter 注册表 + 前缀解析）/ 账号池轮转与 401 刷新下沉（`refresh_credentials` 钩子）/ 牛码回归（登录态 + 前缀目录 + 单模型端点；主账号封禁，对话待解封用小号补测）/ WorkBuddy 小号聊天冒烟 / 自定义供应商转发冒烟——pytest 367 passed + e2e 冒烟 19 项全绿
+- [x] 打包产物冒烟（2026-10-09，[冒烟-三provider-e2e.py](冒烟-三provider-e2e.py)）：三 provider 模型列表（牛码 5 + WorkBuddy 45 合并）+ WorkBuddy 流式/非流式对话 + 工具透传 + 自定义供应商真转发——19/19 通过（隔离数据目录、真 exe 产物）
 
-### 与多协议端点兼容的验收衔接（2026-10-08 补）
+### 与多协议端点兼容的验收衔接（2026-10-08 补，2026-10-09 执行完毕）
 
 本需求落地后**兼任** [多协议端点兼容](../多协议端点兼容-三协议入站统一/) **验收 A 段（入站层三协议 e2e）的上游**——该段不依赖牛码账号，用 WorkBuddy（或自定义供应商）当上游即可执行：
 
-- [ ] WorkBuddy 转发上线后，三种真客户端（Codex CLI `/v1/responses`、Claude Code `/v1/messages`、通用 OpenAI 客户端 `/v1/chat/completions`）各跑通一次对话，回填多协议需求验收 A 段
+- [x] WorkBuddy 转发上线后，三种真客户端（Codex CLI `/v1/responses`、Claude Code `/v1/messages`、通用 OpenAI 客户端 `/v1/chat/completions`）各跑通一次对话，回填多协议需求验收 A 段（2026-10-09：Codex CLI 0.153.4 与 Claude Code 2.1.263 真客户端各一次「你好」；OpenAI SDK 3.26.1 流式+非流式各一次；另有脚本级 `/v1/responses`+`/v1/messages` 回归）
 - 用 WorkBuddy 作 A 段上游的收益：不掺牛码工具伪装/指纹净化特化逻辑，入站层问题暴露更干净
 - 分层判读（勿混淆）：`chat_error` 里是上游报错 → 出站/WorkBuddy 问题；`400 请求体不符合 xx 协议` → 入站层（`protocol_adapter.py`）问题
 
