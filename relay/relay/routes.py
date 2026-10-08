@@ -55,6 +55,7 @@ from relay.config import settings
 from relay.middleware import require_api_key
 from relay.monitor import monitor
 from relay.platforms.routes import router as platforms_router
+from relay.platforms.workbuddy import chat as _workbuddy_chat  # noqa: F401（导入即注册聊天 adapter）
 from relay.protocol_adapter import PROTOCOL_ANTHROPIC, PROTOCOL_CHAT, PROTOCOL_RESPONSES
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,27 @@ def _upstream_error_response(exc: Exception,
     此前上游错误一律以 500 纯文本抛出，agent 端（如 ZCode）把 500 当可重试的
     网络错误做指数退避，403/402 这类终态错误被盲目重放到放弃；透传状态码后
     客户端按语义处理（4xx 终态直接报错，429 才重试）。
+
+    平台 provider（WorkBuddy 等）：PlatformUpstreamError 自带 status（B6 映射结果）；
+    账号池无可用 → 503 + Retry-After（§4.3）。
     """
+    from relay.platforms.base import PlatformError, PlatformUpstreamError
+    if isinstance(exc, PlatformUpstreamError):
+        status = exc.status if 400 <= exc.status <= 599 else 502
+        return JSONResponse(status_code=status,
+                            content=_protocol_error_payload(protocol, str(exc)[:1000],
+                                                            status))
+    if isinstance(exc, PlatformError):
+        return JSONResponse(status_code=502,
+                            content=_protocol_error_payload(protocol, str(exc)[:1000],
+                                                            502))
+    if _is_no_available_account(exc):
+        resp = JSONResponse(
+            status_code=503,
+            content=_protocol_error_payload(
+                protocol, str(exc)[:1000], 503, "no_available_account"))
+        resp.headers["Retry-After"] = "60"
+        return resp
     extracted = _extract_upstream_error(exc)
     if extracted is None:
         return None
@@ -201,6 +222,12 @@ def _upstream_error_response(exc: Exception,
         status = 502
     return JSONResponse(status_code=status,
                         content=_protocol_error_payload(protocol, text[:1000], status))
+
+
+def _is_no_available_account(exc: Exception) -> bool:
+    """WorkBuddy 账号池无可用账号（避免 routes 顶部硬依赖平台模块）。"""
+    from relay.platforms.workbuddy.chat import NoAvailableAccountError
+    return isinstance(exc, NoAvailableAccountError)
 
 
 def _is_empty_stream_error(exc: Exception) -> bool:

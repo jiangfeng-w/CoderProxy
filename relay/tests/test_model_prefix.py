@@ -218,6 +218,84 @@ def test_whitelist_full_name_filter(client):
     assert client.get("/v1/models", headers=_auth()).json()["data"] == []
 
 
+# ─────────────────────────── 注册表路由（WorkBuddy 链路） ───────────────────────────
+
+def test_registry_routed_workbuddy_endpoint(client, monkeypatch):
+    """`WorkBuddy/…` 前缀 → 注册表工厂构造 adapter 并转发（假 adapter，不触网）。"""
+    from relay import adapter_registry
+
+    calls: list[str] = []
+
+    class _FakeWb:
+        def __init__(self, bare):
+            self._bare = bare
+
+        async def chat(self, request):
+            from app.models.schemas import ChatResponse, Usage
+            calls.append(self._bare)
+            return ChatResponse(content="wb-ok", finish_reason="stop",
+                                usage=Usage(prompt_tokens=1, completion_tokens=1,
+                                            total_tokens=2))
+
+    async def _dir():
+        return [{"name": "glm-5.3-flash", "context_window": 1000000}]
+
+    adapter_registry.register_provider("WorkBuddy", directory=_dir,
+                                       factory=lambda bare, **kw: _FakeWb(bare))
+    try:
+        # 白名单为空（全部启用）；目录来自注册表
+        r = client.post("/v1/chat/completions",
+                        json={"model": "WorkBuddy/glm-5.3-flash",
+                              "messages": [{"role": "user", "content": "hi"}]},
+                        headers=_auth())
+        assert r.status_code == 200
+        body = r.json()
+        assert body["choices"][0]["message"]["content"] == "wb-ok"
+        assert body["model"] == "WorkBuddy/glm-5.3-flash"  # 回显全名
+        assert calls == ["glm-5.3-flash"]  # 上游拿裸名
+        # /v1/models 合并出现（全名 id + 牛码目录）
+        _run(storage.save_models(_MODELS))
+        ids = [m["id"] for m in client.get("/v1/models", headers=_auth()).json()["data"]]
+        assert "WorkBuddy/glm-5.3-flash" in ids and "牛码/glm-5.3" in ids
+    finally:
+        adapter_registry.unregister_provider("WorkBuddy")
+        # 恢复真实注册（导入 routes 时已注册；unregister 后需还原以防其它测试受影响）
+        from relay.platforms.workbuddy.chat import factory
+        adapter_registry.register_provider("WorkBuddy", factory=factory)
+
+
+def test_no_available_account_maps_503_with_retry_after(client, monkeypatch):
+    """账号池不可用 → 503 + Retry-After（§4.3）。"""
+    from relay import adapter_registry
+    from relay.platforms.workbuddy.chat import NoAvailableAccountError
+
+    class _EmptyWb:
+        async def chat(self, request):
+            raise NoAvailableAccountError("无可用 WorkBuddy 账号")
+
+        async def stream_structured(self, request):
+            raise NoAvailableAccountError("无可用 WorkBuddy 账号")
+            yield  # pragma: no cover
+
+    async def _dir():
+        return [{"name": "m"}]
+
+    adapter_registry.register_provider("WorkBuddy", directory=_dir,
+                                       factory=lambda bare, **kw: _EmptyWb())
+    try:
+        r = client.post("/v1/chat/completions",
+                        json={"model": "WorkBuddy/m",
+                              "messages": [{"role": "user", "content": "hi"}]},
+                        headers=_auth())
+        assert r.status_code == 503
+        assert r.headers.get("Retry-After") == "60"
+        assert r.json()["error"]["type"] == "no_available_account"
+    finally:
+        adapter_registry.unregister_provider("WorkBuddy")
+        from relay.platforms.workbuddy.chat import factory
+        adapter_registry.register_provider("WorkBuddy", factory=factory)
+
+
 class _FakeOkProvider:
     _model_name = "fake"
 
