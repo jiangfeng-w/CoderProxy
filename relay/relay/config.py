@@ -41,6 +41,16 @@ class Settings:
     ta3_stream_idle_timeout: float = 300.0
     ta3_kimi_thinking_effort: str = "low"
     ta3_thinking_watchdog: float = 240.0
+    # WorkBuddy（CodeBuddy CN）平台插件（/v1/platforms/workbuddy/*）。
+    # API 域双口径：契约参考（workbuddy-switch）用 copilot.tencent.com，
+    # cockpit-tools 实测全走 www.codebuddy.cn——两个配置项兜底，小号冒烟后定默认。
+    wb_api_base: str = "https://copilot.tencent.com"
+    wb_web_base: str = "https://www.codebuddy.cn"
+    # 出站 UA：对齐官方桌面端 RestOperations 层三段式（workbuddy-cockpit headers.go：
+    # WorkBuddy/<clientVer> WorkBuddy/<clientVer> CLI/<cliVer>）；billing 白名单类
+    # 接口官方用单段 WorkBuddy/<clientVer>（client.py 按 domain 选择）
+    wb_user_agent: str = "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"
+    wb_client_version: str = "5.5.4"
     # 直连：M1 结论要求绕系统代理，trust_env=False 语义由 relay/__init__.py 设 NO_PROXY 实现；
     # TRUST_ENV_PROXY=true 时保留系统代理行为（调试用）
     trust_env_proxy: bool = False
@@ -65,6 +75,10 @@ class Settings:
             pass
         s.relay_api_key = _env("RELAY_API_KEY", s.relay_api_key)
         s.ta3_api_base = _env("TA3_API_BASE", s.ta3_api_base)
+        s.wb_api_base = _env("WB_API_BASE", s.wb_api_base)
+        s.wb_web_base = _env("WB_WEB_BASE", s.wb_web_base)
+        s.wb_user_agent = _env("WB_USER_AGENT", s.wb_user_agent)
+        s.wb_client_version = _env("WB_CLIENT_VERSION", s.wb_client_version)
         s.ta3_user_agent = _env("TA3_USER_AGENT", s.ta3_user_agent)
         s.trust_env_proxy = _env("TRUST_ENV_PROXY", "").lower() in ("1", "true", "yes")
         s.tool_mode = _env("TOOL_MODE", s.tool_mode)
