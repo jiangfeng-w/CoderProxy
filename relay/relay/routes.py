@@ -364,16 +364,24 @@ async def _ensure_provider_model(ref: model_ref.ModelRef, probe: bool) -> dict:
     """非牛码前缀的模型查找（注册表目录 + 白名单；未注册前缀 → 404 未知供应商）。
 
     自定义供应商（供应商页 F5 手填清单）在注册表 miss 后回退查配置（步骤 4）。
+    错误消息区分「供应商不存在」与「模型未启用」（白名单过滤）——此前
+    供应商存在但模型被过滤时也报「未知供应商」，误导排查（e2e 实测暴露）。
     """
     if not adapter_registry.has_provider(ref.prefix):
         entry = await providers_custom.find_provider_by_name(ref.prefix)
-        if entry is not None and entry.get("enabled", True):
-            allow = [str(m).strip() for m in (entry.get("models") or [])]
-            if probe or ref.bare in allow:
-                if probe or await storage.is_model_enabled(ref.canonical):
-                    return {"name": ref.bare, "provider": ref.prefix,
-                            "custom_entry_id": str(entry.get("id") or "")}
-        raise HTTPException(status_code=404, detail=f"未知供应商: {ref.prefix}")
+        if entry is None or not entry.get("enabled", True):
+            raise HTTPException(status_code=404, detail=f"未知供应商: {ref.prefix}")
+        allow = [str(m).strip() for m in (entry.get("models") or [])]
+        if ref.bare in allow:
+            if probe or await storage.is_model_enabled(ref.canonical):
+                return {"name": ref.bare, "provider": ref.prefix,
+                        "custom_entry_id": str(entry.get("id") or "")}
+            raise HTTPException(
+                status_code=404,
+                detail=f"未知或未启用的模型: {ref.canonical}"
+                       "（若已被白名单过滤，请到供应商页启用）")
+        raise HTTPException(status_code=404,
+                            detail=f"未知或未启用的模型: {ref.canonical}")
     found = await adapter_registry.find_provider_model(ref.prefix, ref.bare)
     if found is None or (not probe and not await storage.is_model_enabled(ref.canonical)):
         # 池不可用（如无 WorkBuddy 账号）与模型不存在语义区分：前者 503 引导配置

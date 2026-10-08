@@ -233,4 +233,30 @@ def test_routes_custom_disabled_excluded(tmp_path, monkeypatch):
                               "messages": [{"role": "user", "content": "hi"}]},
                         headers={"Authorization": "Bearer custom-test-key"})
         assert r.status_code == 404
+        assert "未知供应商" in r.json()["detail"]
+    settings.relay_api_key = ""
+
+
+def test_routes_custom_whitelisted_out_message(tmp_path, monkeypatch):
+    """白名单未启用该模型：报「未知或未启用的模型」，不误报「未知供应商」。"""
+    from fastapi.testclient import TestClient
+    from relay import routes as routes_mod, storage
+    from relay.providers_custom import _save_sync
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    settings.relay_api_key = "custom-test-key"
+    _save_sync([ENTRY])
+    _run(storage.set_model_whitelist(["牛码/glm-5.3-flash"]))
+
+    async def _serving_on():
+        return True
+
+    monkeypatch.setattr(routes_mod, "_serving", _serving_on)
+    with TestClient(routes_mod.app) as client:
+        r = client.post("/v1/chat/completions",
+                        json={"model": "基元律动/glm-5.3-flash",
+                              "messages": [{"role": "user", "content": "hi"}]},
+                        headers={"Authorization": "Bearer custom-test-key"})
+        assert r.status_code == 404
+        assert "未知或未启用的模型" in r.json()["detail"]
     settings.relay_api_key = ""
