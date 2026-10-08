@@ -94,3 +94,11 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
 - [x] 转发架构定稿（2026-10-07：adapter 注册表分层 + Ta3Provider 保留 + 9router executor 模式借鉴，见 §3）
 - [ ] 待②落地后细化定稿：WorkBuddy 聊天契约细节（指纹头族/风控怪癖实测）、账号池选号策略、模型目录合并策略（前缀改写 vs 原名透传）
 - [ ] 实现后补全：双 provider 路由正确性（adapter_for 注册表）/ 账号池轮转与 401 刷新下沉 / ta3 完整回归（登录/模型列表/一次完整对话）/ 小号聊天冒烟
+
+### 与多协议端点兼容的验收衔接（2026-10-08 补）
+
+本需求落地后**兼任** [多协议端点兼容](../多协议端点兼容-三协议入站统一/) **验收 A 段（入站层三协议 e2e）的上游**——该段不依赖牛码账号，用 WorkBuddy 当上游即可执行：
+
+- [ ] WorkBuddy 转发上线后，三种真客户端（Codex CLI `/v1/responses`、Claude Code `/v1/messages`、通用 OpenAI 客户端 `/v1/chat/completions`）各跑通一次对话，回填多协议需求验收 A 段
+- 用 WorkBuddy 作 A 段上游的收益：不掺牛码工具伪装/指纹净化特化逻辑，入站层问题暴露更干净
+- 分层判读（勿混淆）：`chat_error` 里是上游报错 → 出站/WorkBuddy 问题；`400 请求体不符合 xx 协议` → 入站层（`protocol_adapter.py`）问题
