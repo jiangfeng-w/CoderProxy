@@ -44,10 +44,14 @@ from relay import auth_flow, db, oai_adapter, providers_custom, storage, tool_di
 from relay.config import settings
 from relay.middleware import require_api_key
 from relay.monitor import monitor
+from relay.platforms.routes import router as platforms_router
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="CoderProxy Relay", version="0.2.0")
+
+# 平台管理端点（/v1/platforms/*，WorkBuddy 等账号型平台；routes 内自含错误映射）
+app.include_router(platforms_router)
 
 # 对 agent 的 OpenAI base-url 服务开关（方案B）：relay 进程常驻，仅开关 /v1 对外服务，
 # 不动登录/配置/日志底座。进程级运行时状态、不持久化；进程重启自动复位为「随登录联动态」。
