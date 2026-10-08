@@ -1,8 +1,11 @@
-"""relay HTTP 路由：对外只暴露 OpenAI /v1 子集 + /v1/auth/*（GUI/CLI 用）。
+"""relay HTTP 路由：对外只暴露 OpenAI /v1 子集 + Anthropic/Responses 兼容入口 + /v1/auth/*（GUI/CLI 用）。
 
 - GET    /v1/models              模型列表
 - GET    /v1/models/{id}         单模型（OAI 兼容，可选）
 - POST   /v1/chat/completions    OpenAI 兼容；stream=true(SSE) 与 stream=false 均支持
+- POST   /v1/responses           OpenAI Responses API（Codex CLI）；请求 input[]/instructions
+- POST   /v1/messages            Anthropic Messages（Claude Code）；x-api-key 鉴权
+- POST   /v1/messages/count_tokens  Anthropic token 计数（本地估算，9router mock 同款）
 - POST   /v1/auth/login/start    发起登录（IM 静默优先，降级浏览器 PKCE）
 - GET    /v1/auth/status         登录状态轮询
 - POST   /v1/auth/login/cancel   取消进行中的浏览器登录
@@ -19,11 +22,15 @@
 - DELETE /v1/logs                 按条件清空（无参数 = 全清）
 - GET    /v1/stats                按维度聚合 token/请求数（M8 统计页）
 
+三协议入站统一（方案 A，详见 relay/protocol_adapter.py）：
+入站路径 + body 特征双判协议 → 归一成 ChatRequest → 出站复用 Ta3Provider（零改动）
+→ 响应方向按协议回译（Chat 直出 / Responses output[] + typed 事件 / Anthropic typed 事件）。
+
 聊天流程：
-1. 解析 OpenAI 请求 → ChatRequest
+1. 识别入站协议并解析为该协议的 ChatRequest（chat/responses/messages）
 2. 从本地模型目录找模型（未找到先尝试同步一次；再失败 404）
 3. 构造 Ta3Provider（llm- key / apiBase / anthropic 协议），转发到牛码
-4. 流式 → OpenAI SSE；非流式 → 聚合 JSON
+4. 流式 → 按协议组装 SSE；非流式 → 按协议组装 JSON
 5. 牛码 401 → 重新同步目录（刷新 llm- key）后重试一次
 6. 上游空响应（HTTP 200 后干净关流，BUG-001）→ 独立预算重试
    （settings.empty_stream_retries）；耗尽以 502 透传，不再发假成功空流/空 JSON
@@ -42,11 +49,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.models.providers.ta3 import Ta3Provider
 from app.models.schemas import ChatRequest
 
-from relay import auth_flow, db, oai_adapter, providers_custom, storage, tool_disguise, tool_inventory
+from relay import (auth_flow, db, oai_adapter, protocol_adapter, providers_custom, storage,
+                   tool_disguise, tool_inventory)
 from relay.config import settings
 from relay.middleware import require_api_key
 from relay.monitor import monitor
 from relay.platforms.routes import router as platforms_router
+from relay.protocol_adapter import PROTOCOL_ANTHROPIC, PROTOCOL_CHAT, PROTOCOL_RESPONSES
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +150,23 @@ def _openai_error_payload(message: str, status: int,
     return {"error": {"message": message, "type": err_type, "code": status}}
 
 
-def _upstream_error_response(exc: Exception) -> JSONResponse | None:
-    """上游错误 → 透传真实状态码的 OpenAI 风格错误响应；非上游错误返回 None（仍 500）。
+def _anthropic_error_payload(message: str, status: int,
+                             err_type: str = "api_error") -> dict:
+    """Anthropic 风格错误体：{type:"error", error:{type, message}}。"""
+    return {"type": "error", "error": {"type": err_type, "message": message}}
+
+
+def _protocol_error_payload(protocol: str, message: str, status: int,
+                            err_type: str = "upstream_error") -> dict:
+    """按入站协议选择错误体形状（Chat/Responses → OpenAI 风格；Anthropic → 自家风格）。"""
+    if protocol == PROTOCOL_ANTHROPIC:
+        return _anthropic_error_payload(message, status, err_type)
+    return _openai_error_payload(message, status, err_type)
+
+
+def _upstream_error_response(exc: Exception,
+                             protocol: str = PROTOCOL_CHAT) -> JSONResponse | None:
+    """上游错误 → 透传真实状态码的协议风格错误响应；非上游错误返回 None（仍 500）。
 
     此前上游错误一律以 500 纯文本抛出，agent 端（如 ZCode）把 500 当可重试的
     网络错误做指数退避，403/402 这类终态错误被盲目重放到放弃；透传状态码后
@@ -155,7 +179,7 @@ def _upstream_error_response(exc: Exception) -> JSONResponse | None:
     if not 400 <= status <= 599:
         status = 502
     return JSONResponse(status_code=status,
-                        content=_openai_error_payload(text[:1000], status))
+                        content=_protocol_error_payload(protocol, text[:1000], status))
 
 
 def _is_empty_stream_error(exc: Exception) -> bool:
@@ -173,15 +197,18 @@ def _empty_stream_log_detail(exc: Exception) -> dict:
     return detail
 
 
-def _empty_stream_response(exc: Exception) -> JSONResponse:
-    """空响应重试耗尽 → 502 OpenAI 风格错误体（本机判定，非上游状态码）。
+def _empty_stream_response(exc: Exception,
+                           protocol: str = PROTOCOL_CHAT) -> JSONResponse:
+    """空响应重试耗尽 → 502 协议风格错误体（本机判定，非上游状态码）。
 
     判定先于产出（oai_adapter 在任何帧 yield 前完成判定），此时响应头未发，
     可像 401/403 一样透传真状态码；不再向 agent 发「200 + 空流」假成功。
     """
-    return JSONResponse(
-        status_code=502,
-        content=_openai_error_payload(str(exc)[:1000], 502, "upstream_empty_response"))
+    message = str(exc)[:1000]
+    payload = (_anthropic_error_payload(message, 502, "overloaded_error")
+               if protocol == PROTOCOL_ANTHROPIC
+               else _openai_error_payload(message, 502, "upstream_empty_response"))
+    return JSONResponse(status_code=502, content=payload)
 
 
 async def _log_db(kind: str, **fields) -> None:
@@ -357,21 +384,118 @@ async def get_model(model_id: str):
 
 @app.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
 async def chat_completions(request: Request):
+    return await _handle_chat(request, PROTOCOL_CHAT)
+
+
+@app.post("/v1/responses", dependencies=[Depends(require_api_key)])
+async def responses_endpoint(request: Request):
+    """OpenAI Responses API 入站（Codex CLI）：input[]/instructions → ChatRequest。"""
+    return await _handle_chat(request, PROTOCOL_RESPONSES)
+
+
+@app.post("/v1/messages", dependencies=[Depends(require_api_key)])
+async def anthropic_messages_endpoint(request: Request):
+    """Anthropic Messages 入站（Claude Code）：顶层 system + content 块 → ChatRequest。"""
+    return await _handle_chat(request, PROTOCOL_ANTHROPIC)
+
+
+@app.post("/v1/messages/count_tokens", dependencies=[Depends(require_api_key)])
+async def anthropic_count_tokens(request: Request):
+    """Anthropic token 计数（本地估算，不触发上游；9router mock 路由同款）。
+
+    Claude Code 在部分场景会先调 count_tokens 做上下文预算；真实估算不需要精确，
+    按输入字符数 / 4 粗估即可（对标 9router `estimateAnthropicInputTokens`）。
+    与其它 agent 入口一致受 M9 服务开关门控（服务停 → 503）。
+    """
+    if not await _serving():
+        raise HTTPException(status_code=503, detail="服务已停止，请登录并启动服务")
+    body = await _json_body(request)
+    return {"input_tokens": _estimate_anthropic_input_tokens(body)}
+
+
+def _estimate_anthropic_input_tokens(body: dict) -> int:
+    """输入字符数 / 4 粗估（对齐 9router count_tokens mock 口径）。"""
+    def value_chars(value) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, str):
+            return len(value)
+        if isinstance(value, bool):
+            return len(str(value))
+        if isinstance(value, (int, float)):
+            return len(str(value))
+        if isinstance(value, list):
+            return sum(value_chars(v) for v in value)
+        if isinstance(value, dict):
+            return sum(len(str(k)) + value_chars(v) for k, v in value.items())
+        return 0
+
+    def block_chars(block) -> int:
+        if not isinstance(block, dict):
+            return value_chars(block)
+        btype = block.get("type")
+        if btype == "text":
+            return value_chars(block.get("text"))
+        if btype == "tool_use":
+            return value_chars(block.get("name")) + value_chars(block.get("input"))
+        if btype == "tool_result":
+            return value_chars(block.get("content"))
+        if btype == "thinking":
+            return value_chars(block.get("thinking"))
+        return value_chars(block)
+
+    def message_chars(message) -> int:
+        if not isinstance(message, dict):
+            return 0
+        content = message.get("content")
+        if isinstance(content, str):
+            return len(content)
+        if isinstance(content, list):
+            return sum(block_chars(b) for b in content)
+        return value_chars(content)
+
+    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+    total = value_chars(body.get("system")) + value_chars(body.get("tools"))
+    total += sum(message_chars(m) for m in messages)
+    return max(1, -(-total // 4))  # ceil
+
+
+async def _handle_chat(request: Request, path_protocol: str):
+    """三协议共用聊天主链路：识别协议 → 归一 ChatRequest → 转发 → 按协议回译。
+
+    **解析协议与回译协议分离**（对标 9router：源格式按 body 特征判、响应按客户端
+    所用端点回译）：
+    - 解析：`detect_protocol(path, body)` 双重判定——容忍畸形 case
+      （Cursor CLI 把 Responses body 的 `input[]` 打到 `/v1/chat/completions`）；
+    - 回译：始终以**端点路径**为准（客户端选了哪个端点，就期望哪种响应形状）。
+      畸形 case 下：input[] body 被按 Responses 解析，响应仍回 OpenAI Chat 形状。
+    """
     if not await _serving():
         raise HTTPException(status_code=503, detail="服务已停止，请登录并启动服务")
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是对象")
 
-    # M6 duration 起点：chat_completions 收到请求时刻（monotonic，与 chat_request 落库同点）
+    parse_protocol = protocol_adapter.detect_protocol(request.url.path, body)
+    response_protocol = path_protocol
+
+    # M6 duration 起点：收到请求时刻（monotonic，与 chat_request 落库同点）
     started_at = time.monotonic()
 
     # probe：GUI 连通性探测标记（body `probe: true`）。仅本地消费、不进入 ChatRequest /
-    # 上游 body（oai_request_to_chat_request 手写挑字段）；语义见 _ensure_model(probe=...)。
+    # 上游 body（各协议转换器手写挑字段）；语义见 _ensure_model(probe=...)。
     probe = bool(body.get("probe", False))
 
-    chat_request = oai_adapter.oai_request_to_chat_request(body)
+    try:
+        chat_request = protocol_adapter.request_to_chat_request(parse_protocol, body)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001（转换层异常 → 400，不 500 吓 agent）
+        raise HTTPException(status_code=400,
+                            detail=f"请求体不符合 {parse_protocol} 协议：{exc}") from None
     if not chat_request.model:
         raise HTTPException(status_code=400, detail="缺少 model 字段")
     if not chat_request.messages:
@@ -380,14 +504,17 @@ async def chat_completions(request: Request):
     # agent 显式传的思考档位不在该模型上游档位内时**透传**（2026-09-06 用户拍板）：
     # 不做回退改写，档位合法性由上游网关自行处理。
 
-    # 每模型默认思考强度（GUI 模型页配置）：agent 未显式传思考参数时按默认值下发
-    oai_adapter.apply_thinking_default(
-        body, chat_request, await storage.get_thinking_defaults())
+    # 每模型默认思考强度（GUI 模型页配置）：agent 未显式传思考参数时按默认值下发。
+    # 判断依据用**归一后的 ChatRequest**（三协议都会把自家思考形态转成 thinking/
+    # reasoning_effort），避免 Responses 的 `reasoning.effort` 被当成「没传」覆盖掉。
+    if chat_request.thinking is None and not chat_request.reasoning_effort:
+        oai_adapter.apply_thinking_default(
+            body, chat_request, await storage.get_thinking_defaults())
 
     # M11：工具指纹采集（被动）。在伪装前抓 agent 声明的真实工具，落库供语义映射；
     # 跳过连通性探针（probe）请求，避免污染指纹表。
     if settings.tool_inventory_enabled and not probe:
-        source_tools = body.get("tools")
+        source_tools = chat_request.tools  # 已归一（各协议 → Chat function 形态）
         if source_tools:
             await tool_inventory.record_tools(source_tools, chat_request.model)
 
@@ -395,19 +522,24 @@ async def chat_completions(request: Request):
     ctx = tool_disguise.build_disguise_context(chat_request.tools, settings.tool_mode)
     chat_request.tools = ctx.outbound_tools
 
-    stream = bool(body.get("stream", False))
-    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+    stream = chat_request.stream
+    # Responses/Anthropic 入站协议没有 OpenAI 的 stream_options：按协议语义取
+    if response_protocol == PROTOCOL_CHAT:
+        include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+    else:
+        include_usage = True  # 非 OpenAI 协议：usage 需要随流给出（Responses/Anthropic 都用）
 
     # M4 监控：记录请求与工具伪装统计（GUI 日志面板数据源）
     monitor.emit("chat_request", model=chat_request.model, stream=stream,
                  tools=len(ctx.outbound_tools))
     # M6：chat_request 落库（tools 数走 detail 兜底，不建独立列，不入统计口径）；
     # detail 同时记录思考下发态（agent 显式传参或 relay 兜底后的最终值），
-    # 供日志页/验收核对「这次请求是否开了思考、用的哪档」
+    # 以及入站协议（多协议排查/统计），供日志页/验收核对
     await _log_db("chat_request", model=chat_request.model, stream=1 if stream else 0,
                   detail={"tools": len(ctx.outbound_tools),
                           "thinking": chat_request.thinking,
-                          "thinking_effort": chat_request.reasoning_effort})
+                          "thinking_effort": chat_request.reasoning_effort,
+                          "protocol": response_protocol})
     monitor.emit("tool_disguise", mode=ctx.mode,
                  map_hits=ctx.tool_map_hits,
                  longtail_passthrough=ctx.tool_longtail_passthrough,
@@ -433,6 +565,10 @@ async def chat_completions(request: Request):
         # 预拉首帧：上游错误（401/403/429/...）都发生在首帧产出前。此前错误在 gen()
         # 内才触发，响应头 200 已发出，客户端只见「开流即断」（ZCode 报 terminated
         # 并盲目重试）；预拉后可以在响应头未发时把真实状态码透传回去。
+        #
+        # 三协议回译：预拉后先按协议组装首帧事件（Responses/Anthropic 的包装事件由
+        # 组装器产出），首帧事件字符串即「响应头前必须成功」的探针。
+        assembler = protocol_adapter.make_stream_assembler(response_protocol, chat_request.model)
         try:
             first_chunk = await anext(upstream_iter)
         except StopAsyncIteration:
@@ -445,18 +581,37 @@ async def chat_completions(request: Request):
             if _is_empty_stream_error(exc):
                 # 空响应重试耗尽：响应头未发（判定先于产出），502 透传；
                 # 不再向 agent 发「200 + 空流」假成功（BUG-001）
-                return _empty_stream_response(exc)
-            err_resp = _upstream_error_response(exc)
+                return _empty_stream_response(exc, response_protocol)
+            err_resp = _upstream_error_response(exc, response_protocol)
             if err_resp is not None:
                 return err_resp
             raise
 
+        # 首帧事件预组装（协议回译后）：转换层失败同样要在响应头前暴露
+        try:
+            first_events: list[str] = assembler.feed(first_chunk) if (
+                assembler is not None and first_chunk is not None) else []
+            if assembler is None and first_chunk is not None:
+                first_events = [first_chunk]
+        except Exception as exc:  # noqa: BLE001
+            monitor.emit("chat_error", model=chat_request.model, error=str(exc)[:200])
+            await _log_db("chat_error", model=chat_request.model, stream=1,
+                          detail={"error": str(exc)[:500]})
+            raise HTTPException(status_code=500, detail=f"响应组装失败：{exc}") from None
+
         async def gen():
             try:
-                if first_chunk is not None:
-                    yield first_chunk
-                async for chunk in upstream_iter:
-                    yield chunk
+                for frame in first_events:
+                    yield frame
+                if assembler is None:
+                    async for chunk in upstream_iter:
+                        yield chunk
+                else:
+                    async for chunk in upstream_iter:
+                        for frame in assembler.feed(chunk):
+                            yield frame
+                    for frame in assembler.finish():
+                        yield frame
                 monitor.emit("chat_done", model=chat_request.model, stream=True,
                              map_hits=ctx.tool_map_hits,
                              longtail=ctx.tool_longtail_passthrough,
@@ -470,12 +625,16 @@ async def chat_completions(request: Request):
                              error=str(exc)[:200])
                 await _log_db("chat_error", model=chat_request.model, stream=1,
                               detail=_empty_stream_log_detail(exc))
-                # 流中途失败：响应头已发无法改状态。补一帧 OpenAI 风格错误帧再干净
-                # 收尾，替代此前 raise 导致的连接硬断（客户端只见 "terminated"）。
+                # 流中途失败：响应头已发无法改状态。按协议补一帧错误事件再干净收尾，
+                # 替代 raise 导致的连接硬断（客户端只见 "terminated"）。
                 extracted = _extract_upstream_error(exc)
                 status, text = extracted if extracted else (500, str(exc)[:500])
-                payload = _openai_error_payload(text[:1000], status)
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                if assembler is not None:
+                    for frame in assembler.failed_event(text, status):
+                        yield frame
+                else:
+                    payload = _openai_error_payload(text[:1000], status)
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
@@ -488,8 +647,8 @@ async def chat_completions(request: Request):
                       detail=_empty_stream_log_detail(exc))
         if _is_empty_stream_error(exc):
             # 空响应重试耗尽：502 透传（不再回假成功空 JSON，BUG-001）
-            return _empty_stream_response(exc)
-        err_resp = _upstream_error_response(exc)
+            return _empty_stream_response(exc, response_protocol)
+        err_resp = _upstream_error_response(exc, response_protocol)
         if err_resp is not None:
             return err_resp
         raise
@@ -500,6 +659,12 @@ async def chat_completions(request: Request):
                  dropped=ctx.tool_dropped)
     await _log_db("chat_done", model=chat_request.model, stream=0,
                   duration_ms=duration_ms, **_usage_log_fields(response.usage))
+    if response_protocol == PROTOCOL_RESPONSES:
+        return JSONResponse(protocol_adapter.chat_response_to_responses(
+            chat_request, response))
+    if response_protocol == PROTOCOL_ANTHROPIC:
+        return JSONResponse(protocol_adapter.chat_response_to_anthropic(
+            chat_request, response))
     model = await storage.find_model(chat_request.model)
     provider = build_provider(model, chat_request.model, ctx) if model else None
     return JSONResponse(oai_adapter.chat_response_to_openai(provider, chat_request, response))

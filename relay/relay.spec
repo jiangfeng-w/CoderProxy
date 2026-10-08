@@ -41,6 +41,8 @@ hiddenimports = [
     # cli.py 用 uvicorn.run("relay.routes:app") 字符串导入，静态分析不追踪 →
     # 显式列出，连带分析 routes.py 的传递依赖（oai_adapter/auth_flow/tool_disguise/monitor...）
     "relay.routes",
+    # 多协议入站统一（/v1/responses、/v1/messages）：routes 具名导入，双保险登记
+    "relay.protocol_adapter",
     # 平台插件包（/v1/platforms/*，WorkBuddy）：routes 挂载点 + 子包注册（漏登记踩坑史，双保险）
     "relay.platforms",
     "relay.platforms.workbuddy",
