@@ -9,6 +9,7 @@ import { getModels, openAuthorizeUrl, type OaiModel, type WbAccount } from '../.
 import { workbuddyStore } from '../../stores/workbuddy'
 import { store, useConfigStore } from '../../store'
 import { testModel } from '../../modelCheck'
+import ModelEffortSelect from '../../components/ModelEffortSelect.vue'
 
 const message = useMessage()
 const wb = workbuddyStore
@@ -54,17 +55,29 @@ async function onToggleModel(id: string) {
     const w = config.model_whitelist
     let next: string[]
     if (w.length === 0) {
-      // 全部启用 → 显式列出除该模型外的全部（含本 tab 与牛码条目，保证语义不变）
+      // 全部启用 → 显式列出除该模型外的全部（含牛码/自定义条目，保证其它供应商语义不变）
       const all = (await getModels(true)).data.map(m => m.id)
       next = all.filter(x => x !== id)
+      if (next.length === 0) next = [DISABLE_ALL]
     } else if (w.length === 1 && w[0] === DISABLE_ALL) {
       next = [id]
     } else {
       next = w.includes(id) ? w.filter(x => x !== id) : [...w, id]
+      if (next.length === 0) next = [DISABLE_ALL] // 空名单语义 = 全部启用，落哨兵防反转
     }
     await config.update({ model_whitelist: next })
   } catch (e) {
     message.error(String(e))
+  }
+}
+
+/** 点击模型名即复制到剪贴板（对齐牛码 tab）。 */
+async function onCopy(id: string) {
+  try {
+    await navigator.clipboard.writeText(id)
+    message.success(`已复制模型名：${id}`)
+  } catch (e) {
+    message.error(`复制失败：${String(e)}`)
   }
 }
 
@@ -96,12 +109,13 @@ async function onAllDisableModels() {
       await config.update({ model_whitelist: others.length ? others : [DISABLE_ALL] })
       return
     }
-    await config.update({ model_whitelist: w.filter(x => !wbIds.has(x)) })
+    const kept = w.filter(x => !wbIds.has(x))
+    // 全禁后名单为空 = 全部启用语义反转 → 落哨兵保持「全禁」意图
+    await config.update({ model_whitelist: kept.length ? kept : [DISABLE_ALL] })
   } catch (e) {
     message.error(String(e))
   }
 }
-
 async function onTestModel(id: string) {
   testingModel.value = id
   store.modelStatus[id] = 'testing'
@@ -129,6 +143,16 @@ function modelStatusClass(id: string): string {
   if (s === 'success') return 'green'
   if (s === 'failure') return 'red'
   return 'gray'
+}
+
+/** 上下文窗口格式化：200000 → 200K，1048576 → 1M（对齐牛码 tab）。 */
+function fmtContext(w?: number | null): string {
+  if (!w || w <= 0) return '—'
+  if (w >= 1_000_000) {
+    const m = w / 1_000_000
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`
+  }
+  return `${Math.round(w / 1000)}K`
 }
 
 // ── 登录弹窗与轮询 ──
@@ -452,6 +476,8 @@ onUnmounted(stopPolling)
         <thead>
           <tr>
             <th>模型名</th>
+            <th class="col-ctx">上下文</th>
+            <th class="col-effort">默认思考强度</th>
             <th class="col-status">状态（点击测试）</th>
             <th class="col-toggle">启用</th>
           </tr>
@@ -461,7 +487,19 @@ onUnmounted(stopPolling)
             v-for="m in filteredModels"
             :key="m.id"
           >
-            <td class="mono">{{ m.id }}</td>
+            <td
+              class="mono copyable"
+              title="点击复制模型名"
+              @click="onCopy(m.id)"
+            >
+              {{ m.id }}
+            </td>
+            <td class="mono dim col-ctx">
+              {{ fmtContext(m.context_window) }}
+            </td>
+            <td class="col-effort">
+              <ModelEffortSelect :model="m" />
+            </td>
             <td class="col-status">
               <span
                 class="wp-cap pressable"
@@ -473,11 +511,14 @@ onUnmounted(stopPolling)
               </span>
             </td>
             <td class="col-toggle">
-              <input
-                type="checkbox"
-                :checked="isModelEnabled(m.id)"
-                @change="onToggleModel(m.id)"
-              />
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="isModelEnabled(m.id)"
+                  @change="onToggleModel(m.id)"
+                />
+                <span class="slider" />
+              </label>
             </td>
           </tr>
         </tbody>
@@ -853,11 +894,67 @@ onUnmounted(stopPolling)
 .pressable:hover {
   filter: brightness(1.2);
 }
+.dim {
+  color: var(--cp-dim);
+}
+.copyable {
+  cursor: pointer;
+  user-select: text;
+  transition: color 0.15s;
+}
+.copyable:hover {
+  color: var(--cp-cyan);
+}
+/* 启用滑杆（对齐牛码 tab：label.switch > input + span.slider） */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.slider {
+  position: absolute;
+  inset: 0;
+  background: #334155;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 3px;
+  border-radius: 50%;
+  background: #cbd5e1;
+  transition: transform 0.15s;
+}
+.switch input:checked + .slider {
+  background: var(--cp-cyan);
+}
+.switch input:checked + .slider::before {
+  transform: translateX(16px);
+  background: #04121a;
+}
 .col-status {
   width: 124px;
 }
 .col-toggle {
   width: 60px;
+}
+.col-ctx {
+  width: 72px;
+  white-space: nowrap;
+}
+.col-effort {
+  width: 150px;
 }
 .dlg-text {
   margin: 0 0 8px;

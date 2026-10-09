@@ -1,15 +1,19 @@
 <script setup lang="ts">
 // 牛码 tab 模型区（原模型页功能整体迁入，供应商页 F3）：列表 + 搜索 + 白名单启用开关 +
 // 全部启用/禁用 + 可用状态检测。同步按钮归上方账号区，目录刷新监听 store.syncTick。
-import { computed, h, onMounted, onUnmounted, ref, watch, type VNodeChild } from 'vue'
-import { NSelect, NTooltip, useMessage } from 'naive-ui'
+// BUG-1：本 tab 只显示 `牛码/` 前缀条目（目录含 WorkBuddy/ 与自定义供应商），
+// 聚合与单项启停一律在**本 tab 作用域**内进行（不误动其它供应商的状态）。
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useMessage } from 'naive-ui'
 import { getModels, type OaiModel } from '../../api'
-import { store, useConfigStore, STANDARD_EFFORTS, STANDARD_EFFORT_LABELS } from '../../store'
+import { store, useConfigStore } from '../../store'
 import { testModel } from '../../modelCheck'
+import ModelEffortSelect from '../../components/ModelEffortSelect.vue'
 
 const message = useMessage()
 const config = useConfigStore()
 const DISABLE_ALL = '__none__'
+const NIUCODE_PREFIX = '牛码/'
 
 const models = ref<OaiModel[]>([])
 const search = ref('')
@@ -70,7 +74,9 @@ async function saveWl(next: string[]) {
 
 /** 启用开关：纯白名单成员管理（即时生效）。不再内嵌连通性预检——
  * 「先测后启用」在 probe 落地后与「测试」按钮重复；诊断职责收敛到
- * 「测试」按钮（见需求连通性测试-白名单豁免）。 */
+ * 「测试」按钮（见需求连通性测试-白名单豁免）。
+ * BUG-1：非本 tab 条目必须显式列出（作用域语义），否则关掉本 tab 某项会连带停用
+ * WorkBuddy/自定义供应商（白名单非空时未列出 = 停用）。 */
 async function onToggle(id: string, on: boolean) {
   const w = wl.value
   let next: string[]
@@ -80,7 +86,10 @@ async function onToggle(id: string, on: boolean) {
     else next = w.includes(id) ? w : [...w, id]
   } else {
     if (w.length === 0) {
-      next = models.value.map(m => m.id).filter(x => x !== id)
+      // 全部启用 → 显式禁用：全量目录按本项排除后写回（作用域安全）
+      const all = (await getModels(true)).data.map(m => m.id)
+      next = all.filter(x => x !== id)
+      if (next.length === 0) next = [DISABLE_ALL]
     } else if (w.length === 1 && w[0] === DISABLE_ALL) {
       return
     } else {
@@ -91,13 +100,33 @@ async function onToggle(id: string, on: boolean) {
   await saveWl(next)
 }
 
+/** 全部启用（本 tab 作用域）：仅操作 `牛码/` 条目，保留其它供应商既有启停状态。 */
 async function onAllEnable() {
-  await saveWl([])
-  message.success('已全部启用')
+  const w = wl.value
+  const niuIds = new Set(models.value.map(m => m.id))
+  if (w.length === 0) return // 已全部启用
+  if (w.length === 1 && w[0] === DISABLE_ALL) {
+    await saveWl([...niuIds]) // 本 tab 全开（不含其它供应商）
+  } else {
+    const kept = w.filter(x => !niuIds.has(x)) // 其它供应商状态保留
+    await saveWl([...kept, ...niuIds])
+  }
+  message.success('已全部启用（本页模型）')
 }
+
+/** 全部禁用（本 tab 作用域）：仅停用 `牛码/` 条目；若因此一个都不剩则落哨兵全禁。 */
 async function onAllDisable() {
-  await saveWl([DISABLE_ALL])
-  message.success('已全部禁用')
+  const w = wl.value
+  const niuIds = new Set(models.value.map(m => m.id))
+  if (w.length === 0) {
+    const all = (await getModels(true)).data.map(m => m.id)
+    const others = all.filter(x => !niuIds.has(x))
+    await saveWl(others.length ? others : [DISABLE_ALL])
+  } else {
+    const kept = w.filter(x => !niuIds.has(x))
+    await saveWl(kept.length ? kept : [DISABLE_ALL])
+  }
+  message.success('已全部禁用（本页模型）')
 }
 
 /** 点击模型名即复制到剪贴板。 */
@@ -120,74 +149,6 @@ function fmtContext(w?: number | null): string {
   return `${Math.round(w / 1000)}K`
 }
 
-/** 档位强度语义（hover tooltip 用；厂商映射差异见需求文档「思考强度控制与日志」）。 */
-const EFFORT_DESC: Record<string, string> = {
-  minimal: '最低限度思考',
-  low: '轻度思考',
-  medium: '中度思考',
-  high: '深度思考',
-  xhigh: '超深度思考',
-  max: '最大强度思考'
-}
-
-/** 每个档位选项的 hover 说明：head=一句话概括（首行高亮），body=详细描述（次行起）。
- * 目录档位保证生效；目录外标准档标注不保证生效。
- * 「关」的 GLM-5.3 风险提示仅对 glm-5.3 系列显示（官方文档称该系列不支持关思考）。 */
-function effortTip(m: OaiModel, value: string): { head: string; body: string } {
-  if (value === 'none') {
-    const body = m.id.toLowerCase().startsWith('glm-5.3') ? '注意：GLM-5.3 系列官方不支持关闭思考（直连会报错），牛码网关可能映射为低档位，以实测为准' : 'agent 未传思考参数时下发 thinking: disabled'
-    return { head: '显式关闭思考', body }
-  }
-  const head = EFFORT_DESC[value] ?? value
-  const body = (m.reasoning_efforts ?? []).includes(value) ? '上游档位（官方客户端同款选项），保证生效' : '目录外标准档位：上游未列出，牛码网关可能映射到其他档位或报错，不保证生效'
-  return { head, body }
-}
-
-/** 下拉选项渲染：默认 Naive 样式，仅包一层 tooltip（hover 显示档位说明：首行概括高亮，次行详细描述）。
- * 柯里化以携带当前模型上下文；tooltip 宽度定内容 div 上（NTooltip 的 style 不作用于浮层面板），
- * 用 min-width 强制撑开（仅 max-width 会被父容器 shrink-to-fit 压成窄条）。 */
-function effortRenderer(m: OaiModel) {
-  return (info: { node: VNodeChild; option: { value?: string | number } }): VNodeChild => {
-    const tip = effortTip(m, String(info.option.value ?? ''))
-    return h(
-      NTooltip,
-      { trigger: 'hover', placement: 'left' },
-      {
-        trigger: () => h('div', null, [info.node]),
-        default: () => h('div', { style: 'min-width: 300px; max-width: 440px; line-height: 1.6' }, [h('div', { style: 'color: var(--cp-cyan); font-weight: 600; margin-bottom: 2px' }, tip.head), h('div', null, tip.body)])
-      }
-    )
-  }
-}
-
-/** 默认思考强度下拉选项：关（none，显式关思考）置顶；目录档位 + 目录外标准档合并后
- * 统一按强度排序（微/低/中/高/超高/最大），目录外标签标「目录外」，说明在 hover tooltip。 */
-function effortOptions(m: OaiModel): { label: string; value: string }[] {
-  const labels = m.reasoning_labels ?? {}
-  const catalogLevels = m.reasoning_efforts ?? []
-  const order = (lv: string) => {
-    const i = (STANDARD_EFFORTS as readonly string[]).indexOf(lv)
-    return i === -1 ? 99 : i
-  }
-  const all = [...new Set([...catalogLevels, ...STANDARD_EFFORTS])].sort((a, b) => order(a) - order(b))
-  const opts = all.map(lv => (catalogLevels.includes(lv) ? { label: labels[lv] ? `${labels[lv]}（${lv}）` : lv, value: lv } : { label: `${STANDARD_EFFORT_LABELS[lv] ?? lv}（${lv}）·目录外`, value: lv }))
-  return [{ label: '关（不思考）', value: 'none' }, ...opts]
-}
-
-/** 当前生效的默认档位（缺省 = none 关）。 */
-function effortValue(m: OaiModel): string {
-  return config.thinking_defaults[m.id] ?? 'none'
-}
-
-/** 写入某模型的默认思考强度（整体覆盖写回，收敛走 config store 响应）。 */
-async function onEffortChange(m: OaiModel, v: string) {
-  try {
-    await config.update({ thinking_defaults: { ...config.thinking_defaults, [m.id]: v } })
-  } catch (e) {
-    message.error(String(e))
-  }
-}
-
 /** 手动测试单个模型连通性：只更新连通状态，不修改白名单（与启用开关完全解耦）。 */
 async function onTest(id: string) {
   if (testing.value) return
@@ -208,8 +169,9 @@ async function onTest(id: string) {
 
 async function load() {
   try {
-    // GUI 用完整目录（all=1），失败模型仍需可见，不能按白名单过滤隐藏
-    models.value = (await getModels(true)).data
+    // GUI 用完整目录（all=1），失败模型仍需可见，不能按白名单过滤隐藏；
+    // BUG-1：本 tab 只取 `牛码/` 前缀条目（裸名在 /v1/models 归一为全名，此处按前缀过滤）
+    models.value = (await getModels(true)).data.filter(m => m.id.startsWith(NIUCODE_PREFIX))
   } catch (e) {
     message.error(String(e))
   }
@@ -299,21 +261,7 @@ onUnmounted(() => clearInterval(timer))
             {{ fmtContext(m.context_window) }}
           </td>
           <td class="col-effort">
-            <NSelect
-              v-if="(m.reasoning_efforts ?? []).length > 0"
-              size="small"
-              :value="effortValue(m)"
-              :options="effortOptions(m)"
-              :render-option="effortRenderer(m)"
-              :consistent-menu-width="false"
-              title="agent 未传思考参数时按此默认值下发；hover 各选项查看档位说明（仅上游目录档位保证生效）"
-              @update:value="(v: string) => onEffortChange(m, v)"
-            />
-            <span
-              v-else
-              class="dim"
-              >{{ m.supports_reasoning ? '支持（无档位）' : '—' }}</span
-            >
+            <ModelEffortSelect :model="m" />
           </td>
           <td class="col-status">
             <div class="st">
