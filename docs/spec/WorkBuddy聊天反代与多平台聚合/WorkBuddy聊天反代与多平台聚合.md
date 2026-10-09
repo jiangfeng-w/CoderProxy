@@ -182,6 +182,11 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
   - **BUG-3** deepseek 系思考开关注入：`_apply_thinking` 注入 `thinking:{type:"enabled"}` + 缺档补目录默认档/超范围降级；「关」= 真关 `{type:"disabled"}`（直连小号实证 reasoning_tokens=0）——探针五形状全达预期；单测 +11
   - **BUG-1/BUG-2** 供应商页模型区：牛码 tab 前缀过滤与 tab 作用域聚合；WorkBuddy 卡片对齐（滑杆开关/点击复制/上下文列/默认思考强度列，抽公共组件 `frontend/src/components/ModelEffortSelect.vue`）——dev 实测：牛码 tab 5/5、WB 46 条含滑杆与档位下拉；「全部禁用（牛码）」白名单 50→45 且 WB 45 条分毫未动
   - 全量 pytest **395 passed**（基线 367 + 28 新增）
+- [x] 实测四 bug 修复后续（2026-10-09 第二轮，本轮）：
+  - **伪装门控（方案 A）**：工具名伪装收窄为**牛码链路专属**（`routes._handle_chat` 按 `is_niucode` 门控 `build_disguise_context`）——三家参考对 WorkBuddy 均不做工具伪装（B5 实证上游原生支持 tools），此前无条件伪装会把 `Grep→Search`、`Skill→ReadSkill` 直发 WorkBuddy/自定义上游且无还原路径；非牛码链路 `ctx=None`（tools 原名透传、伪装监控不计数）
+  - **配对补齐（fill 层）**：`tool_repair` 增 `fill_missing_tool_results`（缺结果调用补显式占位，对齐 chatcoder「补显式丢失占位而非假数据」；9router `fixMissingToolResponses` 只补空串，占位文案对模型更友好）+ `repair_tool_pairing` 一键三层（fill→repack→cleanup）
+  - **backfillReasoningContent**：deepseek 系多轮 assistant 回填 `reasoning_content`（对齐 2api-panel issue #165：门控 `enabled || hasTrace`、值保留/复制/补空串、镜像 `reasoning` 空白占位）+ kimi 系仅工具回合补占位（9router `scope="toolCalls"` 口径）
+  - 全量 pytest **413 passed**（上轮 395 + 本轮 18 新增；ruff 零新增告警）
 
 ### 与多协议端点兼容的验收衔接（2026-10-08 补，2026-10-09 执行完毕）
 

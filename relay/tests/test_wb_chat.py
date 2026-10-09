@@ -230,6 +230,113 @@ def test_deepseek_case_insensitive_prefix():
     assert body["reasoning_effort"] == "high"
 
 
+# ─────────────── 多轮一致性：reasoning_content 回填（backfill） ───────────────
+
+def _backfill_adapter(model, **kw):
+    return wbchat.WorkBuddyChatAdapter(model, transport=_transport(
+        lambda r: _sse_response(["data: [DONE]"])), **kw)
+
+
+def test_deepseek_backfill_enabled_zero_trace_fills_all():
+    """deepseek 注入 enabled 后：零痕迹多轮也全量补（issue #165 口径：enabled 半边亮）。"""
+    body = _dse_adapter().transform_request(ChatRequest(
+        model="WorkBuddy/deepseek-v4.1-flash",
+        messages=[ChatMessage(role="user", content="u"),
+                  ChatMessage(role="assistant", content="a")]))
+    msg = body["messages"][1]
+    assert msg["reasoning_content"] == ""   # 无 reasoning 可复制 → 补空串
+    assert msg["reasoning"] == " "          # 镜像占位（空白串过 len>0 校验）
+
+
+def test_deepseek_backfill_keeps_existing_and_copies():
+    """已有 rc 保留；带非空 reasoning 的复制；mirror 写入 rc 值。"""
+    body = _dse_adapter().transform_request(ChatRequest(
+        model="WorkBuddy/deepseek-v4.1-flash",
+        messages=[ChatMessage(role="assistant", content="a", reasoning_content="kept"),
+                  ChatMessage(role="assistant", content="b",
+                              content_blocks=[{"type": "text", "text": "x"}])]))
+    # 注：content_blocks 形态照常走 payload；第二条无 rc 补空串
+    msgs = [m for m in body["messages"] if m["role"] == "assistant"]
+    assert msgs[0]["reasoning_content"] == "kept"
+    assert msgs[0]["reasoning"] == "kept"   # 镜像（rc 非空 → 写 rc）
+    assert msgs[1]["reasoning_content"] == ""
+
+
+def test_deepseek_backfill_disabled_zero_trace_untouched():
+    """显式关（disabled）+ 零痕迹 → 零改动（门控两半边都不亮）。"""
+    body = _dse_adapter().transform_request(ChatRequest(
+        model="WorkBuddy/deepseek-v4.1-flash",
+        messages=[ChatMessage(role="assistant", content="a")],
+        thinking=False))
+    assert body["thinking"] == {"type": "disabled"}
+    assert "reasoning_content" not in body["messages"][0]
+    assert "reasoning" not in body["messages"][0]
+
+
+def test_deepseek_backfill_disabled_with_trace_still_fills():
+    """显式关但有痕迹 → 照补（hasTrace 半边；多轮一致性不因关思维链而丢）。"""
+    body = _dse_adapter().transform_request(ChatRequest(
+        model="WorkBuddy/deepseek-v4.1-flash",
+        messages=[ChatMessage(role="assistant", content="a", reasoning_content="t")],
+        thinking=False))
+    msg = body["messages"][0]
+    assert msg["reasoning_content"] == "t"
+    assert msg["reasoning"] == "t"
+
+
+def test_kimi_backfill_tool_round_only():
+    """kimi：仅工具回合补空白占位；纯文本回合零改动（9router scope=toolCalls）。"""
+    a = _backfill_adapter("kimi-k3")
+    body = a.transform_request(ChatRequest(
+        model="WorkBuddy/kimi-k3",
+        messages=[ChatMessage(role="assistant", content=None, tool_calls=[
+                      {"id": "c1", "name": "Bash", "arguments": {}}]),
+                  ChatMessage(role="tool", tool_call_id="c1", content="ok"),
+                  ChatMessage(role="assistant", content="plain")]))
+    msgs = body["messages"]
+    assert msgs[0]["reasoning_content"] == " "   # 工具回合 → 占位
+    assert "reasoning_content" not in msgs[2]    # 纯文本回合不动
+
+
+def test_kimi_backfill_keeps_nonempty_rc():
+    """kimi 工具回合已有非空 rc → 不覆盖（不做无谓补丁）。"""
+    a = _backfill_adapter("kimi-k3")
+    body = a.transform_request(ChatRequest(
+        model="WorkBuddy/kimi-k3",
+        messages=[ChatMessage(role="assistant", content=None, reasoning_content="real",
+                              tool_calls=[{"id": "c1", "name": "Bash", "arguments": {}}]),
+                  ChatMessage(role="tool", tool_call_id="c1", content="ok")]))
+    assert body["messages"][0]["reasoning_content"] == "real"
+
+
+def test_backfill_not_applied_to_other_families():
+    """非 deepseek/kimi（glm）→ 零回填（rc 键不新增）。"""
+    a = _backfill_adapter("glm-5.3-flash")
+    body = a.transform_request(ChatRequest(
+        model="WorkBuddy/glm-5.3-flash",
+        messages=[ChatMessage(role="assistant", content="a")]))
+    assert "reasoning_content" not in body["messages"][0]
+    assert "reasoning" not in body["messages"][0]
+
+
+def test_transform_fills_missing_tool_result_placeholder():
+    """BUG-4 补齐层：批内缺结果 → 出站补显式占位（既有结果在前、占位在后）。"""
+    from relay.tool_repair import MISSING_RESULT_PLACEHOLDER
+    a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
+    req = ChatRequest(model="m", messages=[
+        ChatMessage(role="assistant", content=None, tool_calls=[
+            {"id": "c1", "name": "Bash", "arguments": {}},
+            {"id": "c2", "name": "Bash", "arguments": {}}]),
+        ChatMessage(role="tool", tool_call_id="c1", content="1"),
+    ])
+    body = a.transform_request(req)
+    wire = body["messages"]
+    assert [m["role"] for m in wire] == ["assistant", "tool", "tool"]
+    assert wire[1]["content"] == "1"                      # 既有结果不动
+    assert wire[2]["tool_call_id"] == "c2"
+    assert wire[2]["content"] == MISSING_RESULT_PLACEHOLDER  # 显式占位
+
+
 def test_transform_applies_tool_pairing_safety_net():
     """BUG-4：出站 messages 经 repack+cleanup——夹心后移、孤儿结果删除（双侧对称）。"""
     a = _adapter(lambda r: _sse_response(["data: [DONE]"]))

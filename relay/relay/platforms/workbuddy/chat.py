@@ -8,6 +8,8 @@
   身份句/超长 system 命中 11128 渠道风控 → 替换中性句，不重试）；思考形状
   （BUG-3：deepseek 系注入 `thinking:{type:"enabled"}` + 缺档补目录默认档/超范围降级；
   显式关 → `thinking:{type:"disabled"}` 真关；非 deepseek 维持 B4 透传口径）；
+  多轮一致性（deepseek/kimi 回填 `reasoning_content`；出站工具配对安全网 BUG-4：
+  fill→repack→cleanup，对齐 2api-panel/9router/chatcoder）；
 - **错误识别钩子** `parse_error`：错误码族映射（B6：11101→400 / 11128→400 /
   11102→404 / 6004→429；未知→透传上游状态）；
 - **响应翻译**：上游 SSE 帧白名单重建（剥离 `function_call`/`refusal`/`extra_fields`
@@ -35,7 +37,7 @@ from relay.platforms.base import PlatformUpstreamError
 from relay.platforms.workbuddy import oauth
 from relay.platforms.workbuddy.adapter import WorkBuddyAdapter
 from relay.platforms.workbuddy.client import CN_ORIGIN, derive_stable_id
-from relay.tool_repair import cleanup_orphan_tool_calls, repack_tool_results
+from relay.tool_repair import repair_tool_pairing
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,11 @@ _DEEPSEEK_DEFAULT_EFFORT = "high"  # 缺档兜底（参考 defaultDeepSeekEffort
 def _is_deepseek_model(model: str) -> bool:
     """模型名以 deepseek 为前缀（大小写无关；对齐官方 thinkingFormat:"deepseek" 判定口径）。"""
     return str(model or "").strip().lower().startswith("deepseek")
+
+
+def _is_kimi_model(model: str) -> bool:
+    """kimi 系（对齐 9router 模型级规则 `/^kimi-/i`；WB 目录如 kimi-k3/kimi-k3-1）。"""
+    return str(model or "").strip().lower().startswith("kimi-")
 
 
 def _entry_default_effort(entry: dict) -> str:
@@ -127,6 +134,77 @@ def _downgrade_effort(effort: str, supported: list[str]) -> str:
     if best:
         return best
     return min(ranked, key=lambda x: x[1])[0]
+
+
+def _has_reasoning_trace(messages: list) -> bool:
+    """会话是否已有 reasoning 痕迹（对齐 2api-panel hasTrace：非空 reasoning string 或 rc 键存在）。"""
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        r = m.get("reasoning")
+        if isinstance(r, str) and r:
+            return True
+        if "reasoning_content" in m:
+            return True
+    return False
+
+
+def _backfill_reasoning_content(messages: list[dict], model: str,
+                                thinking_enabled: bool) -> None:
+    """多轮一致性：历史 assistant 回填 ``reasoning_content``（就地改写，零返回值）。
+
+    根因（上游实测口径）：thinking 模式下多轮会话里 assistant 消息须带
+    ``reasoning_content``（string），缺失时上游 400「The reasoning_content in the
+    thinking mode must be passed back to the API.」——第三方 agent 丢推理回传即命中。
+
+    参考口径（三家交叉验证取并集）：
+
+    - 2api-panel `backfillReasoningContent`（主档，同款 WorkBuddy 上游实证）：
+      deepseek 系**全量** assistant 回填，门控 = ``thinkingEnabled || hasTrace``
+      （注入 enabled 后零痕迹也补，issue #165）；值分支：rc 已是 string 保留 →
+      复制非空 ``reasoning`` → 否则补 ``""``；并镜像 ``reasoning``（非空保留 →
+      rc 非空写 rc → 皆无补空格 ``" "``——部分租户校验 ``len(reasoning)>0``，
+      空白串过闸、空串不过）。
+    - 9router `reasoningContentInjector`（模型级补充）：``kimi-`` 系**仅工具回合**
+      （带 tool_calls 的 assistant）补 ``" "`` 占位——kimi 只在工具调用链路校验。
+    - chatcoder（交叉印证）：仅工具回合输出 rc——同「工具回合是关键点」结论。
+
+    调用时机：``transform_request`` 中 ``_apply_thinking`` 与工具配对修复**之后**、
+    最终 messages 上执行（参考管线同序）；``thinking_enabled`` 取注入后
+    ``thinking.type == "enabled"``。
+    """
+    if not messages:
+        return
+    if _is_deepseek_model(model):
+        if not thinking_enabled and not _has_reasoning_trace(messages):
+            return  # disabled + 零痕迹 → 零改动（官方门控两半边都不亮）
+        for m in messages:
+            if not isinstance(m, dict) or m.get("role") != "assistant":
+                continue
+            rc = m.get("reasoning_content")
+            if isinstance(rc, str):
+                pass  # 已有 string（含空串）→ 保留，不覆盖
+            else:
+                # 非 string（null/数字）按「无」处理（官方 "string" != typeof 语义）
+                r = m.get("reasoning")
+                rc = r if isinstance(r, str) else ""
+                m["reasoning_content"] = rc
+            r = m.get("reasoning")
+            if isinstance(r, str) and r:
+                continue  # reasoning 已非空 → 不覆盖
+            m["reasoning"] = rc if rc else " "  # 镜像（rc 优先；皆无补空白占位）
+        return
+    if _is_kimi_model(model):
+        for m in messages:
+            if not isinstance(m, dict) or m.get("role") != "assistant":
+                continue
+            tcs = m.get("tool_calls")
+            if not (isinstance(tcs, list) and tcs):
+                continue  # 仅工具回合（9router scope="toolCalls"）
+            rc = m.get("reasoning_content")
+            if isinstance(rc, str) and rc:
+                continue  # 已有非空 rc → 保留
+            m["reasoning_content"] = " "  # 占位（9router PLACEHOLDER）
 
 _platform_adapter = WorkBuddyAdapter()  # 复用账号层 ensure_token（per-uid 刷新锁）
 
@@ -213,11 +291,18 @@ class WorkBuddyChatAdapter:
             body["tools"] = request.tools  # B5：原生透传（不做工具名伪装）
         # B4/BUG-3：思考形状（deepseek 系对齐官方客户端；其余模型维持 B4 透传口径）。
         self._apply_thinking(body, request)
-        # BUG-4 出站安全网（tool_pairing 参考同序：先重排再清理）：
-        # 修根后转换器正常产出不会断裂，这里兜住 agent 端历史里的畸形配对
-        # （孤立结果 / 无结果调用 / 结果间夹 developer），否则上游判 11148 顶死会话。
-        messages = cleanup_orphan_tool_calls(repack_tool_results(body["messages"]))
-        body["messages"] = messages
+        # BUG-4 出站安全网（一键三层：fill 补缺失占位 → repack 归位 → cleanup 裁孤儿，
+        # 参考管线同序）：修根后转换器正常产出不会断裂，这里兜住 agent 端历史里的畸形
+        # 配对（孤立结果 / 无结果调用 / 结果间夹 developer / 缺结果），否则上游判
+        # 11148 顶死会话。缺结果补显式占位而非假数据（对齐 chatcoder）。
+        body["messages"] = repair_tool_pairing(body["messages"])
+        # 多轮一致性：deepseek/kimi 回填 reasoning_content（2api-panel 主档 + 9router
+        # kimi 工具回合口径；见 `_backfill_reasoning_content`）。在配对修复之后执行——
+        # 此时 assistant 的 tool_calls 终态已定（kimi 分支按它判定「工具回合」）。
+        thinking = body.get("thinking")
+        thinking_enabled = (isinstance(thinking, dict)
+                            and str(thinking.get("type") or "").lower() == "enabled")
+        _backfill_reasoning_content(body["messages"], self._model, thinking_enabled)
         _neutralize_system_messages(body["messages"])
         return body
 
@@ -251,6 +336,9 @@ class WorkBuddyChatAdapter:
         if thinking_off:
             if self._off_mode == "default":
                 # 扩展位：「假关」= 不注入关闭/开启开关、不带档位，落上游默认（默认即思考）。
+                # 注意：接线该扩展位时需同步评估 `_backfill_reasoning_content` 的门控
+                # （它读注入后 thinking.type；假关不注入 → 落 hasTrace 半边）——
+                # 上游默认思考形态下若仍需多轮 rc 一致，应在此传「视为 enabled」信号。
                 return
             # 真关（用户拍板 2026-10-09：强制传关闭参数，探针直连实证 reasoning_tokens=0）
             body["thinking"] = {"type": "disabled"}
