@@ -123,6 +123,35 @@ def test_transform_effort_off_dropped():
     assert "reasoning_effort" not in body  # B4：off 上游不认识 → 删（落默认）
 
 
+def test_transform_applies_tool_pairing_safety_net():
+    """BUG-4：出站 messages 经 repack+cleanup——夹心后移、孤儿结果删除（双侧对称）。"""
+    a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
+    req = ChatRequest(model="m", messages=[
+        ChatMessage(role="assistant", content=None, tool_calls=[
+            {"id": "c1", "name": "Bash", "arguments": {}},
+            {"id": "c2", "name": "Bash", "arguments": {}}]),
+        ChatMessage(role="tool", tool_call_id="c1", content="1"),
+        ChatMessage(role="developer", content="notice"),
+        ChatMessage(role="tool", tool_call_id="c2", content="2"),
+        ChatMessage(role="tool", tool_call_id="ghost", content="x"),
+    ])
+    body = a.transform_request(req)
+    assert [m["role"] for m in body["messages"]] == ["assistant", "tool", "tool", "system"]
+    assert [m.get("tool_call_id") for m in body["messages"][1:3]] == ["c1", "c2"]
+    # 每条 assistant.tool_calls 的每个 id 都有紧随的 tool 结果；无孤儿
+    wire = body["messages"]
+    assert [tc["id"] for tc in wire[0]["tool_calls"]] == ["c1", "c2"]
+    assert [m["tool_call_id"] for m in wire[1:3]] == ["c1", "c2"]
+
+
+def test_transform_tool_free_messages_untouched(data_dir):
+    """无工具流量 → 安全网零改动（messages 内容与顺序不变）。"""
+    a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
+    body = a.transform_request(REQ)
+    assert [m["role"] for m in body["messages"]] == ["user"]
+    assert body["messages"][0]["content"] == "hi"
+
+
 def test_transform_system_neutralized():
     """B3：agent 身份句/超长 system → 中性句；普通短 system 原样。"""
     a = _adapter(lambda r: _sse_response(["data: [DONE]"]))

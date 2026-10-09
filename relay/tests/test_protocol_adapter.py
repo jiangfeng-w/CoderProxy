@@ -143,6 +143,58 @@ def test_responses_parallel_function_calls_grouped():
     assert [tc["name"] for tc in req.messages[0].tool_calls] == ["a", "b"]
 
 
+def test_responses_interleaved_two_batches_keep_results_adjacent():
+    """BUG-4 回归：ZCode 形态 `fc,fc → fco,fco → fc → fco` 每批结果紧跟其 assistant。
+
+    断裂形态（批 2 assistant 插在批 1 结果之前）会致上游 400 code=11148。
+    """
+    req = pa.responses_to_chat_request({
+        "model": "m",
+        "input": [
+            {"type": "function_call", "call_id": "c1", "name": "a", "arguments": "{}"},
+            {"type": "function_call", "call_id": "c2", "name": "b", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "1"},
+            {"type": "function_call_output", "call_id": "c2", "output": "2"},
+            {"type": "function_call", "call_id": "c3", "name": "c", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c3", "output": "3"},
+        ],
+    })
+    seq = []
+    for m in req.messages:
+        if m.tool_calls:
+            seq.append(("calls", [tc["id"] for tc in m.tool_calls]))
+        elif m.role == "tool":
+            seq.append(("tool", m.tool_call_id))
+        else:
+            seq.append((m.role, m.content))
+    assert seq == [
+        ("calls", ["c1", "c2"]),
+        ("tool", "c1"),
+        ("tool", "c2"),
+        ("calls", ["c3"]),
+        ("tool", "c3"),
+    ]
+
+
+def test_responses_output_before_next_call_flushed_immediately():
+    """fco 到达时立即冲刷待发结果（先到先排）；结果之间的 message 不能插进结果前。"""
+    req = pa.responses_to_chat_request({
+        "model": "m",
+        "input": [
+            {"type": "function_call", "call_id": "c1", "name": "a", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "1"},
+            {"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "继续"}]},
+            {"type": "function_call", "call_id": "c2", "name": "b", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c2", "output": "2"},
+        ],
+    })
+    assert [(m.role, m.tool_call_id or m.content) for m in req.messages] == [
+        ("assistant", None), ("tool", "c1"), ("user", "继续"),
+        ("assistant", None), ("tool", "c2"),
+    ]
+
+
 def test_responses_nameless_function_call_skipped():
     """无名 function_call 丢弃（上游拒绝，9router #444）。"""
     req = pa.responses_to_chat_request({

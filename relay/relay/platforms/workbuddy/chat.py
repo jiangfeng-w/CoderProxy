@@ -34,6 +34,7 @@ from relay.platforms.base import PlatformUpstreamError
 from relay.platforms.workbuddy import oauth
 from relay.platforms.workbuddy.adapter import WorkBuddyAdapter
 from relay.platforms.workbuddy.client import CN_ORIGIN, derive_stable_id
+from relay.tool_repair import cleanup_orphan_tool_calls, repack_tool_results
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,11 @@ class WorkBuddyChatAdapter:
             body["reasoning_effort"] = effort
             if effort != "none":
                 body["reasoning_summary"] = "auto"  # B4：上游暴露思考的配对参数
+        # BUG-4 出站安全网（tool_pairing 参考同序：先重排再清理）：
+        # 修根后转换器正常产出不会断裂，这里兜住 agent 端历史里的畸形配对
+        # （孤立结果 / 无结果调用 / 结果间夹 developer），否则上游判 11148 顶死会话。
+        messages = cleanup_orphan_tool_calls(repack_tool_results(body["messages"]))
+        body["messages"] = messages
         _neutralize_system_messages(body["messages"])
         return body
 

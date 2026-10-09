@@ -379,6 +379,10 @@ def responses_to_chat_request(body: dict) -> ChatRequest:
             ))
 
         elif item_type in (_RESPONSES_ITEM_FUNCTION_CALL, _RESPONSES_ITEM_CUSTOM_TOOL_CALL):
+            # BUG-4 批间守序：开/续本批 assistant 之前，先把上一批待发结果落盘。
+            # 否则 `fc,fc→fco,fco→fc,fco` 会产出「asst(C1,C2) → asst(C3) → tool C1,C2,C3」
+            # 的断裂形态（assistant 插进前一批结果之前），上游判 11148 并顶死整条会话。
+            flush_tool_results()
             if current_assistant is None:
                 current_assistant = ChatMessage(role="assistant", content=None, tool_calls=[])
             name = item.get("name")
@@ -398,7 +402,10 @@ def responses_to_chat_request(body: dict) -> ChatRequest:
 
         elif item_type in (_RESPONSES_ITEM_FUNCTION_CALL_OUTPUT,
                            _RESPONSES_ITEM_CUSTOM_TOOL_CALL_OUTPUT):
+            # BUG-4 对齐 9router（openai-responses.js）：先推 assistant，再立即推送
+            # 待发结果（先到先排）——保证结果先于后续任何消息落盘，不被攒到批末。
             flush_assistant()
+            flush_tool_results()
             pending.append(ChatMessage(
                 role="tool",
                 tool_call_id=_clamp_responses_call_id(item.get("call_id")),

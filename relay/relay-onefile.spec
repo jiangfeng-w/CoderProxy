@@ -39,6 +39,8 @@ hiddenimports = [
     "relay.custom_openai",
     "relay.platforms.workbuddy.chat",
     "relay.platforms.workbuddy.catalog",
+    # 工具配对安全网（BUG-4 出站安全网）：chat.py 静态导入，双保险登记
+    "relay.tool_repair",
 ]
 
 a = Analysis(
