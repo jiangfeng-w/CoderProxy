@@ -317,3 +317,83 @@ class _FakeOkProvider:
         yield {"type": "done", "content": "ok", "thinking": None, "tool_calls": [],
                "finish_reason": "stop",
                "usage": None, "raw_tail": None}
+
+
+# ─────────────────── 方案 A：工具伪装只对牛码（2026-10-09 修复） ───────────────────
+
+_GREP_TOOL = {"type": "function",
+              "function": {"name": "Grep", "parameters": {"type": "object",
+                                                          "properties": {}}}}
+
+
+def _tool_disguise_count() -> int:
+    return routes_mod.monitor.stats().get("tool_disguise", 0)
+
+
+class _CaptureToolsProvider(_FakeOkProvider):
+    """捕获 chat 收到的 request.tools（伪装门控断言用）。"""
+
+    def __init__(self):
+        self.tools = None
+
+    async def chat(self, request):
+        self.tools = request.tools
+        return await super().chat(request)
+
+
+def test_niucode_tools_still_disguised(client, monkeypatch):
+    """牛码链路不受门控影响：Grep → Search（原生 schema），监控计数照常。"""
+    _run(storage.save_models(_MODELS))
+    cap = _CaptureToolsProvider()
+    monkeypatch.setattr(routes_mod, "build_provider", lambda model, name, ctx=None: cap)
+    before = _tool_disguise_count()
+    r = client.post("/v1/chat/completions",
+                    json={"model": "glm-5.3",
+                          "messages": [{"role": "user", "content": "hi"}],
+                          "tools": [_GREP_TOOL]},
+                    headers=_auth())
+    assert r.status_code == 200
+    assert [t["function"]["name"] for t in cap.tools] == ["Search"]  # 已伪装为牛码原生名
+    assert _tool_disguise_count() == before + 1
+
+
+def test_workbuddy_tools_pass_through_unmodified(client, monkeypatch):
+    """WorkBuddy 链路：工具原名直达 adapter（无 ctx），不产生 tool_disguise 监控。
+
+    修复前：无条件跑 build_disguise_context 且 adapter 分支不接收 ctx →
+    `Grep→Search`、`Skill→ReadSkill` 改名直发上游、无任何还原路径。
+    """
+    from relay import adapter_registry
+
+    captured: dict = {}
+
+    class _FakeWb:
+        def __init__(self, bare):
+            self._bare = bare
+
+        async def chat(self, request):
+            from app.models.schemas import ChatResponse, Usage
+            captured["tools"] = request.tools
+            return ChatResponse(content="wb-ok", finish_reason="stop",
+                                usage=Usage(prompt_tokens=1, completion_tokens=1,
+                                            total_tokens=2))
+
+    async def _dir():
+        return [{"name": "glm-5.3-flash"}]
+
+    adapter_registry.register_provider("WorkBuddy", directory=_dir,
+                                       factory=lambda bare, **kw: _FakeWb(bare))
+    try:
+        before = _tool_disguise_count()
+        r = client.post("/v1/chat/completions",
+                        json={"model": "WorkBuddy/glm-5.3-flash",
+                              "messages": [{"role": "user", "content": "hi"}],
+                              "tools": [_GREP_TOOL]},
+                        headers=_auth())
+        assert r.status_code == 200
+        assert [t["function"]["name"] for t in captured["tools"]] == ["Grep"]  # 原名透传
+        assert _tool_disguise_count() == before  # 无伪装监控（ctx=None 不 emit）
+    finally:
+        adapter_registry.unregister_provider("WorkBuddy")
+        from relay.platforms.workbuddy.chat import factory
+        adapter_registry.register_provider("WorkBuddy", factory=factory)

@@ -199,7 +199,10 @@ def test_routes_custom_provider_end_to_end(tmp_path, monkeypatch):
 
         r = client.post("/v1/chat/completions",
                         json={"model": "基元律动/glm-5.3-flash",
-                              "messages": [{"role": "user", "content": "hi"}]},
+                              "messages": [{"role": "user", "content": "hi"}],
+                              "tools": [{"type": "function",
+                                         "function": {"name": "Grep",
+                                                      "parameters": {"type": "object"}}}]},
                         headers={"Authorization": "Bearer custom-test-key"})
         assert r.status_code == 200
         body = r.json()
@@ -208,6 +211,9 @@ def test_routes_custom_provider_end_to_end(tmp_path, monkeypatch):
     assert len(seen) == 1
     assert seen[0].headers["authorization"] == "Bearer sk-test"
     assert str(seen[0].url).endswith("/v1/chat/completions")
+    # 方案 A（2026-10-09）：工具伪装只对牛码——自定义供应商工具原名直达上游
+    sent = json.loads(seen[0].content)
+    assert [t["function"]["name"] for t in sent["tools"]] == ["Grep"]
 
     settings.relay_api_key = ""
 

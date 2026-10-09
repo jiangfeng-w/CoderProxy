@@ -421,7 +421,7 @@ async def _refresh_provider_credentials(model_name: str, model: dict, ctx):
 
 async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
                           include_usage: bool,
-                          ctx: tool_disguise.DisguiseContext,
+                          ctx: tool_disguise.DisguiseContext | None,
                           usage_collector: oai_adapter.UsageCollector | None = None,
                           *, probe: bool = False,
                           ) -> AsyncIterator[str]:
@@ -474,7 +474,7 @@ async def _sse_with_retry(model_name: str, chat_request: ChatRequest,
 
 
 async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
-                           ctx: tool_disguise.DisguiseContext, *,
+                           ctx: tool_disguise.DisguiseContext | None, *,
                            probe: bool = False):
     """非流式；两类重试独立预算（同 _sse_with_retry）：
 
@@ -704,9 +704,19 @@ async def _handle_chat(request: Request, path_protocol: str):
         if source_tools:
             await tool_inventory.record_tools(source_tools, chat_request.model)
 
-    # M3：按模式编排出站 tools schema，并把请求级映射表交给 provider
-    ctx = tool_disguise.build_disguise_context(chat_request.tools, settings.tool_mode)
-    chat_request.tools = ctx.outbound_tools
+    # M3：按模式编排出站 tools schema，并把请求级映射表交给 provider。
+    # 门控（2026-10-09 修复）：工具名伪装为**牛码链路专属**——WorkBuddy 上游原生支持
+    # tools（B5 实测）、spec §4.5.3 明文「不做工具名伪装」；自定义供应商为其自身
+    # OpenAI 兼容语义，同样不得替它改写工具名。此前无条件跑伪装、且 adapter 分支
+    # 不接收 ctx（改后名无任何还原路径），会把 `Grep→Search`、`Skill→ReadSkill` 等
+    # 直接发给 WorkBuddy/自定义上游，agent 认不出回流的工具名。非牛码链路 ctx=None：
+    # tools 原样透传，伪装监控不计数（工具映射统计只属于牛码链路）。
+    is_niu = model_ref.parse_model_ref_lenient(chat_request.model).is_niucode
+    if is_niu:
+        ctx = tool_disguise.build_disguise_context(chat_request.tools, settings.tool_mode)
+        chat_request.tools = ctx.outbound_tools
+    else:
+        ctx = None
 
     stream = chat_request.stream
     # Responses/Anthropic 入站协议没有 OpenAI 的 stream_options：按协议语义取
@@ -717,19 +727,20 @@ async def _handle_chat(request: Request, path_protocol: str):
 
     # M4 监控：记录请求与工具伪装统计（GUI 日志面板数据源）
     monitor.emit("chat_request", model=chat_request.model, stream=stream,
-                 tools=len(ctx.outbound_tools))
+                 tools=len(chat_request.tools or []))
     # M6：chat_request 落库（tools 数走 detail 兜底，不建独立列，不入统计口径）；
     # detail 同时记录思考下发态（agent 显式传参或 relay 兜底后的最终值），
     # 以及入站协议（多协议排查/统计），供日志页/验收核对
     await _log_db("chat_request", model=chat_request.model, stream=1 if stream else 0,
-                  detail={"tools": len(ctx.outbound_tools),
+                  detail={"tools": len(chat_request.tools or []),
                           "thinking": chat_request.thinking,
                           "thinking_effort": chat_request.reasoning_effort,
                           "protocol": response_protocol})
-    monitor.emit("tool_disguise", mode=ctx.mode,
-                 map_hits=ctx.tool_map_hits,
-                 longtail_passthrough=ctx.tool_longtail_passthrough,
-                 dropped=ctx.tool_dropped)
+    if ctx is not None:
+        monitor.emit("tool_disguise", mode=ctx.mode,
+                     map_hits=ctx.tool_map_hits,
+                     longtail_passthrough=ctx.tool_longtail_passthrough,
+                     dropped=ctx.tool_dropped)
 
     if stream:
         # 流式请求：SSE 建立前先做模型/白名单校验。此前校验在 gen() 内、响应头 200
@@ -799,9 +810,9 @@ async def _handle_chat(request: Request, path_protocol: str):
                     for frame in assembler.finish():
                         yield frame
                 monitor.emit("chat_done", model=chat_request.model, stream=True,
-                             map_hits=ctx.tool_map_hits,
-                             longtail=ctx.tool_longtail_passthrough,
-                             dropped=ctx.tool_dropped)
+                             map_hits=ctx.tool_map_hits if ctx else 0,
+                             longtail=ctx.tool_longtail_passthrough if ctx else 0,
+                             dropped=ctx.tool_dropped if ctx else 0)
                 usage = collector.usage
                 await _log_db("chat_done", model=chat_request.model, stream=1,
                               duration_ms=collector.duration_ms,
@@ -840,9 +851,9 @@ async def _handle_chat(request: Request, path_protocol: str):
         raise
     duration_ms = max(0, int((time.monotonic() - started_at) * 1000))
     monitor.emit("chat_done", model=chat_request.model, stream=False,
-                 map_hits=ctx.tool_map_hits,
-                 longtail=ctx.tool_longtail_passthrough,
-                 dropped=ctx.tool_dropped)
+                 map_hits=ctx.tool_map_hits if ctx else 0,
+                 longtail=ctx.tool_longtail_passthrough if ctx else 0,
+                 dropped=ctx.tool_dropped if ctx else 0)
     await _log_db("chat_done", model=chat_request.model, stream=0,
                   duration_ms=duration_ms, **_usage_log_fields(response.usage))
     if response_protocol == PROTOCOL_RESPONSES:
