@@ -177,6 +177,11 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
 - [x] 细化定稿（2026-10-08）：A1 前缀体系（用户拍板）/ A2 选号策略 / A3 目录与模型区 / A4 服务门控与自定义供应商；B1–B8 聊天契约小号实测全部落证（[探针-wb聊天契约.py](探针-wb聊天契约.py)）
 - [x] 实现后补全（2026-10-09）：双 provider 路由正确性（adapter 注册表 + 前缀解析）/ 账号池轮转与 401 刷新下沉（`refresh_credentials` 钩子）/ 牛码回归（登录态 + 前缀目录 + 单模型端点；主账号封禁，对话待解封用小号补测）/ WorkBuddy 小号聊天冒烟 / 自定义供应商转发冒烟——pytest 367 passed + e2e 冒烟 19 项全绿
 - [x] 打包产物冒烟（2026-10-09，[冒烟-三provider-e2e.py](冒烟-三provider-e2e.py)）：三 provider 模型列表（牛码 5 + WorkBuddy 45 合并）+ WorkBuddy 流式/非流式对话 + 工具透传 + 自定义供应商真转发——19/19 通过（隔离数据目录、真 exe 产物）
+- [x] 实测四 bug 修复（2026-10-09 深夜会话，见 [交接-四bug修复.md](交接-四bug修复.md)）：
+  - **BUG-4** 工具配对断裂致上游 11148：转换器修根（批间守序 + 先到先排）+ 新建 `relay/relay/tool_repair.py` 出站安全网（repack/cleanup 双侧对称，移植 `tool_pairing.go`）——复现脚本 A 组产出已变修复形态、A/B 双双 200；单测 +17
+  - **BUG-3** deepseek 系思考开关注入：`_apply_thinking` 注入 `thinking:{type:"enabled"}` + 缺档补目录默认档/超范围降级；「关」= 真关 `{type:"disabled"}`（直连小号实证 reasoning_tokens=0）——探针五形状全达预期；单测 +11
+  - **BUG-1/BUG-2** 供应商页模型区：牛码 tab 前缀过滤与 tab 作用域聚合；WorkBuddy 卡片对齐（滑杆开关/点击复制/上下文列/默认思考强度列，抽公共组件 `frontend/src/components/ModelEffortSelect.vue`）——dev 实测：牛码 tab 5/5、WB 46 条含滑杆与档位下拉；「全部禁用（牛码）」白名单 50→45 且 WB 45 条分毫未动
+  - 全量 pytest **395 passed**（基线 367 + 28 新增）
 
 ### 与多协议端点兼容的验收衔接（2026-10-08 补，2026-10-09 执行完毕）
 
