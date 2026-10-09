@@ -123,6 +123,113 @@ def test_transform_effort_off_dropped():
     assert "reasoning_effort" not in body  # B4：off 上游不认识 → 删（落默认）
 
 
+# ─────────────────────────── BUG-3：deepseek 系思考注入 ───────────────────────────
+
+_DSE_ENTRY = {"name": "deepseek-v4.1-flash",
+              "completion_options": {"defaultEffort": "high",
+                                     "thinkingLevels": [{"level": "low"}, {"level": "high"},
+                                                        {"level": "max"}]}}
+
+
+def _dse_adapter(entry=None, **kw):
+    return wbchat.WorkBuddyChatAdapter("deepseek-v4.1-flash",
+                                       model_entry=entry if entry is not None else _DSE_ENTRY,
+                                       transport=_transport(lambda r: _sse_response(["data: [DONE]"])),
+                                       **kw)
+
+
+def _dse_req(**kw):
+    return ChatRequest(model="WorkBuddy/deepseek-v4.1-flash",
+                       messages=[ChatMessage(role="user", content="hi")], **kw)
+
+
+def test_deepseek_injects_enabled_with_explicit_effort():
+    """只有档位（chat 入站 effort=max）→ 注入 thinking.enabled 且保留档位。"""
+    body = _dse_adapter().transform_request(_dse_req(thinking=True, reasoning_effort="max"))
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "max"
+    assert body["reasoning_summary"] == "auto"
+
+
+def test_deepseek_backfills_default_effort_when_missing():
+    """enabled 但缺档（messages/claude 入站仅 thinking）→ 补目录默认档。"""
+    body = _dse_adapter().transform_request(_dse_req(thinking=True))
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "high"  # 目录 defaultEffort
+    assert body["reasoning_summary"] == "auto"
+
+
+def test_deepseek_no_thinking_at_all_backfills_default():
+    """无任何思考字段 → 同样注入 enabled + 默认档（对齐官方客户端）。"""
+    body = _dse_adapter().transform_request(_dse_req())
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "high"
+
+
+def test_deepseek_default_effort_falls_back_to_high():
+    """无目录条目 → 兜底 "high"（参考 defaultDeepSeekEffort）。"""
+    body = _dse_adapter(entry={}).transform_request(_dse_req(thinking=True))
+    assert body["reasoning_effort"] == "high"
+
+
+def test_deepseek_effort_downgraded_to_supported():
+    """档位超支持范围（xhigh 不在 low/high/max）→ 降级到 ≤请求档的最高支持档。"""
+    body = _dse_adapter().transform_request(_dse_req(thinking=True, reasoning_effort="xhigh"))
+    assert body["reasoning_effort"] == "high"
+
+
+def test_deepseek_effort_floored_when_all_above():
+    """支持档全高于请求档（minimal → 支持 low/high/max）→ 取最低支持档。"""
+    body = _dse_adapter().transform_request(_dse_req(thinking=True, reasoning_effort="minimal"))
+    assert body["reasoning_effort"] == "low"
+
+
+def test_deepseek_unknown_effort_passthrough():
+    """未知档位（不在 rank 表）→ 原样透传（不降级、不报错）。"""
+    body = _dse_adapter().transform_request(_dse_req(thinking=True, reasoning_effort="turbo"))
+    assert body["reasoning_effort"] == "turbo"
+
+
+def test_deepseek_disabled_emits_disabled_without_effort():
+    """显式关（none/off/disabled/thinking=False）→ 真关形状：disabled，无档位无 summary。"""
+    for kw in ({"thinking": True, "reasoning_effort": "none"},
+               {"thinking": True, "reasoning_effort": "off"},
+               {"thinking": False},):
+        body = _dse_adapter().transform_request(_dse_req(**kw))
+        assert body["thinking"] == {"type": "disabled"}, kw
+        assert "reasoning_effort" not in body, kw
+        assert "reasoning_summary" not in body, kw
+
+
+def test_deepseek_off_mode_default_extension_point():
+    """扩展位（设置页「假关」落地前占位）：off_mode=default → 不注入任何思考字段。"""
+    body = _dse_adapter(thinking_off_mode="default").transform_request(
+        _dse_req(thinking=True, reasoning_effort="none"))
+    assert "thinking" not in body and "reasoning_effort" not in body
+
+
+def test_non_deepseek_untouched_by_injection():
+    """非 deepseek（glm）→ 零注入：无 thinking 键，B4 口径不变。"""
+    a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
+    body = a.transform_request(REQ)
+    assert "thinking" not in body and "reasoning_effort" not in body
+    body = a.transform_request(ChatRequest(
+        model="m", messages=[ChatMessage(role="user", content="hi")],
+        thinking=True, reasoning_effort="high"))
+    assert "thinking" not in body and body["reasoning_effort"] == "high"
+
+
+def test_deepseek_case_insensitive_prefix():
+    """模型名大小写无关（DeepSeek-… 也命中注入）。"""
+    a = wbchat.WorkBuddyChatAdapter("DeepSeek-V4-Pro", model_entry={},
+                                    transport=_transport(lambda r: _sse_response(["data: [DONE]"])))
+    body = a.transform_request(ChatRequest(
+        model="WorkBuddy/DeepSeek-V4-Pro",
+        messages=[ChatMessage(role="user", content="hi")], thinking=True))
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "high"
+
+
 def test_transform_applies_tool_pairing_safety_net():
     """BUG-4：出站 messages 经 repack+cleanup——夹心后移、孤儿结果删除（双侧对称）。"""
     a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
