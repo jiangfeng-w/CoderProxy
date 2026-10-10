@@ -366,6 +366,38 @@ def test_transform_tool_free_messages_untouched(data_dir):
     assert body["messages"][0]["content"] == "hi"
 
 
+def test_transform_relocates_misplaced_tool_result():
+    """BUG-4 收拢层：结果未紧邻（被 user 消息隔开）→ 出站收拢为 assistant 后紧跟。"""
+    a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
+    req = ChatRequest(model="m", messages=[
+        ChatMessage(role="assistant", content=None, tool_calls=[
+            {"id": "c1", "name": "Bash", "arguments": {}}]),
+        ChatMessage(role="user", content="中断后又说了一句"),
+        ChatMessage(role="tool", tool_call_id="c1", content="1"),
+    ])
+    body = a.transform_request(req)
+    wire = body["messages"]
+    assert [m["role"] for m in wire] == ["assistant", "tool", "user"]
+    assert wire[1]["tool_call_id"] == "c1"
+    assert wire[2]["content"] == "中断后又说了一句"  # 插入物后移、内容不动
+
+
+def test_transform_reorders_tool_results_to_declaration_order():
+    """BUG-4 归位层：批内结果乱序 → 出站按 tool_calls 声明序重排。"""
+    a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
+    req = ChatRequest(model="m", messages=[
+        ChatMessage(role="assistant", content=None, tool_calls=[
+            {"id": "c1", "name": "Bash", "arguments": {}},
+            {"id": "c2", "name": "Bash", "arguments": {}}]),
+        ChatMessage(role="tool", tool_call_id="c2", content="2"),
+        ChatMessage(role="tool", tool_call_id="c1", content="1"),
+    ])
+    body = a.transform_request(req)
+    wire = body["messages"]
+    assert [m.get("tool_call_id") for m in wire[1:3]] == ["c1", "c2"]
+    assert [m["content"] for m in wire[1:3]] == ["1", "2"]
+
+
 def test_transform_system_neutralized():
     """B3：agent 身份句/超长 system → 中性句；普通短 system 原样。"""
     a = _adapter(lambda r: _sse_response(["data: [DONE]"]))

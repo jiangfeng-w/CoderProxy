@@ -9,10 +9,17 @@
   模型知道该结果不可依赖）；
 - `repack_tool_results(messages)`：把夹在 assistant.tool_calls 与其 tool 结果之间的
   **非 tool 消息**后移，保证同一批 tool_call 的结果在 wire 上连续（Codex 的
-  `<image_resize_notice>` developer 消息会插在两份结果中间）；
+  `<image_resize_notice>` developer 消息会插在两份结果中间）；并归正结果批——
+  **错位收拢**（紧邻位置无本组结果时向后探测，找到则前移；对齐 magpie
+  `pairToolMessages` / LiteLLM Case A「不要求紧邻」口径）、**声明序归位**
+  （批内结果按 tool_calls 声明顺序重排，对齐 magpie/Reasonix）、**同 id 去重**
+  （批内同一 tool_call_id 只留最先一条——对齐 magpie `pairToolMessages`/qwen
+  `makeToolResultDeduper` 先到者口径；后到重复更可能是重放/回声，LiteLLM Case D
+  为「留最后」的少数派）；
 - `cleanup_orphan_tool_calls(messages)`：按 id 集合**双侧对称**裁剪孤儿——
   assistant.tool_calls 只留有结果配对的项（空了删 `tool_calls` 键），`role:tool`
-  只留调用被保留的项（孤儿结果整条删）。
+  只留调用被保留的项（孤儿结果整条删）；顺手清理**空 `tool_calls: []`** 键
+  （hermes `sanitize_api_messages` 口径，部分严格实现拒绝空数组）。
 
 背景：OpenAI 兼容协议要求带 tool_calls 的 assistant 之后**紧跟**其每条结果，
 中间夹任何消息、或任一侧缺配对，上游都会 400（WorkBuddy code=11148，
@@ -142,16 +149,30 @@ def repair_tool_pairing(messages: list) -> list:
 
 
 def repack_tool_results(messages: list) -> list:
-    """把插在 assistant.tool_calls 与其结果之间的非 tool 消息挪到整组之后。
+    """归正每批 assistant.tool_calls 的「结果段」：错位收拢 / 声明序 / 去重 / 夹心后移。
 
     ```text
     asst tool_calls=[c00 c01] | tool c00 | X | tool c01
-        → asst tool_calls=[c00 c01] | tool c00 | tool c01 | X
+        → asst tool_calls=[c00 c01] | tool c00 | tool c01 | X     （夹心后移）
+    asst tool_calls=[c00 c01] | user X | tool c00 | tool c01
+        → asst tool_calls=[c00 c01] | tool c00 | tool c01 | user X（错位收拢）
+    asst tool_calls=[c00 c01] | tool c01 | tool c00
+        → asst tool_calls=[c00 c01] | tool c00 | tool c01        （声明序归位）
     ```
 
-    只调顺序、不改内容；结果顺序保持不变（同批调用的原相对顺序 = 结果顺序）。
-    无插入消息时零改动（返回原对象）。下一组 assistant.tool_calls 是新的组头，
-    绝不会被当作插入物吞掉（否则它自己那批结果永远得不到重排）。
+    窗口探测（对齐 magpie `pairToolMessages` / LiteLLM Case A「不要求紧邻」口径）：
+    组头后向后扫到**下一个组头 / 非 dict / 列表尾**为止；窗口内有本组结果 → 收拢到
+    组头之后（夹心统一后移，彼此相对顺序保持）；没有 → 本组原地不动，交
+    `cleanup_orphan_tool_calls`。**非本组 tool**（孤儿/他组结果）不挡探测——随夹心
+    后移，孤儿由 cleanup 随后裁掉（否则孤儿夹在组头与结果之间会让乱序结果得不到
+    归位）。结果**按 tool_calls 声明顺序**稳定归位（并行工具结果常乱序；声明序即
+    上游位置式校验的对齐序）；同 id 重复只留**最先一条**（对齐 magpie
+    `pairToolMessages`/qwen `makeToolResultDeduper` 先到者口径；LiteLLM Case D 为
+    「留最后」——取「首读 = 原始结果、后到多为重放回声」语义）。
+
+    只调顺序、不改内容；无改动时返回原对象（identity 零分配）。下一组
+    assistant.tool_calls 是新的组头，绝不会被当作插入物吞掉（否则它自己那批结果
+    永远得不到重排）。
     """
     if len(messages) < 3:
         return messages
@@ -165,36 +186,41 @@ def repack_tool_results(messages: list) -> list:
             out.append(m)
             i += 1
             continue
-        want = set(_tool_call_ids(m))
-        out.append(m)
-        i += 1
+        order = {cid: k for k, cid in enumerate(_tool_call_ids(m))}
+        j = i + 1
         results: list = []
-        between: list = []
-        saw_non_tool = False
-        while i < n:
-            mm = messages[i]
-            if not isinstance(mm, dict):
-                break
-            role = mm.get("role")
-            if role == "tool":
+        others: list = []
+        while j < n:
+            mm = messages[j]
+            if not isinstance(mm, dict) or _is_group_head(mm):
+                break  # 下一组组头 / 非 dict：窗口边界
+            if mm.get("role") == "tool":
                 tid = mm.get("tool_call_id")
-                if not (isinstance(tid, str) and tid in want):
-                    break  # 不属于本组的结果（下一组/孤儿）：交外层处理
-                results.append(mm)
-                if saw_non_tool:
-                    changed = True
-                i += 1
-                continue
-            if not results:
-                break  # assistant 后还没有结果：交 cleanup_orphan_tool_calls 处理
-            if _is_group_head(mm):
-                break  # 下一组组头，绝不能当插入物吞掉
-            # 同批结果尚未收齐时，中间消息视为插入物，暂存待后移
-            between.append(mm)
-            saw_non_tool = True
+                if isinstance(tid, str) and tid in order:
+                    results.append(mm)
+                    j += 1
+                    continue
+                # 非本组 tool（孤儿/他组）：不挡探测，随夹心后移，cleanup 随后裁
+            others.append(mm)  # 夹心（user/developer/孤儿 tool 等）：声明序归位后后移
+            j += 1
+        if not results:
+            out.append(m)
             i += 1
-        out.extend(results)
-        out.extend(between)
+            continue  # 窗口内无本组结果：本组原地不动
+        deduped: dict = {}
+        for r in results:
+            deduped.setdefault(r["tool_call_id"], r)  # 同 id 先到者为准（后者丢弃）
+        ordered = sorted(deduped.values(), key=lambda r: order[r["tool_call_id"]])
+        candidate = ordered + others
+        if (len(candidate) == j - i - 1
+                and all(a is b for a, b in zip(candidate, messages[i + 1:j]))):
+            out.append(m)
+            out.extend(messages[i + 1:j])  # 已是合法形态：零改动路径
+        else:
+            changed = True
+            out.append(m)
+            out.extend(candidate)
+        i = j
     if not changed:
         return messages
     return out
@@ -208,7 +234,9 @@ def cleanup_orphan_tool_calls(messages: list) -> list:
       assistant 只留有结果的调用（过滤后为空则删 `tool_calls` 键，不删消息本身；
       内容为空字符串同样的空壳消息是合法 wire 形态）；`role:tool` 只在对应调用
       被保留时保留，否则删除整条消息；
-    - 无任何工具流量 → 原对象原样返回（零分配零改动）。
+    - 空 `tool_calls: []` 键顺手清理（hermes `sanitize_api_messages` 口径：部分
+      严格实现拒绝空数组；此类消息本身保留）；
+    - 无任何工具流量且无空 `tool_calls` → 原对象原样返回（零分配零改动）。
 
     部分保留不会留下无结果的 tool_call（两侧同口径），这是「让请求通过」的安全网。
     """
@@ -227,6 +255,9 @@ def cleanup_orphan_tool_calls(messages: list) -> list:
                 result_ids.add(tid)
                 has_traffic = True
         elif role == "assistant":
+            tcs = m.get("tool_calls")
+            if isinstance(tcs, list) and not tcs:
+                has_traffic = True  # 空 tool_calls 也是待清理对象
             for tid in _tool_call_ids(m):
                 call_ids.add(tid)
                 has_traffic = True
@@ -236,13 +267,18 @@ def cleanup_orphan_tool_calls(messages: list) -> list:
     keep_calls = {tid for tid in call_ids if tid in result_ids}
 
     # 1) assistant.tool_calls：按 keep_calls 对称裁剪——只留有结果的调用，
-    #    过滤后为空则删键（就地改写，同参考实现；无改动消息保持原样）。
+    #    过滤后为空则删键（就地改写，同参考实现；无改动消息保持原样）；
+    #    空数组键一并清理。
     changed = False
     for m in messages:
         if not isinstance(m, dict) or m.get("role") != "assistant":
             continue
         tcs = m.get("tool_calls")
-        if not isinstance(tcs, list) or not tcs:
+        if not isinstance(tcs, list):
+            continue
+        if not tcs:
+            m.pop("tool_calls", None)  # 空数组：部分严格实现拒绝，直接清键
+            changed = True
             continue
         kept: list = []
         for tc in tcs:

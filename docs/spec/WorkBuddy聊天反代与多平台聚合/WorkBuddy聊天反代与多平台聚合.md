@@ -187,6 +187,10 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
   - **配对补齐（fill 层）**：`tool_repair` 增 `fill_missing_tool_results`（缺结果调用补显式占位，对齐 chatcoder「补显式丢失占位而非假数据」；9router `fixMissingToolResponses` 只补空串，占位文案对模型更友好）+ `repair_tool_pairing` 一键三层（fill→repack→cleanup）
   - **backfillReasoningContent**：deepseek 系多轮 assistant 回填 `reasoning_content`（对齐 2api-panel issue #165：门控 `enabled || hasTrace`、值保留/复制/补空串、镜像 `reasoning` 空白占位）+ kimi 系仅工具回合补占位（9router `scope="toolCalls"` 口径）
   - 全量 pytest **413 passed**（上轮 395 + 本轮 18 新增；ruff 零新增告警）
+- [x] 配对安全网覆盖面补强（2026-10-10 第二轮，见 [已知问题.md](../../已知问题.md) BUG-004b）——业界二次调研（Codex normalize.rs / LiteLLM sanitize / magpie / Reasonix / hermes）后补四类形态：
+  - `repack_tool_results` 重写为**窗口探测**：错位收拢（结果未紧邻时向后探测、找到则前移；对齐 magpie `pairToolMessages` / LiteLLM Case A「不要求紧邻」）+ 批内结果**按声明序归位**（乱序修复）+ 同 id 去重留先到者；孤儿 tool 不挡探测（随夹心后移、cleanup 随后裁）
+  - `cleanup_orphan_tool_calls` 增空 `tool_calls: []` 键清理（hermes `sanitize_api_messages` 口径）
+  - 复现脚本加可选 `--case-c`（错位形态直连上游、小号 3 请求）：**2026-10-10 实测 = 400/11148**（`tool calls and tool results do not match`）——**错位形态上游同样拒绝、收拢层为必需**；A 组（转换器当前产出）200、B 组（手工正确形态）200 = 修根回归通过；单测 +17、全量 **445 passed**
 
 ### 与多协议端点兼容的验收衔接（2026-10-08 补，2026-10-09 执行完毕）
 

@@ -3,8 +3,10 @@ cleanup_orphan_tool_calls / repair_tool_pairing（一键三层）。
 
 纯函数级（wire dict 形态），对照参考 tool_pairing.go / chatcoder ensure_tool_pairing 语义：
 - fill：assistant.tool_calls 缺结果 → 补显式占位（不删调用、不动齐全批次）；
-- repack：结果间夹插入物 → 后移；下一组组头不被吞；无改动返回原对象；
-- cleanup：双侧对称裁剪（孤立结果删、无结果调用删/裁、批内部分保留）；
+- repack：结果间夹插入物 → 后移；错位结果 → 窗口探测收拢；批内结果按声明序归位；
+  同 id 重复留先到者；下一组组头不被吞；无改动返回原对象；
+- cleanup：双侧对称裁剪（孤立结果删、无结果调用删/裁、批内部分保留）；空
+  `tool_calls: []` 键清理；
 - repair：fill→repack→cleanup 串联，任何输入终态「无孤儿、无断裂」；
 - 无工具流量 → 原对象（零改动）。
 """
@@ -77,6 +79,76 @@ def test_repack_short_input_unchanged():
     assert repack_tool_results(two) is two
 
 
+def test_repack_relocates_misplaced_result_after_interstice():
+    """错位形态：asst[c1] | user X | tool c1 → 结果前移收拢、X 后移（不要求紧邻）。"""
+    msgs = [_asst(["c1"]), _user("X"), _tool("c1")]
+    out = repack_tool_results(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool", "user"]
+    assert out[1]["tool_call_id"] == "c1"
+    assert out[2] is msgs[1]  # 插入物后移、同对象
+
+
+def test_repack_window_without_result_left_in_place():
+    """窗口内无本组结果（纯孤儿调用）→ 原位不动、返回原对象（交 cleanup）。"""
+    msgs = [_asst(["c1"]), _user("X"), {"role": "assistant", "content": "next"}]
+    assert repack_tool_results(msgs) is msgs
+
+
+def test_repack_reorders_results_to_declaration_order():
+    """乱序结果：asst[c1,c2] | tool c2 | tool c1 → 按 tool_calls 声明序归位。"""
+    msgs = [_asst(["c1", "c2"]), _tool("c2", "2"), _tool("c1", "1")]
+    out = repack_tool_results(msgs)
+    assert [m.get("tool_call_id") for m in out[1:]] == ["c1", "c2"]
+    assert out[1]["content"] == "1" and out[2]["content"] == "2"  # 内容随消息走
+
+
+def test_repack_reorder_with_interstice():
+    """乱序 + 夹心并存：asst[c1,c2] | tool c2 | X | tool c1 → 结果声明序连续、X 后移。"""
+    msgs = [_asst(["c1", "c2"]), _tool("c2"), _dev("X"), _tool("c1")]
+    out = repack_tool_results(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool", "tool", "developer"]
+    assert [m.get("tool_call_id") for m in out[1:3]] == ["c1", "c2"]
+
+
+def test_repack_dedupes_same_id_keeps_first():
+    """同 id 重复结果：只留最先一条（后到者按重放/回声丢弃）。"""
+    msgs = [_asst(["c1"]), _tool("c1", "first"), _tool("c1", "second")]
+    out = repack_tool_results(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool"]
+    assert out[1]["content"] == "first"
+
+
+def test_repack_declaration_order_no_change_same_object():
+    """结果已按声明序连续 → 零改动（identity 保持）。"""
+    msgs = [_asst(["c1", "c2"]), _tool("c1"), _tool("c2"), _user("next")]
+    assert repack_tool_results(msgs) is msgs
+
+
+def test_repack_duplicate_noncontiguous_dedupes_keeps_first():
+    """重复 + 夹心：asst[c1] | tool c1(first) | X | tool c1(second) → 留先到、X 后移。"""
+    msgs = [_asst(["c1"]), _tool("c1", "first"), _dev("X"), _tool("c1", "second")]
+    out = repack_tool_results(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool", "developer"]
+    assert out[1]["content"] == "first"
+    assert out[2] is msgs[2]
+
+
+def test_repack_orphan_tool_does_not_block_relocation():
+    """孤儿 tool 挡在组头与乱序结果之间：不阻碍探测与归位（孤儿后移、交 cleanup 裁）。"""
+    msgs = [_asst(["c1", "c2"]), _tool("ghost"), _tool("c2"), _tool("c1")]
+    out = repack_tool_results(msgs)
+    assert [m.get("tool_call_id") for m in out[1:]] == ["c1", "c2", "ghost"]
+
+
+def test_repair_orphan_between_head_and_results_full_pipeline():
+    """全管线：asst[c1,c2] | tool ghost | tool c2 | tool c1 → 归位 + 孤儿删除。"""
+    msgs = [_asst(["c1", "c2"]), _tool("ghost"), _tool("c2", "2"), _tool("c1", "1")]
+    out = repair_tool_pairing(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool", "tool"]
+    assert [m.get("tool_call_id") for m in out[1:]] == ["c1", "c2"]
+    assert [m["content"] for m in out[1:]] == ["1", "2"]
+
+
 # ─────────────────────────── cleanup_orphan_tool_calls ───────────────────────────
 
 def test_cleanup_orphan_result_removed():
@@ -120,6 +192,24 @@ def test_cleanup_both_sides_trimmed_together():
     msgs = [_asst(["c1"]), _user("mid"), _tool("ghost"), _tool("c1")]
     out = cleanup_orphan_tool_calls(msgs)
     assert out == [_asst(["c1"]), _user("mid"), _tool("c1")]
+
+
+def test_cleanup_empty_tool_calls_key_removed():
+    """空 tool_calls: [] 键清理（消息本身保留、其余不动）——部分严格实现拒绝空数组。"""
+    empty = {"role": "assistant", "content": "答", "tool_calls": []}
+    msgs = [_user("hi"), empty]
+    out = cleanup_orphan_tool_calls(msgs)
+    assert "tool_calls" not in out[1]
+    assert out[1]["content"] == "答"
+
+
+def test_cleanup_empty_tool_calls_alongside_real_traffic():
+    """空 tool_calls 与真实工具流量并存：两条路径同帧清理（空键删 + 孤儿删）。"""
+    empty = {"role": "assistant", "content": "答", "tool_calls": []}
+    msgs = [_asst(["c1"]), _tool("c1"), empty, _tool("ghost")]
+    out = cleanup_orphan_tool_calls(msgs)
+    assert "tool_calls" not in out[2]
+    assert [m.get("tool_call_id") for m in out if m.get("role") == "tool"] == ["c1"]
 
 
 # ─────────────────────────── 组合（先 repack 再 cleanup） ───────────────────────────
@@ -247,3 +337,39 @@ def test_repair_malformed_full_pipeline():
     # 孤儿结果 ghost 已删；c3 的占位在（fill 语义）
     ids = [m.get("tool_call_id") for m in out if m.get("role") == "tool"]
     assert "ghost" not in ids and "c3" in ids
+
+
+def test_repair_misplaced_result_full_pipeline():
+    """错位形态全管线：asst[c1] | user X | tool c1 → 结果收拢紧跟、X 后移。"""
+    msgs = [_asst(["c1"]), _user("X"), _tool("c1", "res")]
+    out = repair_tool_pairing(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool", "user"]
+    assert out[1]["tool_call_id"] == "c1"
+    assert out[2]["content"] == "X"
+
+
+def test_repair_partial_missing_with_misplaced_real_result():
+    """部分缺 + 真实结果错位：asst[c1,c2] | user X | tool c1 →
+    c2 补占位、c1 归位，终态按声明序连续（占位排在真实结果之后）。"""
+    msgs = [_asst(["c1", "c2"]), _user("X"), _tool("c1", "real")]
+    out = repair_tool_pairing(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool", "tool", "user"]
+    assert [m["tool_call_id"] for m in out[1:3]] == ["c1", "c2"]
+    assert out[1]["content"] == "real"
+    assert out[2]["content"] == MISSING_RESULT_PLACEHOLDER
+
+
+def test_repair_duplicate_results_full_pipeline():
+    """重复结果全管线：同 id 两条 → 只留先到一条、批次连续。"""
+    msgs = [_asst(["c1"]), _tool("c1", "first"), _tool("c1", "second")]
+    out = repair_tool_pairing(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool"]
+    assert out[1]["content"] == "first"
+
+
+def test_repair_empty_tool_calls_full_pipeline():
+    """空 tool_calls 键全管线：键清除、消息保留、其余零改动。"""
+    msgs = [_user("hi"), {"role": "assistant", "content": "答", "tool_calls": []}]
+    out = repair_tool_pairing(msgs)
+    assert "tool_calls" not in out[1]
+    assert out[0] is msgs[0]

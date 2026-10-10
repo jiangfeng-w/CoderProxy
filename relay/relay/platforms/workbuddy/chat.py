@@ -291,10 +291,11 @@ class WorkBuddyChatAdapter:
             body["tools"] = request.tools  # B5：原生透传（不做工具名伪装）
         # B4/BUG-3：思考形状（deepseek 系对齐官方客户端；其余模型维持 B4 透传口径）。
         self._apply_thinking(body, request)
-        # BUG-4 出站安全网（一键三层：fill 补缺失占位 → repack 归位 → cleanup 裁孤儿，
-        # 参考管线同序）：修根后转换器正常产出不会断裂，这里兜住 agent 端历史里的畸形
-        # 配对（孤立结果 / 无结果调用 / 结果间夹 developer / 缺结果），否则上游判
-        # 11148 顶死会话。缺结果补显式占位而非假数据（对齐 chatcoder）。
+        # BUG-4 出站安全网（一键三层：fill 补缺失占位 → repack 归位 → cleanup 裁孤儿/
+        # 清空数组，参考管线同序）：修根后转换器正常产出不会断裂，这里兜住 agent 端历史
+        # 里的畸形配对（孤立结果 / 无结果调用 / 结果间夹 developer / 缺结果 / 错位 /
+        # 乱序 / 重复结果 / 空 tool_calls），否则上游判 11148 顶死会话。缺结果补显式
+        # 占位而非假数据（对齐 chatcoder）。
         body["messages"] = repair_tool_pairing(body["messages"])
         # 多轮一致性：deepseek/kimi 回填 reasoning_content（2api-panel 主档 + 9router
         # kimi 工具回合口径；见 `_backfill_reasoning_content`）。在配对修复之后执行——

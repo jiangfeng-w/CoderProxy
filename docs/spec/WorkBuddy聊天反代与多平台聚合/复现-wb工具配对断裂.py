@@ -1,17 +1,20 @@
 #!/usr/bin/env python
-"""bug4 实证：responses 并行工具调用 → 出站消息顺序断裂 → 上游 11148（只读小号，2 请求）。
+"""bug4 实证：responses 并行工具调用 → 出站消息顺序断裂 → 上游 11148（只读小号，默认 2 请求）。
 
-用法：py -3.13 "docs/spec/WorkBuddy聊天反代与多平台聚合/复现-wb工具配对断裂.py"
+用法：py -3.13 "docs/spec/WorkBuddy聊天反代与多平台聚合/复现-wb工具配对断裂.py" [--case-c]
 
 做两件事：
 1. 用 `responses_to_chat_request` 转换 ZCode 昨晚失败请求的等价 input（fc,fc → fco,fco
-   → fc → fco），打印产出的 messages 序列（复现断裂形态）；
-2. 对真实上游打两组 A/B：
-   A = 转换器产出（断裂形态）→ 预期 400（code=11148）
-   B = 同样内容、仅把 tool 结果紧跟到对应 assistant 之后 → 预期 200
-   两组都打印上游原始错误体（含 code），作为修复前/后回归依据。
+   → fc → fco），打印产出的 messages 序列；
+2. 对真实上游打两组 A/B（+可选 C）：
+   A = 转换器当前产出 → 修根前预期 400/11148（实证根因）；**修根后（BUG-002 已修复）
+       产出即为正确连续形态、预期 200**——此组现用作修根回归；
+   B = 手工正确形态（结果紧跟对应 assistant）→ 预期 200；
+   `--case-c` 追加 C = 错位形态（结果存在但未紧邻，asst[c1] | user | tool c1）：
+   **2026-10-10 实测 = 400/11148（tool calls and tool results do not match）**
+   → BUG-004b「错位收拢」层为必需（非保险）。
 
-安全：只读小号账号池；不打印 token；请求数固定 2。
+安全：只读小号账号池；不打印 token；默认 2 请求，`--case-c` 时 3 请求。
 """
 from __future__ import annotations
 
@@ -145,6 +148,18 @@ def messages_fixed() -> list:
     ]
 
 
+def messages_misplaced() -> list:
+    """错位形态：结果存在、但被 user 消息隔开（未被 cleanup 收拢前的形态）。"""
+    return [
+        {"role": "user", "content": "继续"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": C1, "type": "function", "function": {"name": "Bash", "arguments": "{}"}},
+        ]},
+        {"role": "user", "content": "（工具跑之前又补了一句）"},
+        {"role": "tool", "tool_call_id": C1, "content": "total 61"},
+    ]
+
+
 async def call_upstream(client: httpx.AsyncClient, acct: dict, messages: list) -> dict:
     body = {"model": MODEL, "stream": True, "max_tokens": 256, "messages": messages}
     out: dict = {"status": None, "error": None, "content": ""}
@@ -190,14 +205,23 @@ async def main() -> int:
 
     async with httpx.AsyncClient(trust_env=False) as client:
         a = await call_upstream(client, acct, wire)
-        print(f"\n[A] 断裂形态 → status={a['status']} error={a['error']}")
+        print(f"\n[A] 转换器当前产出 → status={a['status']} error={a['error']}")
         await asyncio.sleep(1.5)
         b = await call_upstream(client, acct, messages_fixed())
         print(f"[B] 修复形态 → status={b['status']} error={b['error']} "
               f"content={b['content'][:40]!r}")
-    ok = a["status"] != 200 and b["status"] == 200
-    print("\n== 结论：A 被拒 / B 放行 → 断裂顺序即 11148 根因 ==" if ok
-          else "== 结论：与预期不符，检查上游形状或账号状态 ==")
+        c = None
+        if "--case-c" in sys.argv:
+            await asyncio.sleep(1.5)
+            c = await call_upstream(client, acct, messages_misplaced())
+            print(f"[C] 错位形态（结果未紧邻）→ status={c['status']} error={c['error']}")
+    ok = a["status"] == 200 and b["status"] == 200
+    print("\n== 结论：A（修根后产出）与 B 均 200 → 修根回归通过 ==" if ok
+          else "== 结论：与预期不符（A 若 400/11148 = 修根回归失败；B 若 400 = 上游/账号异常）==")
+    if c is not None:
+        print("[C] 结论：" + ("上游拒绝错位形态 → 收拢层为必需（BUG-004b）"
+                              if c["status"] != 200
+                              else "上游容忍错位形态 → 收拢层为保险"))
     return 0
 
 
