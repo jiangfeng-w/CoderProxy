@@ -172,6 +172,14 @@ def _backfill_reasoning_content(messages: list[dict], model: str,
     调用时机：``transform_request`` 中 ``_apply_thinking`` 与工具配对修复**之后**、
     最终 messages 上执行（参考管线同序）；``thinking_enabled`` 取注入后
     ``thinking.type == "enabled"``。
+
+    ⚠ 实测警示（2026-10-10 静默丢弃实验，见 spec §3-G / 探针-wb-reasoning回放.py）：
+    本上游对历史 ``reasoning_content`` **白名单反序列化、静默丢弃**（同长标记放 rc 里
+    prompt_tokens +0、放 content 里 +481；暗号复述实验模型答「无」）。即回填的**值**
+    不会被模型读到——本函数的唯一价值是**过「必须回传」校验**（缺失即 400）。
+    因此：① 占位与真值同效，**勿投入「真值缓存回填」类升级**（零质量收益）；
+    ② 若未来要让模型真正记得历史思考，唯一机制是正文注入（`<thought>…</thought>`
+    进 content），属独立议题。
     """
     if not messages:
         return

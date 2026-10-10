@@ -192,6 +192,10 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
   - `cleanup_orphan_tool_calls` 增空 `tool_calls: []` 键清理（hermes `sanitize_api_messages` 口径）
   - 复现脚本加可选 `--case-c`（错位形态直连上游、小号 3 请求）：**2026-10-10 实测 = 400/11148**（`tool calls and tool results do not match`）——**错位形态上游同样拒绝、收拢层为必需**；A 组（转换器当前产出）200、B 组（手工正确形态）200 = 修根回归通过；单测 +17、全量 **445 passed**
   - **真机三协议回归收档（2026-10-10 晚）**：ZCode（claude）/ Qoder CN（openai）/ Codex 桌面端（responses）三客户端「多轮带工具」会话（含深链、中断→继续）——服务端 `chat_error=0`、reasoning 链路正常，BUG-004b 收档
+- [x] reasoning_content 静默丢弃实验（2026-10-10 晚，探针-wb-reasoning回放.py，小号 4+1 请求）：
+  - 同长标记放 `rc` 里 prompt_tokens **+0**、放 `content` 里 +481；暗号嵌 rc 追问模型答「无」——**上游白名单反序列化静默丢弃 rc**；
+  - 结论：字段级回填（含真值缓存）仅过 400 校验、模型收不到内容 → **真值缓存升级不立项**（现有占位回填维持，其价值=过校验）；`<thought>` 正文注入为唯一可让模型真记得的机制（独立议题，待用户拍板）
+  - 实测警示已写入 `chat.py::_backfill_reasoning_content` docstring（防未来重复投入）
 
 ### 与多协议端点兼容的验收衔接（2026-10-08 补，2026-10-09 执行完毕）
 
