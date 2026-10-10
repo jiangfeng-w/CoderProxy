@@ -6,8 +6,9 @@
 
 - A 段（多协议入站验收）：`/v1/responses`、`/v1/messages`、`/v1/chat/completions`
   三协议经 WorkBuddy 上游各一次；外加工具调用透传；
-- 聚合层：三 provider 目录合并（牛码 / WorkBuddy / 自定义）、白名单语义、
-  未启用 404、未知前缀 404、WorkBuddy 无账号 503；
+- 聚合层：三 provider 目录合并（牛码 / WorkBuddy / 自定义）、白名单语义（隔离目录内
+  自设基线，不依赖真实白名单）、未启用 404（探针模型自适应）、未知前缀 404、
+  WorkBuddy 无账号 503；
 - 牛码回归：登录态 + 前缀目录 + 单模型端点（**不触发真实对话**——主账号封禁，
   规则 5 只允许小号，真实对话待解封用小号补测）。
 
@@ -173,6 +174,14 @@ def main() -> int:
         shutil.copy2(WB_PATH, data / "platform_workbuddy.json")
     key = json.loads((data / "relay_state.json").read_text("utf-8"))["config"]["api_key"]
 
+    # 白名单基线（隔离目录内自设，不沿用真实白名单）：真实值可能含全部模型或为空
+    # （空=全启用），会让「未启用 404」断言失效、且请求被放行真打上游（2026-10-10
+    # 交接 §4 任务 3）。基线只含本次对话模型；后续用例（自定义供应商）自行合并追加。
+    state0 = json.loads((data / "relay_state.json").read_text("utf-8"))
+    state0["config"]["model_whitelist"] = [WB_MODEL]
+    (data / "relay_state.json").write_text(
+        json.dumps(state0, ensure_ascii=False, indent=2), "utf-8")
+
     # 假自定义供应商上游
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeUpstream)
     up_port = upstream.server_address[1]
@@ -205,11 +214,13 @@ def main() -> int:
         check("白名单写入（含 WorkBuddy 模型）",
               code == 200 and WB_MODEL in body)
 
-        # 未启用模型 → 404（白名单语义）
+        # 未启用模型 → 404（白名单语义；探针模型从目录自适应选取、不写死型号——
+        # 基线白名单只含 WB_MODEL，目录内任一其它 WB 模型即「未启用」）
+        probe = next((i for i in wb if i != WB_MODEL), "WorkBuddy/auto")
         code, body = _req(port, key, "/v1/chat/completions",
-                          {"model": "WorkBuddy/auto", "max_tokens": 16,
+                          {"model": probe, "max_tokens": 16,
                            "messages": [{"role": "user", "content": "hi"}]})
-        check("未启用模型 404（白名单生效）", code == 404)
+        check("未启用模型 404（白名单生效）", code == 404, f"model={probe}")
 
         # 未知前缀 → 404
         code, body = _req(port, key, "/v1/chat/completions",
