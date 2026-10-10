@@ -191,6 +191,7 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
   - `repack_tool_results` 重写为**窗口探测**：错位收拢（结果未紧邻时向后探测、找到则前移；对齐 magpie `pairToolMessages` / LiteLLM Case A「不要求紧邻」）+ 批内结果**按声明序归位**（乱序修复）+ 同 id 去重留先到者；孤儿 tool 不挡探测（随夹心后移、cleanup 随后裁）
   - `cleanup_orphan_tool_calls` 增空 `tool_calls: []` 键清理（hermes `sanitize_api_messages` 口径）
   - 复现脚本加可选 `--case-c`（错位形态直连上游、小号 3 请求）：**2026-10-10 实测 = 400/11148**（`tool calls and tool results do not match`）——**错位形态上游同样拒绝、收拢层为必需**；A 组（转换器当前产出）200、B 组（手工正确形态）200 = 修根回归通过；单测 +17、全量 **445 passed**
+  - **真机三协议回归收档（2026-10-10 晚）**：ZCode（claude）/ Qoder CN（openai）/ Codex 桌面端（responses）三客户端「多轮带工具」会话（含深链、中断→继续）——服务端 `chat_error=0`、reasoning 链路正常，BUG-004b 收档
 
 ### 与多协议端点兼容的验收衔接（2026-10-08 补，2026-10-09 执行完毕）
 
