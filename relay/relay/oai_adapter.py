@@ -146,7 +146,7 @@ def _parse_thinking(value) -> bool | None:
     """各家 thinking 字段形态 → bool|None。
 
     - bool：原样
-    - dict（GLM/Zhipu/Anthropic 风格）：{"type": "enabled"} → True，
+    - dict（GLM/Zhipu/Anthropic 风格）：{"type": "enabled"|"adaptive"} → True，
       {"type": "disabled"} → False，其余 → None
     - str："enabled"/"true"/"on" → True，"disabled"/"false"/"off" → False，其余 → None
     """
@@ -154,7 +154,7 @@ def _parse_thinking(value) -> bool | None:
         return value
     if isinstance(value, dict):
         t = str(value.get("type") or "").strip().lower()
-        if t == "enabled":
+        if t in ("enabled", "adaptive"):
             return True
         if t == "disabled":
             return False
@@ -166,6 +166,110 @@ def _parse_thinking(value) -> bool | None:
         if t in ("disabled", "false", "off"):
             return False
     return None
+
+
+# ─────────────── 思考信号统一提取（三协议入站共用，对齐 9router extractThinking） ───────────────
+
+_EFFORT_OFF_ALIASES = ("none", "off", "disabled")
+
+
+def _normalize_explicit_effort(value) -> str | None:
+    """显式档位值归一：`none`/`off`/`disabled` → `"none"`（关语义）；其余原样透传（F6）。"""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.lower() in _EFFORT_OFF_ALIASES:
+        return "none"
+    return text
+
+
+def _budget_to_effort(budget) -> str | None:
+    """budget_tokens → 档位名（阈值对齐 9router `budgetToLevel` 七档中点）。
+
+    旧口径封顶 high（4096/16384 两阈值），`max`/`xhigh` 永远不可达；≤0 视为
+    「未给档位」（thinking 仍开，等同 9router auto 分支），None/非法值 → None。
+    """
+    try:
+        b = int(budget)
+    except (TypeError, ValueError):
+        return None
+    if b <= 0:
+        return None
+    if b <= 768:
+        return "minimal"
+    if b <= 4096:
+        return "low"
+    if b <= 16384:
+        return "medium"
+    if b <= 28672:
+        return "high"
+    if b <= 80384:
+        return "xhigh"
+    return "max"
+
+
+def _extract_thinking_signals(body: dict) -> tuple[bool | None, str | None]:
+    """三协议入站共用的思考信号提取 → `(thinking, reasoning_effort)`。
+
+    信号面对齐 9router `extractThinking`（覆盖 chat/completions、responses、
+    messages 三条入站路径的混血形状）：
+
+    ① 显式关（`thinking.type=disabled` / `thinking=False` / 字符串 disabled/false/off）
+       → 恒判「关」（`True, "none"`）。**与 9router 的差异（有意）**：9router 里
+       `output_config.effort` 优先于 disabled；本实现让显式关最优（安全口径，
+       防「关」被伴发档位误升级；Anthropic 语义下 disabled 即不思考）。
+    ② `output_config.effort`（Claude 新形状显式档位；ZCode messages 模板即此字段）
+    ③ 顶层 `reasoning_effort`（OpenAI chat 标准；off/disabled 归 none）
+    ④ `reasoning.effort`（Responses 对象内；off/disabled 归 none）
+    ⑤ `thinking` 开（enabled/adaptive/True）+ `budget_tokens` 反推（≤0 = 无档位）
+    ⑥ `enable_thinking`（Qwen 形状）：False → 关；True → 开 + `thinking_budget` 反推
+
+    均未命中 → `(None, None)`（由 routes 层按默认思考策略兜底）。
+    注：`auto` 档位不做专门语义（F6 透传，交上游处理）。
+    """
+    thinking_cfg = body.get("thinking")
+    thinking_type = ""
+    if isinstance(thinking_cfg, dict):
+        thinking_type = str(thinking_cfg.get("type") or "").strip().lower()
+
+    # ① 显式关（任一形态）恒判「关」
+    if (thinking_cfg is False
+            or thinking_type == "disabled"
+            or (isinstance(thinking_cfg, str)
+                and thinking_cfg.strip().lower() in ("disabled", "false", "off"))):
+        return True, "none"
+
+    # ②③④ 显式档位（output_config > reasoning_effort > reasoning.effort）
+    output_cfg = body.get("output_config")
+    if isinstance(output_cfg, dict):
+        eff = _normalize_explicit_effort(output_cfg.get("effort"))
+        if eff:
+            return True, eff
+    eff = _normalize_explicit_effort(body.get("reasoning_effort"))
+    if eff:
+        return True, eff
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        eff = _normalize_explicit_effort(reasoning.get("effort"))
+        if eff:
+            return True, eff
+
+    # ⑤ thinking 开（+ budget 反推）
+    if _parse_thinking(thinking_cfg):
+        budget_eff = (_budget_to_effort(thinking_cfg.get("budget_tokens"))
+                      if isinstance(thinking_cfg, dict) else None)
+        return True, budget_eff
+
+    # ⑥ enable_thinking（Qwen 形状；+ thinking_budget 反推）
+    enable = _parse_thinking(body.get("enable_thinking"))
+    if enable is False:
+        return True, "none"
+    if enable is True:
+        return True, _budget_to_effort(body.get("thinking_budget"))
+
+    return None, None
 
 
 # 上游（牛码）风控按竞品系统提示的「身份指纹句」做大小写不敏感的精确子串封禁，
@@ -221,7 +325,8 @@ def apply_thinking_default(body: dict, request: ChatRequest, defaults: dict,
                            unset_mode: str = "default") -> None:
     """agent 未显式传思考参数时，按兜底策略下发（GUI 模型页/设置页配置）。
 
-    - agent 传了 thinking / enable_thinking / reasoning_effort 任一 → 尊重 agent，不动；
+    - agent 传了任何思考意图（thinking / enable_thinking / reasoning_effort /
+      output_config / reasoning 任一出现）→ 尊重 agent，不动；
     - unset_mode="off"（真关）：一律显式关思考，忽略每模型默认值；
     - unset_mode="default"（假关）：按每模型默认档位下发（未配置 = "none" 关）。
     "none" → thinking=True + reasoning_effort="none"，走 ta3.py 的
@@ -230,7 +335,12 @@ def apply_thinking_default(body: dict, request: ChatRequest, defaults: dict,
     键比较统一走前缀命名空间归一（§4.1）：request.model 与 defaults 的键都可能是
     「裸名 / `牛码/x` / `WorkBuddy/x`」形态，先归一到规范全名再比较。
     """
-    if (body.get("thinking") is not None or body.get("enable_thinking") is not None
+    # 「是否表态」用原始 body 判定（含未识别形态如 thinking:"auto"、未知 type——
+    # 传了就不覆盖）；与 routes 层「归一后 ChatRequest」判定互补：那层防已识别信号
+    # 被默认值覆盖，本层兜「未识别但确有意图」的形态。
+    if (body.get("thinking") is not None
+            or body.get("enable_thinking") is not None
+            or body.get("output_config") or body.get("reasoning")
             or body.get("reasoning_effort")):
         return
     if unset_mode == "off":
@@ -264,22 +374,12 @@ def oai_request_to_chat_request(body: dict) -> ChatRequest:
             **kwargs,
         ))
 
-    # thinking：显式字段优先，其次按 reasoning_effort 推断（启用思考）。
-    # 归一化非 bool 形态——GLM/智谱系（含 ZCode）发 {"type": "enabled"|"disabled", ...}，
-    # Qwen/阿里系发 enable_thinking 布尔，部分客户端发字符串；原样透传会在
-    # ChatRequest(bool|None) 校验炸成 500。
-    thinking = _parse_thinking(body.get("thinking"))
-    if thinking is None:
-        thinking = _parse_thinking(body.get("enable_thinking"))
-    reasoning_effort = body.get("reasoning_effort")
-    if thinking is None and reasoning_effort:
-        thinking = True
-    if thinking is False:
-        # agent 显式关思考（thinking: false / {"type": "disabled"}）→ 归一为
-        # thinking=True + effort="none"：ta3.py 仅在此组合下才真发 thinking:disabled，
-        # thinking=False 会什么都不发、落上游默认（大概率开思考），「关」语义丢失。
-        thinking = True
-        reasoning_effort = "none"
+    # thinking：统一提取器（三协议入站共用，信号面对齐 9router extractThinking）——
+    # 显式关/显式档位（output_config > reasoning_effort > reasoning.effort）/
+    # thinking 开+budget/enable_thinking（Qwen 形状）全覆盖；归一化非 bool 形态
+    # （GLM/智谱系发 {"type":"enabled"}、Qwen 发布尔、部分客户端发字符串），
+    # 原样透传会在 ChatRequest(bool|None) 校验炸成 500。
+    thinking, reasoning_effort = _extract_thinking_signals(body)
 
     return ChatRequest(
         messages=messages,

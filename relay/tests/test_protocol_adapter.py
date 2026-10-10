@@ -303,6 +303,26 @@ def test_responses_reasoning_effort_and_max_tokens():
     assert req.max_tokens == 4096
 
 
+# ── BUG-005 扩展：responses 路径的混血形状（对齐 9router extractThinking） ──
+
+
+def test_responses_output_config_effort_recognized():
+    """混血形状：responses 入站发 output_config.effort → 档位保留。"""
+    req = pa.responses_to_chat_request({
+        "model": "m", "input": "hi", "output_config": {"effort": "xhigh"},
+    })
+    assert req.thinking is True and req.reasoning_effort == "xhigh"
+
+
+def test_responses_reasoning_effort_off_alias_normalized():
+    """reasoning.effort 的 off/disabled 别名归一为「关」（none）。"""
+    for value in ("off", "disabled", "none"):
+        req = pa.responses_to_chat_request({
+            "model": "m", "input": "hi", "reasoning": {"effort": value},
+        })
+        assert req.thinking is True and req.reasoning_effort == "none", value
+
+
 def test_responses_max_completion_tokens_fallback():
     req = pa.responses_to_chat_request({"model": "m", "input": "hi",
                                         "max_completion_tokens": 512})
@@ -426,6 +446,69 @@ def test_anthropic_thinking_enabled_budget_to_effort():
         "messages": [{"role": "user", "content": "hi"}],
     })
     assert req.thinking is True and req.reasoning_effort == "medium"
+
+
+# ── BUG-005：output_config.effort 解析（ZCode messages 格式指定档位的真实字段） ──
+# 形状来源：ZCode 内置供应商模板 zcode-builtin.json（2026-10-10 实测提取）——
+# anthropic-messages 下 reasoningLevel 映射为 {"thinking":{"type":"enabled"|"adaptive"}}
+# + {"output_config":{"effort": <档位>}}；kimi 系模板只发 output_config。
+
+
+def _anthropic_req(**extra):
+    return pa.anthropic_to_chat_request({
+        "model": "WorkBuddy/glm-5.3-flash", "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "hi"}], **extra,
+    })
+
+
+def test_anthropic_output_config_effort_with_enabled():
+    """ZCode glm-5.3 形状：enabled + output_config.effort=max → 档位 max（核心修复点）。"""
+    req = _anthropic_req(thinking={"type": "enabled"},
+                         output_config={"effort": "max"})
+    assert req.thinking is True and req.reasoning_effort == "max"
+
+
+def test_anthropic_output_config_effort_with_adaptive():
+    """ZCode 新形状：adaptive + output_config.effort=xhigh → 档位 xhigh。"""
+    req = _anthropic_req(thinking={"type": "adaptive"},
+                         output_config={"effort": "xhigh"})
+    assert req.thinking is True and req.reasoning_effort == "xhigh"
+
+
+def test_anthropic_output_config_effort_only():
+    """ZCode kimi-k3 形状：只发 output_config.effort（无 thinking 块）→ 开思考 + 档位。"""
+    req = _anthropic_req(output_config={"effort": "high"})
+    assert req.thinking is True and req.reasoning_effort == "high"
+
+
+def test_anthropic_output_config_effort_priority_over_budget():
+    """优先级：output_config.effort 显式档位 > thinking.budget_tokens 反推（9router 同序）。"""
+    req = _anthropic_req(thinking={"type": "enabled", "budget_tokens": 8192},
+                         output_config={"effort": "max"})
+    assert req.reasoning_effort == "max"  # 非 budget 反推的 medium
+
+
+def test_anthropic_thinking_disabled_wins_over_output_config():
+    """显式关优先：thinking.type=disabled 恒为「关」，不被 output_config.effort 误升级。"""
+    req = _anthropic_req(thinking={"type": "disabled"},
+                         output_config={"effort": "high"})
+    assert req.thinking is True and req.reasoning_effort == "none"
+
+
+def test_anthropic_output_config_effort_none_is_off():
+    """output_config.effort=none/off/disabled → 关语义（effort=none），与 disabled 同义。"""
+    for value in ("none", "off", "disabled"):
+        req = _anthropic_req(output_config={"effort": value})
+        assert req.reasoning_effort == "none", value
+
+
+def test_anthropic_budget_to_effort_extended_levels():
+    """budget_tokens 阈值对齐 9router budgetToLevel：大预算可达 xhigh/max（旧口径封顶 high）。"""
+    cases = {512: "minimal", 1024: "low", 8192: "medium", 24576: "high",
+             32768: "xhigh", 128000: "max"}
+    for budget, expected in cases.items():
+        req = _anthropic_req(thinking={"type": "enabled", "budget_tokens": budget})
+        assert req.reasoning_effort == expected, f"{budget} → {expected}"
 
 
 def test_anthropic_tools_input_schema():

@@ -109,6 +109,59 @@ def test_parse_reasoning_effort_implies_thinking():
     assert req.thinking is True
 
 
+# ── BUG-005 扩展：三协议统一提取器（chat 路径的信号面补齐，对齐 9router） ──
+
+
+def test_parse_output_config_effort_in_chat_path():
+    """混血形状：chat 入站也发 output_config.effort（9router extractThinking 承认）→ 档位保留。"""
+    body = {"model": "m", "messages": [{"role": "user", "content": "x"}],
+            "output_config": {"effort": "max"}}
+    req = oai_request_to_chat_request(body)
+    assert req.thinking is True and req.reasoning_effort == "max"
+
+
+def test_parse_reasoning_object_effort_in_chat_path():
+    """reasoning.effort（Responses 形状）在 chat 路径同样识别。"""
+    body = {"model": "m", "messages": [{"role": "user", "content": "x"}],
+            "reasoning": {"effort": "high"}}
+    req = oai_request_to_chat_request(body)
+    assert req.thinking is True and req.reasoning_effort == "high"
+
+
+def test_parse_enable_thinking_with_budget():
+    """Qwen 形状扩展：enable_thinking=True + thinking_budget → 开 + budget 反推档位。"""
+    body = {"model": "m", "messages": [{"role": "user", "content": "x"}],
+            "enable_thinking": True, "thinking_budget": 32000}
+    req = oai_request_to_chat_request(body)
+    assert req.thinking is True and req.reasoning_effort == "xhigh"
+
+
+def test_parse_reasoning_effort_off_alias_normalized():
+    """顶部 reasoning_effort 的 off/disabled 别名归一为「关」（none）。"""
+    for value in ("off", "disabled"):
+        req = oai_request_to_chat_request(
+            {"model": "m", "messages": [{"role": "user", "content": "x"}],
+             "reasoning_effort": value})
+        assert req.thinking is True and req.reasoning_effort == "none", value
+
+
+def test_parse_thinking_adaptive_is_on():
+    """thinking.type=adaptive（Claude 新形状）在 chat 路径同样视为开思考。"""
+    req = oai_request_to_chat_request(
+        {"model": "m", "messages": [{"role": "user", "content": "x"}],
+         "thinking": {"type": "adaptive"}})
+    assert req.thinking is True
+
+
+def test_apply_thinking_default_respects_output_config():
+    """兜底门控：output_config 已表态 → 默认思考值不覆盖（raw-body 意图判定）。"""
+    body = {"model": "glm-5.3", "messages": [{"role": "user", "content": "x"}],
+            "output_config": {"effort": "max"}}
+    req = oai_request_to_chat_request(body)
+    apply_thinking_default(body, req, {"glm-5.3": "none"})
+    assert req.reasoning_effort == "max"  # 非被覆盖成 none
+
+
 def test_parse_thinking_dict_glm_style():
     """GLM/智谱系（ZCode）发 {"type": "enabled"}，不得在校验阶段炸 500。"""
     body = {

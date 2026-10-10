@@ -32,7 +32,7 @@ from typing import Any
 
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
-from relay.oai_adapter import _parse_thinking, _sanitize_fingerprint
+from relay.oai_adapter import _extract_thinking_signals, _sanitize_fingerprint
 
 # ─────────────────────────── 协议标识 ───────────────────────────
 
@@ -444,13 +444,9 @@ def responses_to_chat_request(body: dict) -> ChatRequest:
         if conv is not None:
             tools_out.append(conv)
 
-    thinking = _parse_thinking(body.get("thinking"))
-    reasoning_effort = None
-    reasoning = body.get("reasoning")
-    if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
-        reasoning_effort = reasoning["effort"]
-    if reasoning_effort and thinking is None:
-        thinking = True
+    # thinking：统一提取器（信号面对齐 9router extractThinking；兼容混血形状——
+    # reasoning.effort 为主，output_config.effort / 顶层 reasoning_effort 同识别）
+    thinking, reasoning_effort = _extract_thinking_signals(body)
 
     max_tokens = body.get("max_output_tokens")
     if max_tokens is None:
@@ -644,25 +640,12 @@ def anthropic_to_chat_request(body: dict) -> ChatRequest:
             },
         })
 
-    # thinking 归一（与 oai_adapter 关思考归一一致）
-    thinking_flag: bool | None = None
-    reasoning_effort = body.get("reasoning_effort")
-    if isinstance(reasoning_effort, str) and reasoning_effort:
-        thinking_flag = True
-    thinking_cfg = body.get("thinking")
-    if isinstance(thinking_cfg, dict):
-        ttype = str(thinking_cfg.get("type") or "")
-        if ttype == "disabled":
-            thinking_flag = True
-            reasoning_effort = "none"
-        elif ttype in ("enabled", "adaptive"):
-            thinking_flag = True
-            if not reasoning_effort:
-                reasoning_effort = _budget_to_effort(thinking_cfg.get("budget_tokens"))
-    elif isinstance(thinking_cfg, bool):
-        thinking_flag = True
-        if not thinking_cfg:
-            reasoning_effort = "none"
+    # thinking：统一提取器（三协议入站共用；信号面对齐 9router extractThinking——
+    # output_config.effort（ZCode messages 模板主字段）> 顶层 reasoning_effort >
+    # reasoning.effort > thinking+budget > enable_thinking；thinking.type=disabled
+    # 恒判「关」）。修复背景（BUG-005，2026-10-10）：此前只认 budget_tokens，
+    # output_config.effort 被直接丢弃 → /v1/messages 指定档位全落 effort=None。
+    thinking_flag, reasoning_effort = _extract_thinking_signals(body)
 
     return ChatRequest(
         messages=messages,
@@ -674,21 +657,6 @@ def anthropic_to_chat_request(body: dict) -> ChatRequest:
         reasoning_effort=reasoning_effort,
         thinking=thinking_flag,
     )
-
-
-def _budget_to_effort(budget: Any) -> str | None:
-    """Anthropic budget_tokens → 档位名（粗粒度；ta3 侧还会按模型归一）。"""
-    try:
-        b = int(budget)
-    except (TypeError, ValueError):
-        return None
-    if b <= 0:
-        return "none"
-    if b <= 4096:
-        return "low"
-    if b <= 16384:
-        return "medium"
-    return "high"
 
 
 def _anthropic_system_text(system: Any) -> str:
