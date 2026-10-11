@@ -12,7 +12,7 @@
 - POST   /v1/auth/logout         退出登录
 - POST   /v1/auth/sync           同步模型目录
 - GET    /v1/auth/config         中转配置展示（GUI）
-- POST   /v1/auth/config         写入 api_key / tool_mode / model_whitelist / regenerate_api_key
+- POST   /v1/auth/config         写入 api_key / tool_mode / model_whitelist / model_visibility / regenerate_api_key
 - GET    /v1/monitor/stats        统计计数快照（含工具映射聚合 tool_*）
 - GET    /v1/monitor/events       增量事件拉取（after_id）
 - POST   /v1/monitor/clear        清空事件与统计（GUI 日志页）
@@ -329,6 +329,35 @@ def _usage_log_fields(usage) -> dict:
     }
 
 
+async def _model_visible(ref: model_ref.ModelRef, model: dict) -> bool:
+    """模型可见性判定（模型列表过时治理 §4.2，relay 单点口径）。
+
+    用户覆盖（model_visibility show/hide）优先；默认规则：WorkBuddy 前缀 +
+    无思考档位（completion_options.thinkingLevels 空）→ 隐藏（无档位≈过时代）；
+    牛码 / 自定义供应商恒可见。
+    """
+    ov = (await storage.get_model_visibility()).get(ref.canonical)
+    if ov in storage.VISIBILITY_VALUES:
+        return ov == "show"
+    if ref.prefix != model_ref.PREFIX_WORKBUDDY:
+        return True
+    levels = (model.get("completion_options") or {}).get("thinkingLevels") or []
+    return bool(levels)
+
+
+async def _chat_model_allowed(ref: model_ref.ModelRef, model: dict, probe: bool) -> bool:
+    """chat 门控口径 = 可见性 ∩ 白名单（隐藏模型联动停用，§4.1）。
+
+    probe=True 豁免两者：探测请求必须真实到达上游（连通性测试-白名单豁免同款），
+    否则弹窗里「先测后显示/启用」对被隐藏模型永远 404。
+    """
+    if probe:
+        return True
+    if not await storage.is_model_enabled(ref.canonical):
+        return False
+    return await _model_visible(ref, model)
+
+
 async def _ensure_model(model_name: str, probe: bool = False) -> dict:
     """查模型条目；未找到时先同步（牛码）目录；白名单外模型视为不可用（M4）。
 
@@ -343,14 +372,14 @@ async def _ensure_model(model_name: str, probe: bool = False) -> dict:
     if not ref.is_niucode:
         return await _ensure_provider_model(ref, probe)
     model = await storage.find_model(ref.bare)
-    if model is not None and (probe or await storage.is_model_enabled(ref.canonical)):
+    if model is not None and await _chat_model_allowed(ref, model, probe):
         return model
     try:
         await auth_flow.sync_models()
     except Exception:  # noqa: BLE001（同步失败以 404 提示为准）
         pass
     model = await storage.find_model(ref.bare)
-    if model is None or (not probe and not await storage.is_model_enabled(ref.canonical)):
+    if model is None or not await _chat_model_allowed(ref, model, probe):
         raise HTTPException(
             status_code=404,
             detail=f"未知或未启用的模型: {model_name}"
@@ -373,7 +402,7 @@ async def _ensure_provider_model(ref: model_ref.ModelRef, probe: bool) -> dict:
             raise HTTPException(status_code=404, detail=f"未知供应商: {ref.prefix}")
         allow = [str(m).strip() for m in (entry.get("models") or [])]
         if ref.bare in allow:
-            if probe or await storage.is_model_enabled(ref.canonical):
+            if await _chat_model_allowed(ref, {"name": ref.bare}, probe):
                 return {"name": ref.bare, "provider": ref.prefix,
                         "custom_entry_id": str(entry.get("id") or "")}
             raise HTTPException(
@@ -387,6 +416,11 @@ async def _ensure_provider_model(ref: model_ref.ModelRef, probe: bool) -> dict:
         # 池不可用（如无 WorkBuddy 账号）与模型不存在语义区分：前者 503 引导配置
         if found is None and await adapter_registry.provider_available(ref.prefix) is False:
             raise PlatformUnavailableError(f"{ref.prefix} 账号不可用，请到供应商页添加账号")
+        raise HTTPException(
+            status_code=404, detail=f"未知或未启用的模型: {ref.canonical}")
+    # 可见性门控（模型列表过时治理）：只对目录命中的条目追加（found 存在才谈隐藏）；
+    # 隐藏 → 404（与白名单同文案，联动停用口径）。
+    if not await _chat_model_allowed(ref, found, probe):
         raise HTTPException(
             status_code=404, detail=f"未知或未启用的模型: {ref.canonical}")
     return {"name": ref.bare, "provider": ref.prefix, **found}
@@ -504,10 +538,11 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
 
 @app.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models(all: bool = False):
-    """模型目录（§4.1 前缀命名空间）。默认按白名单过滤；all=1 返回完整目录（GUI 用）。
+    """模型目录（§4.1 前缀命名空间）。默认按「可见性 ∩ 白名单」过滤；all=1 完整目录（GUI 用）。
 
     数据源 = 牛码目录（`牛码/…`；裸名条目加前缀）+ 已注册平台目录（`WorkBuddy/…` 等）
     + 已启用自定义供应商（`<name>/…`，模型清单手填）。
+    可见性（模型列表过时治理）：隐藏条目联动停用，agent 侧列表不出现（不变式：隐藏 ⇒ 已停用）。
     """
     if not all and not await _serving():
         raise HTTPException(status_code=503, detail="服务已停止，请登录并启动服务")
@@ -518,10 +553,21 @@ async def list_models(all: bool = False):
     if wl == [storage.DISABLE_ALL]:
         data = []
     elif wl:
-        data = [m for m in entries if m["id"] in wl]
+        data = [m for m in entries if m["id"] in wl and m["visible"]]
     else:
-        data = entries
+        data = [m for m in entries if m["visible"]]
     return {"object": "list", "data": data}
+
+
+def _visible_by_default(entry_id: str, efforts: list | None) -> bool:
+    """默认可见性（无用户覆盖时；模型列表过时治理 §4.2）。
+
+    WorkBuddy 前缀 + 无思考档位 → 隐藏（无档位≈过时代，用户拍板默认隐藏）；
+    牛码 / 自定义供应商恒可见（本期不参与治理，机制按前缀可扩展）。
+    """
+    if not entry_id.startswith(f"{model_ref.PREFIX_WORKBUDDY}/"):
+        return True
+    return bool(efforts)
 
 
 async def _all_model_entries() -> list[dict]:
@@ -529,6 +575,8 @@ async def _all_model_entries() -> list[dict]:
 
     同名前缀冲突（自定义供应商名撞内置前缀）：注册表命中者优先，自定义条目跳过
     （供应商页创建时已做 400 校验，此处为防御口径）。
+    每条目注入 `visible`（effective visibility，§4.2）：用户覆盖优先于默认规则，
+    口径 relay 单点计算，前端不复刻。
     """
     entries = [oai_adapter.model_to_openai(m, prefix=model_ref.PREFIX_NIUCODE)
                for m in await storage.load_models()]
@@ -545,6 +593,13 @@ async def _all_model_entries() -> list[dict]:
             continue
         for m in entry.get("models") or []:
             entries.append(oai_adapter.model_to_openai({"name": str(m)}, prefix=name))
+    overrides = await storage.get_model_visibility()
+    for e in entries:
+        ov = overrides.get(e["id"])
+        if ov in storage.VISIBILITY_VALUES:
+            e["visible"] = ov == "show"
+        else:
+            e["visible"] = _visible_by_default(e["id"], e.get("reasoning_efforts"))
     return entries
 
 
@@ -932,13 +987,14 @@ async def auth_config():
         "api_key": storage.relay_api_key(),
         "tool_mode": settings.tool_mode,
         "model_whitelist": await storage.get_model_whitelist(),
+        "model_visibility": await storage.get_model_visibility(),
         "thinking_defaults": await storage.get_thinking_defaults(),
     }
 
 
 @app.post("/v1/auth/config", dependencies=[Depends(require_api_key)])
 async def auth_config_update(request: Request):
-    """GUI 配置页写入：api_key / tool_mode / model_whitelist（部分更新）。
+    """GUI 配置页写入：api_key / tool_mode / model_whitelist / model_visibility（部分更新）。
 
     写路径固定：① 全字段校验（任一项非法即 400，不进入任何写）→
     ② 逐字段落盘（storage.save_*）→ ③ 落盘成功后同步内存运行值 →
@@ -964,6 +1020,17 @@ async def auth_config_update(request: Request):
     if model_whitelist is not None and not isinstance(model_whitelist, list):
         raise HTTPException(status_code=400, detail="模型列表格式不正确")
 
+    # 模型显示覆盖（模型列表过时治理 §4.3）：值仅 show/hide；与 model_whitelist
+    # 可同批提交（弹窗「显示/启用联动」成对写入靠同一 POST 落盘）。
+    model_visibility = body.get("model_visibility")
+    if model_visibility is not None and (
+        not isinstance(model_visibility, dict)
+        or not all(isinstance(k, str) and k.strip()
+                   and v in storage.VISIBILITY_VALUES
+                   for k, v in model_visibility.items())
+    ):
+        raise HTTPException(status_code=400, detail="模型显示覆盖格式不正确（值仅 show/hide）")
+
     thinking_defaults = body.get("thinking_defaults")
     if thinking_defaults is not None and (
         not isinstance(thinking_defaults, dict)
@@ -987,6 +1054,8 @@ async def auth_config_update(request: Request):
         settings.tool_mode = tool_mode
     if model_whitelist is not None:
         await storage.set_model_whitelist(model_whitelist)
+    if model_visibility is not None:
+        await storage.save_model_visibility(model_visibility)
     if thinking_defaults is not None:
         await storage.save_thinking_defaults(thinking_defaults)
     if port is not None:

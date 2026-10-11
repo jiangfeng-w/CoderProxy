@@ -34,8 +34,9 @@ async function pollStats() {
 }
 async function loadModels() {
   try {
-    // GUI 用完整目录（all=1），不受白名单过滤，失败模型仍需可见以便重新启用
-    models.value = (await getModels(true)).data
+    // GUI 用完整目录（all=1），不受白名单过滤，失败模型仍需可见以便重新启用；
+    // 模型列表过时治理：隐藏条目（visible=false）不在总览模型卡出现（弹窗可恢复）
+    models.value = (await getModels(true)).data.filter(m => m.visible !== false)
   } catch (e) {
     console.error('[overview] loadModels', e)
   }

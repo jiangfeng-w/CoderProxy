@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // WorkBuddy tab（供应商页 F4）：账号区=多账号卡片（昵称/配额/签到状态/连签天数）+
 // 添加（设备授权弹窗+轮询）/删除（二次确认）/签到（loading/已签到态）/配额刷新；
-// 模型区（本需求落地）：WorkBuddy 目录（/v1/models?all=1 过滤 WorkBuddy/ 前缀——
-// 目录来自 relay 的 v3/config 并集，转发已由聊天反代提供）+ 白名单启停 + 手动连通性测试。
+// 模型区：WorkBuddy 目录（all=1 过滤前缀；主列表仅可见模型）+ 白名单启停 + 手动连通性测试
+// + 「模型显示」弹窗（模型列表过时治理：无档位默认隐藏，显示/启用双开关联动——隐藏即停用）。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NButton, NCard, NEmpty, NModal, NPagination, NPopconfirm, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NEmpty, NInput, NModal, NPagination, NPopconfirm, NSwitch, NTag, useMessage } from 'naive-ui'
 import { getModels, openAuthorizeUrl, type OaiModel, type WbAccount } from '../../api'
 import { workbuddyStore } from '../../stores/workbuddy'
 import { store, useConfigStore } from '../../store'
@@ -24,14 +24,105 @@ const WB_PREFIX = 'WorkBuddy/'
 
 const filteredModels = computed(() => {
   const q = modelSearch.value.trim().toLowerCase()
-  return q ? wbModels.value.filter(m => m.id.toLowerCase().includes(q)) : wbModels.value
+  return q ? visibleModels.value.filter(m => m.id.toLowerCase().includes(q)) : visibleModels.value
 })
+
+/** 主列表 = 仅可见模型（隐藏项只出现在「模型显示」弹窗；缺字段防御性视为可见）。 */
+const visibleModels = computed(() => wbModels.value.filter(m => m.visible !== false))
 
 function isModelEnabled(id: string): boolean {
   const w = config.model_whitelist
   if (w.length === 0) return true
   if (w.length === 1 && w[0] === DISABLE_ALL) return false
   return w.includes(id)
+}
+
+// ── 「模型显示」弹窗（过时治理：全部 WB 模型逐条开关；显示主导、隐藏即停用） ──
+const showVisibilityDlg = ref(false)
+const visibilitySearch = ref('')
+
+const visibilityList = computed(() => {
+  const q = visibilitySearch.value.trim().toLowerCase()
+  return q ? wbModels.value.filter(m => m.id.toLowerCase().includes(q)) : wbModels.value
+})
+
+const hiddenCount = computed(() => wbModels.value.filter(m => m.visible === false).length)
+
+/** 白名单三态加入（空=全启用 / __none__ 哨兵 / 显式名单）；null = 无需变更。 */
+async function wlAdd(id: string): Promise<string[] | null> {
+  const w = config.model_whitelist
+  if (w.length === 0) return null
+  if (w.length === 1 && w[0] === DISABLE_ALL) return [id]
+  return w.includes(id) ? null : [...w, id]
+}
+
+/** 白名单三态移除；null = 无需变更。 */
+async function wlRemove(id: string): Promise<string[] | null> {
+  const w = config.model_whitelist
+  if (w.length === 0) {
+    // 全部启用 → 显式列出除该模型外的全部（含牛码/自定义条目，保证其它供应商语义不变）
+    const all = (await getModels(true)).data.map(m => m.id)
+    const next = all.filter(x => x !== id)
+    return next.length ? next : [DISABLE_ALL]
+  }
+  if (w.length === 1 && w[0] === DISABLE_ALL) return null
+  const next = w.filter(x => x !== id)
+  return next.length ? next : [DISABLE_ALL] // 空名单语义 = 全部启用，落哨兵防反转
+}
+
+/** 弹窗「显示」开关（唯一开关，2026-10-11 用户拍板简化）：同时操控显示与启用——
+ * 关 ⇒ 隐藏+停用成对写入（chat 404）；开 ⇒ 显示+启用双开。
+ * 「可见但停用」的微调态只由主列表「启用」开关产生。 */
+async function onToggleShow(m: OaiModel, show: boolean) {
+  try {
+    const patch: Record<string, unknown> = {
+      model_visibility: { ...config.model_visibility, [m.id]: show ? 'show' : 'hide' }
+    }
+    const next = show ? await wlAdd(m.id) : await wlRemove(m.id)
+    if (next) patch.model_whitelist = next
+    await config.update(patch)
+    await loadWbModels() // 重拉 all=1 刷新 visible（口径由 relay 单点计算，前端不复刻）
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+/** 「全部显示」：当前隐藏项全部双开（显示 + 启用）；此后新无档位模型仍按默认隐藏。 */
+async function onShowAllHidden() {
+  try {
+    const hidden = wbModels.value.filter(m => m.visible === false)
+    if (hidden.length === 0) return
+    const vis = { ...config.model_visibility }
+    for (const m of hidden) vis[m.id] = 'show'
+    const patch: Record<string, unknown> = { model_visibility: vis }
+    const w = config.model_whitelist
+    if (w.length === 1 && w[0] === DISABLE_ALL) {
+      patch.model_whitelist = hidden.map(m => m.id)
+    } else if (w.length > 0) {
+      const ids = new Set(hidden.map(m => m.id))
+      patch.model_whitelist = [...w.filter(x => !ids.has(x)), ...ids]
+    } // 白名单空 = 全启用，无需动
+    await config.update(patch)
+    await loadWbModels()
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+/** 「恢复默认」：清空显示覆盖回默认判定（将变隐藏者由门控天然 404），白名单不动。 */
+async function onResetVisibility() {
+  try {
+    await config.update({ model_visibility: {} })
+    await loadWbModels()
+    message.info('已恢复默认（无档位模型重新隐藏）')
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+/** 弹窗行档位描述：有档位列 level；无档位灰字（解释默认隐藏来源）。 */
+function effortText(m: OaiModel): string {
+  return m.reasoning_efforts?.length ? m.reasoning_efforts.join(' / ') : '无档位'
 }
 
 async function loadWbModels() {
@@ -50,22 +141,11 @@ async function loadWbModels() {
   }
 }
 
+/** 主列表「启用」开关（语义不变）：白名单成员管理（三态），不动显示覆盖。 */
 async function onToggleModel(id: string) {
   try {
-    const w = config.model_whitelist
-    let next: string[]
-    if (w.length === 0) {
-      // 全部启用 → 显式列出除该模型外的全部（含牛码/自定义条目，保证其它供应商语义不变）
-      const all = (await getModels(true)).data.map(m => m.id)
-      next = all.filter(x => x !== id)
-      if (next.length === 0) next = [DISABLE_ALL]
-    } else if (w.length === 1 && w[0] === DISABLE_ALL) {
-      next = [id]
-    } else {
-      next = w.includes(id) ? w.filter(x => x !== id) : [...w, id]
-      if (next.length === 0) next = [DISABLE_ALL] // 空名单语义 = 全部启用，落哨兵防反转
-    }
-    await config.update({ model_whitelist: next })
+    const next = isModelEnabled(id) ? await wlRemove(id) : await wlAdd(id)
+    if (next) await config.update({ model_whitelist: next })
   } catch (e) {
     message.error(String(e))
   }
@@ -334,6 +414,12 @@ onUnmounted(stopPolling)
         >
           添加账号
         </NButton>
+        <NButton
+          size="small"
+          @click="showVisibilityDlg = true"
+        >
+          模型显示
+        </NButton>
       </div>
 
       <NEmpty
@@ -441,7 +527,7 @@ onUnmounted(stopPolling)
       <template #header>
         <div class="head">
           <span class="zone-title">模型</span>
-          <span class="note">目录来自 WorkBuddy（v3/config），请求模型名用 WorkBuddy/ 前缀</span>
+          <span class="note">无思考档位的模型默认隐藏，可在账号区「模型显示」中恢复</span>
           <div class="spacer" />
           <input
             v-model="modelSearch"
@@ -467,6 +553,11 @@ onUnmounted(stopPolling)
       <NEmpty
         v-if="wbModels.length === 0"
         description="暂无 WorkBuddy 模型目录（请先添加账号；relay 会从上游拉取目录）"
+        size="small"
+      />
+      <NEmpty
+        v-else-if="visibleModels.length === 0"
+        description="全部模型已隐藏——点账号区「模型显示」恢复"
         size="small"
       />
       <table
@@ -688,6 +779,82 @@ onUnmounted(stopPolling)
             size="small"
             type="primary"
             @click="showQuotaDlg = false"
+          >
+            关闭
+          </NButton>
+        </div>
+      </template>
+    </NModal>
+
+    <!-- 模型显示弹窗（过时治理）：列出全部 WB 模型（含隐藏）逐条开关；
+         单一「显示」开关同时驱动显示+启用（隐藏 ⇒ 双关，chat 404；2026-10-11 拍板简化）。 -->
+    <NModal
+      v-model:show="showVisibilityDlg"
+      preset="card"
+      title="模型显示"
+      :style="{ width: '640px' }"
+    >
+      <p class="dlg-text vis-hint"> 无思考档位的模型默认隐藏。开关同时控制「显示」与「启用」：关 = 隐藏且停用（agent 侧不可见且调用 404）；开 = 显示且启用。需「可见但停用」请用主列表的「启用」开关。即时保存。 </p>
+      <div class="vis-toolbar">
+        <NInput
+          v-model:value="visibilitySearch"
+          size="small"
+          clearable
+          placeholder="搜索模型名"
+        />
+        <NButton
+          size="small"
+          :disabled="hiddenCount === 0"
+          @click="onShowAllHidden"
+        >
+          全部显示（{{ hiddenCount }}）
+        </NButton>
+        <NPopconfirm @positive-click="onResetVisibility">
+          <template #trigger>
+            <NButton size="small"> 恢复默认 </NButton>
+          </template>
+          清空全部显示覆盖？无思考档位的模型将恢复默认隐藏（隐藏即停用），启用状态不变。
+        </NPopconfirm>
+      </div>
+      <NEmpty
+        v-if="visibilityList.length === 0"
+        description="暂无 WorkBuddy 模型目录（请先添加账号）"
+        size="small"
+      />
+      <div
+        v-else
+        class="vis-list"
+      >
+        <div
+          v-for="m in visibilityList"
+          :key="m.id"
+          class="vis-row"
+        >
+          <span
+            class="mono copyable vis-name"
+            title="点击复制模型名"
+            @click="onCopy(m.id)"
+            >{{ m.id }}</span
+          >
+          <span
+            class="vis-effort"
+            :class="{ dim: !m.reasoning_efforts?.length }"
+            :title="m.reasoning_efforts?.length ? '思考档位' : '无档位（默认隐藏的判定来源）'"
+            >{{ effortText(m) }}</span
+          >
+          <span class="vis-switch-label">显示</span>
+          <NSwitch
+            size="small"
+            :value="m.visible !== false"
+            @update:value="(v: boolean) => onToggleShow(m, v)"
+          />
+        </div>
+      </div>
+      <template #footer>
+        <div class="dlg-actions">
+          <NButton
+            size="small"
+            @click="showVisibilityDlg = false"
           >
             关闭
           </NButton>
@@ -1043,5 +1210,54 @@ onUnmounted(stopPolling)
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+/* 模型显示弹窗（过时治理）：提示行 + 工具行 + 全量模型行内滚动列表 */
+.vis-hint {
+  color: var(--cp-dim);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.vis-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.vis-list {
+  max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid var(--cp-border);
+  border-radius: 8px;
+}
+.vis-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+  font-size: 13px;
+}
+.vis-row:last-child {
+  border-bottom: none;
+}
+.vis-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vis-effort {
+  flex: none;
+  width: 170px;
+  font-size: 12px;
+  color: var(--cp-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vis-switch-label {
+  flex: none;
+  color: var(--cp-dim);
+  font-size: 12px;
 }
 </style>

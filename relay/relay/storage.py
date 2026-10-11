@@ -298,6 +298,46 @@ async def is_model_enabled(name: str) -> bool:
     return model_ref.canonical_key(name) in wl
 
 
+# ─────────────────── 模型可见性覆盖（模型列表过时治理 §4.3）───────────────────
+
+# 合法覆盖值：show/hide（缺省不落盘 = 按 routes 层默认规则判定）。
+VISIBILITY_VALUES = ("show", "hide")
+
+
+async def get_model_visibility() -> dict[str, str]:
+    """模型显示覆盖 {全名: "show"|"hide"}；只含用户显式覆盖，缺省 {}（按默认规则）。
+
+    读时归一：键归一为规范全名（对齐 model_whitelist）；非法值键丢弃（损坏回退
+    = 丢该键，等价未覆盖，不炸读路径）。
+    """
+    state = await _io(_load_state)
+    raw = (state.get("config") or {}).get("model_visibility") or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        key = model_ref.canonical_key(str(k))
+        val = str(v)
+        if key and val in VISIBILITY_VALUES:
+            out[key] = val
+    return out
+
+
+async def save_model_visibility(mapping: dict) -> dict[str, str]:
+    """整体覆盖模型显示覆盖（GUI「模型显示」弹窗写入；键存规范全名）。"""
+    clean: dict[str, str] = {}
+    for k, v in (mapping or {}).items():
+        key = model_ref.canonical_key(str(k))
+        val = str(v)
+        if key and val in VISIBILITY_VALUES:
+            clean[key] = val
+    async with _asyncio_lock:
+        state = await _io(_load_state)
+        state.setdefault("config", {})["model_visibility"] = clean
+        await _io(_save_state, state)
+    return clean
+
+
 # ─────────────────────────── ta3 登录态 ───────────────────────────
 
 def _auth_from_state(state: dict, provider_id: int) -> AuthRow | None:

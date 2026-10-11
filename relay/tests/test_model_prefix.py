@@ -246,7 +246,9 @@ def test_registry_routed_workbuddy_endpoint(client, monkeypatch):
                                             total_tokens=2))
 
     async def _dir():
-        return [{"name": "glm-5.3-flash", "context_window": 1000000}]
+        # 补思考档位：模型列表过时治理后 WB 无档位默认隐藏（否则本例被可见性门控拦成 404）
+        return [{"name": "glm-5.3-flash", "context_window": 1000000,
+                 "completion_options": {"thinkingLevels": [{"level": "low"}, {"level": "high"}]}}]
 
     adapter_registry.register_provider("WorkBuddy", directory=_dir,
                                        factory=lambda bare, **kw: _FakeWb(bare))
@@ -286,7 +288,9 @@ def test_no_available_account_maps_503_with_retry_after(client, monkeypatch):
             yield  # pragma: no cover
 
     async def _dir():
-        return [{"name": "m"}]
+        # 补思考档位（模型列表过时治理：无档位默认隐藏，会让本例在 503 前先撞 404）
+        return [{"name": "m", "completion_options":
+                 {"thinkingLevels": [{"level": "low"}]}}]
 
     adapter_registry.register_provider("WorkBuddy", directory=_dir,
                                        factory=lambda bare, **kw: _EmptyWb())
@@ -379,7 +383,9 @@ def test_workbuddy_tools_pass_through_unmodified(client, monkeypatch):
                                             total_tokens=2))
 
     async def _dir():
-        return [{"name": "glm-5.3-flash"}]
+        # 补思考档位（模型列表过时治理：无档位默认隐藏，会让本例被可见性门控拦成 404）
+        return [{"name": "glm-5.3-flash", "completion_options":
+                 {"thinkingLevels": [{"level": "low"}]}}]
 
     adapter_registry.register_provider("WorkBuddy", directory=_dir,
                                        factory=lambda bare, **kw: _FakeWb(bare))

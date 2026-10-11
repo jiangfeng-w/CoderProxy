@@ -23,6 +23,7 @@ export const useConfigStore = defineStore('config', {
     api_key: '',
     tool_mode: 'hybrid',
     model_whitelist: [],
+    model_visibility: {},
     thinking_defaults: {}
   }),
   actions: {

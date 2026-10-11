@@ -23,6 +23,8 @@ export interface Config {
   api_key: string
   tool_mode: string
   model_whitelist: string[]
+  /** 模型显示覆盖（模型列表过时治理：全名 → show/hide；缺省 = 按 relay 默认规则判定） */
+  model_visibility: Record<string, 'show' | 'hide'>
   /** 每模型思考档位（强制档：无视 agent 传参下发；未配置 / "passthrough" = 透传） */
   thinking_defaults: Record<string, string>
 }
@@ -37,6 +39,9 @@ export interface OaiModel {
   /** 档位 → 上游中文标签（低/高/极 等，各模型文案可能不同） */
   reasoning_labels?: Record<string, string>
   is_multimodal?: boolean
+  /** 是否可见（模型列表过时治理：relay 单点判定——覆盖优先，WB 无档位默认隐藏；
+   * all=1 目录携带；缺字段防御性视为可见） */
+  visible?: boolean
 }
 
 export interface MonitorEvent {
@@ -88,8 +93,8 @@ export const getConfig = (): Promise<Config> => relay('GET', '/v1/auth/config')
 export const updateConfig = (patch: Record<string, unknown>): Promise<Config> => relay('POST', '/v1/auth/config', patch)
 
 /** /v1/models
- * all=true 时请求完整目录（GUI 管理用，不受白名单过滤）；
- * 默认 false 保持 OpenAI 兼容语义（只返回已启用模型）。
+ * all=true 时请求完整目录（GUI 管理用，不受白名单/可见性过滤，条目带 visible 字段）；
+ * 默认 false 保持 OpenAI 兼容语义（只返回可见且已启用模型）。
  */
 export const getModels = (all = false): Promise<{ object: string; data: OaiModel[] }> => relay('GET', all ? '/v1/models?all=1' : '/v1/models')
 
