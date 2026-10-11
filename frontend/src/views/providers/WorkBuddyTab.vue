@@ -477,7 +477,7 @@ onUnmounted(stopPolling)
           <tr>
             <th>模型名</th>
             <th class="col-ctx">上下文</th>
-            <th class="col-effort">默认思考强度</th>
+            <th class="col-effort">思考强度</th>
             <th class="col-status">状态（点击测试）</th>
             <th class="col-toggle">启用</th>
           </tr>

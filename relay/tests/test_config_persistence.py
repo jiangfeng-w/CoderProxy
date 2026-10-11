@@ -4,6 +4,7 @@
 TestClient 场景沿用 test_m4 的「已登录 + 服务开」基准。
 """
 import asyncio
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -163,12 +164,22 @@ def test_thinking_defaults_dirty_values_filtered(tmp_path, monkeypatch):
     assert _run(storage.get_thinking_defaults()) == {"牛码/glm-5.3": "high"}
 
 
+def test_thinking_defaults_passthrough_value_valid(tmp_path, monkeypatch):
+    """透传档位值域（思考强度透传档位 §4）：显式 "passthrough" 合法可落盘。"""
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    saved = _run(storage.save_thinking_defaults({"牛码/glm-5.3": "passthrough"}))
+    assert saved == {"牛码/glm-5.3": "passthrough"}
+    assert _run(storage.get_thinking_defaults()) == {"牛码/glm-5.3": "passthrough"}
+
+
 def test_config_post_thinking_defaults(client):
     r = client.post("/v1/auth/config",
                     json={"thinking_defaults": {"glm-5.3": "max"}}, headers=_auth())
     assert r.status_code == 200
     assert r.json()["thinking_defaults"] == {"牛码/glm-5.3": "max"}
     assert _run(storage.get_thinking_defaults()) == {"牛码/glm-5.3": "max"}
+    # 配置 GET 不再出现已退役的 thinking_unset_mode 字段
+    assert "thinking_unset_mode" not in client.get("/v1/auth/config", headers=_auth()).json()
 
 
 def test_config_post_thinking_defaults_invalid(client):
@@ -177,38 +188,11 @@ def test_config_post_thinking_defaults_invalid(client):
                         json={"thinking_defaults": bad}, headers=_auth())
         assert r.status_code == 400, bad
     assert _run(storage.get_thinking_defaults()) == {}  # 非法请求不落盘
-
-
-# ─────────────────────────── 思考兜底策略（真关/假关）───────────────────────────
-
-def test_thinking_unset_mode_default_is_default(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
-    assert _run(storage.get_thinking_unset_mode()) == "default"  # 缺省=假关
-
-
-def test_thinking_unset_mode_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
-    _run(storage.save_thinking_unset_mode("off"))
-    assert _run(storage.get_thinking_unset_mode()) == "off"
-
-
-def test_thinking_unset_mode_invalid_falls_back(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
-    import json
-
-    p = storage.state_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"config": {"thinking_unset_mode": "bogus"}}), "utf-8")
-    assert _run(storage.get_thinking_unset_mode()) == "default"  # 损坏值回退假关
-
-
-def test_config_post_thinking_unset_mode(client):
+    # 已退役的 thinking_unset_mode 写入不再被接受（无校验逻辑 → 仅忽略不落盘）
     r = client.post("/v1/auth/config",
                     json={"thinking_unset_mode": "off"}, headers=_auth())
     assert r.status_code == 200
-    assert r.json()["thinking_unset_mode"] == "off"
-    assert _run(storage.get_thinking_unset_mode()) == "off"
-    # 非法值 400 且不落盘
-    assert client.post("/v1/auth/config", json={"thinking_unset_mode": "bogus"},
-                       headers=_auth()).status_code == 400
-    assert _run(storage.get_thinking_unset_mode()) == "off"
+    assert "thinking_unset_mode" not in r.json()
+    p = storage.state_path()
+    assert not p.exists() or "thinking_unset_mode" not in (
+        json.loads(p.read_text("utf-8")).get("config") or {})

@@ -23,10 +23,8 @@ export interface Config {
   api_key: string
   tool_mode: string
   model_whitelist: string[]
-  /** 每模型默认思考强度（agent 未显式传思考参数时下发；缺省按 none=关 处理） */
+  /** 每模型思考档位（强制档：无视 agent 传参下发；未配置 / "passthrough" = 透传） */
   thinking_defaults: Record<string, string>
-  /** agent 不传思考参数时的兜底策略：default=假关（按每模型默认值）/ off=真关（一律关思考） */
-  thinking_unset_mode: 'default' | 'off'
 }
 
 export interface OaiModel {

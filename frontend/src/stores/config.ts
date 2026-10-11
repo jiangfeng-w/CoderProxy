@@ -23,8 +23,7 @@ export const useConfigStore = defineStore('config', {
     api_key: '',
     tool_mode: 'hybrid',
     model_whitelist: [],
-    thinking_defaults: {},
-    thinking_unset_mode: 'default'
+    thinking_defaults: {}
   }),
   actions: {
     /** 用后端返回的完整 config 整体替换本 store（唯一收敛入口）。 */

@@ -94,7 +94,8 @@ def test_transform_forces_stream_and_keeps_tools():
     assert body["model"] == "glm-5.3-flash"  # 裸名直发上游
     assert body["tools"][0]["function"]["name"] == "get_weather"  # B5 原生透传
     assert body["max_tokens"] == 128 and body["temperature"] == 0.3
-    assert "reasoning_effort" not in body  # 未传档位 → 不带（上游默认思考）
+    assert "reasoning_effort" not in body  # 零表态 → 零注入（透传档位：落上游默认思考）
+    assert "thinking" not in body
 
 
 def test_transform_effort_none_keeps_without_summary():
@@ -123,7 +124,7 @@ def test_transform_effort_off_dropped():
     assert "reasoning_effort" not in body  # B4：off 上游不认识 → 删（落默认）
 
 
-# ─────────────────────────── BUG-3：deepseek 系思考注入 ───────────────────────────
+# ─────────────────── 透传档位：deepseek 系思考形状归一 ───────────────────
 
 _DSE_ENTRY = {"name": "deepseek-v4.1-flash",
               "completion_options": {"defaultEffort": "high",
@@ -151,41 +152,39 @@ def test_deepseek_injects_enabled_with_explicit_effort():
     assert body["reasoning_summary"] == "auto"
 
 
-def test_deepseek_backfills_default_effort_when_missing():
-    """enabled 但缺档（messages/claude 入站仅 thinking）→ 补目录默认档。"""
-    body = _dse_adapter().transform_request(_dse_req(thinking=True))
+def test_deepseek_effort_only_is_open_intent():
+    """仅档位无 thinking 布尔 → 同样视为开意图（形状归一：enabled + 原档）。"""
+    body = _dse_adapter().transform_request(_dse_req(reasoning_effort="high"))
     assert body["thinking"] == {"type": "enabled"}
-    assert body["reasoning_effort"] == "high"  # 目录 defaultEffort
+    assert body["reasoning_effort"] == "high"
     assert body["reasoning_summary"] == "auto"
 
 
-def test_deepseek_no_thinking_at_all_backfills_default():
-    """无任何思考字段 → 同样注入 enabled + 默认档（对齐官方客户端）。"""
-    body = _dse_adapter().transform_request(_dse_req())
+def test_deepseek_enabled_without_effort_no_backfill():
+    """开意图但缺档（agent 只表态开、未给档）→ enabled + summary，不兜底补档
+    （透传档位 §2.2：不选档；§5-6 探针观察上游对该形状的实际行为）。"""
+    body = _dse_adapter().transform_request(_dse_req(thinking=True))
     assert body["thinking"] == {"type": "enabled"}
-    assert body["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in body
+    assert body["reasoning_summary"] == "auto"
 
 
-def test_deepseek_default_effort_falls_back_to_high():
-    """无目录条目 → 兜底 "high"（参考 defaultDeepSeekEffort）。"""
-    body = _dse_adapter(entry={}).transform_request(_dse_req(thinking=True))
-    assert body["reasoning_effort"] == "high"
+def test_deepseek_zero_intent_zero_injection():
+    """无任何思考字段 → 零注入零兜底（行为翻转：旧「默认档 enabled+high」退役）。"""
+    body = _dse_adapter().transform_request(_dse_req())
+    assert "thinking" not in body
+    assert "reasoning_effort" not in body
+    assert "reasoning_summary" not in body
 
 
-def test_deepseek_effort_downgraded_to_supported():
-    """档位超支持范围（xhigh 不在 low/high/max）→ 降级到 ≤请求档的最高支持档。"""
+def test_deepseek_effort_never_downgraded():
+    """agent 原档不降级不改写（目录仅 low/high/max，xhigh 照发——合法性上游定）。"""
     body = _dse_adapter().transform_request(_dse_req(thinking=True, reasoning_effort="xhigh"))
-    assert body["reasoning_effort"] == "high"
-
-
-def test_deepseek_effort_floored_when_all_above():
-    """支持档全高于请求档（minimal → 支持 low/high/max）→ 取最低支持档。"""
-    body = _dse_adapter().transform_request(_dse_req(thinking=True, reasoning_effort="minimal"))
-    assert body["reasoning_effort"] == "low"
+    assert body["reasoning_effort"] == "xhigh"
 
 
 def test_deepseek_unknown_effort_passthrough():
-    """未知档位（不在 rank 表）→ 原样透传（不降级、不报错）。"""
+    """目录外未知档位（不在任何标准表）→ 原样透传（归一翻译不改写档位）。"""
     body = _dse_adapter().transform_request(_dse_req(thinking=True, reasoning_effort="turbo"))
     assert body["reasoning_effort"] == "turbo"
 
@@ -201,13 +200,6 @@ def test_deepseek_disabled_emits_disabled_without_effort():
         assert "reasoning_summary" not in body, kw
 
 
-def test_deepseek_off_mode_default_extension_point():
-    """扩展位（设置页「假关」落地前占位）：off_mode=default → 不注入任何思考字段。"""
-    body = _dse_adapter(thinking_off_mode="default").transform_request(
-        _dse_req(thinking=True, reasoning_effort="none"))
-    assert "thinking" not in body and "reasoning_effort" not in body
-
-
 def test_non_deepseek_untouched_by_injection():
     """非 deepseek（glm）→ 零注入：无 thinking 键，B4 口径不变。"""
     a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
@@ -219,15 +211,24 @@ def test_non_deepseek_untouched_by_injection():
     assert "thinking" not in body and body["reasoning_effort"] == "high"
 
 
+def test_non_deepseek_open_intent_without_effort_zero_injection():
+    """非 deepseek 仅表态开、未给档 → 零注入（B4：只有档位才直发）。"""
+    a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
+    body = a.transform_request(ChatRequest(
+        model="m", messages=[ChatMessage(role="user", content="hi")], thinking=True))
+    assert "thinking" not in body and "reasoning_effort" not in body
+
+
 def test_deepseek_case_insensitive_prefix():
-    """模型名大小写无关（DeepSeek-… 也命中注入）。"""
+    """模型名大小写无关（DeepSeek-… 也命中形状归一）。"""
     a = wbchat.WorkBuddyChatAdapter("DeepSeek-V4-Pro", model_entry={},
                                     transport=_transport(lambda r: _sse_response(["data: [DONE]"])))
     body = a.transform_request(ChatRequest(
         model="WorkBuddy/DeepSeek-V4-Pro",
-        messages=[ChatMessage(role="user", content="hi")], thinking=True))
+        messages=[ChatMessage(role="user", content="hi")], thinking=True,
+        reasoning_effort="max"))
     assert body["thinking"] == {"type": "enabled"}
-    assert body["reasoning_effort"] == "high"
+    assert body["reasoning_effort"] == "max"
 
 
 # ─────────────── 多轮一致性：reasoning_content 回填（backfill） ───────────────
@@ -242,10 +243,22 @@ def test_deepseek_backfill_enabled_zero_trace_fills_all():
     body = _dse_adapter().transform_request(ChatRequest(
         model="WorkBuddy/deepseek-v4.1-flash",
         messages=[ChatMessage(role="user", content="u"),
-                  ChatMessage(role="assistant", content="a")]))
+                  ChatMessage(role="assistant", content="a")],
+        thinking=True))
     msg = body["messages"][1]
     assert msg["reasoning_content"] == ""   # 无 reasoning 可复制 → 补空串
     assert msg["reasoning"] == " "          # 镜像占位（空白串过 len>0 校验）
+
+
+def test_deepseek_backfill_zero_intent_no_backfill():
+    """零表态（透传档位）→ 无 thinking 键 → 门控落 hasTrace 半边：零痕迹不回填
+    （11155 探针口径：缺失 rc 上游 200，回填本就是纯保险）。"""
+    body = _dse_adapter().transform_request(ChatRequest(
+        model="WorkBuddy/deepseek-v4.1-flash",
+        messages=[ChatMessage(role="user", content="u"),
+                  ChatMessage(role="assistant", content="a")]))
+    assert "thinking" not in body
+    assert "reasoning_content" not in body["messages"][1]
 
 
 def test_deepseek_backfill_keeps_existing_and_copies():

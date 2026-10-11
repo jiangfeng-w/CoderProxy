@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// 模型「默认思考强度」选择组件（牛码 tab 与 WorkBuddy tab 共用）：
-// 「关（none）」置顶 + 目录档位 + 目录外标准档合并，hover tooltip 说明档位语义；
-// 写入 config.thinking_defaults（agent 未显式传思考参数时由 relay 按此下发）。
+// 模型「思考强度」选择组件（牛码 tab 与 WorkBuddy tab 共用）：
+// 「透传」默认档置顶 + 「关」+ 目录档位 + 目录外标准档合并，hover tooltip 说明档位语义；
+// 写入 config.thinking_defaults（思考强度透传档位：透传 = agent 传什么发什么；
+// 具体档 = 强制下发、无视 agent 传参）。
 import { h, type VNodeChild } from 'vue'
 import { NSelect, NTooltip } from 'naive-ui'
 import type { OaiModel } from '../api'
@@ -9,6 +10,9 @@ import { STANDARD_EFFORTS, STANDARD_EFFORT_LABELS, useConfigStore } from '../sto
 
 defineProps<{ model: OaiModel }>()
 const config = useConfigStore()
+
+/** 透传档：agent 表态按官方客户端形状归一透传、未表态零注入，软件不干预。 */
+const PASSTHROUGH = 'passthrough'
 
 /** 档位强度语义（hover tooltip 用；厂商映射差异见需求文档「思考强度控制与日志」）。 */
 const EFFORT_DESC: Record<string, string> = {
@@ -21,15 +25,21 @@ const EFFORT_DESC: Record<string, string> = {
 }
 
 /** 每个档位选项的 hover 说明：head=一句话概括（首行高亮），body=详细描述（次行起）。
- * 目录档位保证生效；目录外标准档标注不保证生效。
+ * 具体档 = 强制下发（无视 agent 传参）；目录档位保证生效，目录外标注不保证。
  * 「关」的 GLM-5.3 风险提示仅对 glm-5.3 系列显示（官方文档称该系列不支持关思考）。 */
 function effortTip(m: OaiModel, value: string): { head: string; body: string } {
+  if (value === PASSTHROUGH) {
+    return {
+      head: '透传（默认）',
+      body: 'agent 传来的思考强度按官方客户端形状归一后原样下发，软件不选档不干预；agent 未表态时零注入，落上游默认行为'
+    }
+  }
   if (value === 'none') {
-    const body = m.id.toLowerCase().startsWith('glm-5.3') ? '注意：GLM-5.3 系列官方不支持关闭思考（直连会报错），牛码网关可能映射为低档位，以实测为准' : 'agent 未传思考参数时显式关闭思考（真关）'
-    return { head: '显式关闭思考', body }
+    const body = m.id.toLowerCase().startsWith('glm-5.3') ? '注意：GLM-5.3 系列官方不支持关闭思考（直连会报错），牛码网关可能映射为低档位，以实测为准' : '无视 agent 传参，一律显式关闭思考（强制）'
+    return { head: '显式关闭思考（强制）', body }
   }
   const head = EFFORT_DESC[value] ?? value
-  const body = (m.reasoning_efforts ?? []).includes(value) ? '上游档位（官方客户端同款选项），保证生效' : '目录外标准档位：上游未列出，网关可能映射到其他档位或报错，不保证生效'
+  const body = (m.reasoning_efforts ?? []).includes(value) ? '强制下发该档（无视 agent 传参）；上游档位（官方客户端同款选项），保证生效' : '强制下发该档（无视 agent 传参）；目录外标准档位：上游未列出，网关可能映射到其他档位或报错，不保证生效'
   return { head, body }
 }
 
@@ -50,7 +60,7 @@ function effortRenderer(m: OaiModel) {
   }
 }
 
-/** 默认思考强度下拉选项：关（none，显式关思考）置顶；目录档位 + 目录外标准档合并后
+/** 思考强度下拉选项：透传（默认）置顶，关（none）次之；目录档位 + 目录外标准档合并后
  * 统一按强度排序（微/低/中/高/超高/最大），目录外标签标「目录外」，说明在 hover tooltip。 */
 function effortOptions(m: OaiModel): { label: string; value: string }[] {
   const labels = m.reasoning_labels ?? {}
@@ -61,15 +71,15 @@ function effortOptions(m: OaiModel): { label: string; value: string }[] {
   }
   const all = [...new Set([...catalogLevels, ...STANDARD_EFFORTS])].sort((a, b) => order(a) - order(b))
   const opts = all.map(lv => (catalogLevels.includes(lv) ? { label: labels[lv] ? `${labels[lv]}（${lv}）` : lv, value: lv } : { label: `${STANDARD_EFFORT_LABELS[lv] ?? lv}（${lv}）·目录外`, value: lv }))
-  return [{ label: '关（不思考）', value: 'none' }, ...opts]
+  return [{ label: '透传（默认）', value: PASSTHROUGH }, { label: '关（不思考）', value: 'none' }, ...opts]
 }
 
-/** 当前生效的默认档位（缺省 = none 关）。 */
+/** 当前生效的思考档位（未配置 = 透传）。 */
 function effortValue(m: OaiModel): string {
-  return config.thinking_defaults[m.id] ?? 'none'
+  return config.thinking_defaults[m.id] ?? PASSTHROUGH
 }
 
-/** 写入某模型的默认思考强度（整体覆盖写回，收敛走 config store 响应）。 */
+/** 写入某模型的思考档位（整体覆盖写回，收敛走 config store 响应）。 */
 async function onEffortChange(m: OaiModel, v: string) {
   try {
     await config.update({ thinking_defaults: { ...config.thinking_defaults, [m.id]: v } })
@@ -87,7 +97,7 @@ async function onEffortChange(m: OaiModel, v: string) {
     :options="effortOptions(model)"
     :render-option="effortRenderer(model)"
     :consistent-menu-width="false"
-    title="agent 未传思考参数时按此默认值下发；hover 各选项查看档位说明（仅上游目录档位保证生效）"
+    title="透传（默认）= agent 传什么发什么；选具体档 = 强制下发（无视 agent 传参）。hover 各选项查看说明（仅上游目录档位保证生效）"
     @update:value="(v: string) => onEffortChange(model, v)"
   />
   <span

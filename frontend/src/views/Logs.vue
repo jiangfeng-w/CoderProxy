@@ -155,7 +155,7 @@ function detailOf(row: LogRow): string {
       const d = row.detail
       const rec = typeof d === 'object' && d ? (d as Record<string, unknown>) : {}
       const tools = Number(rec.tools ?? 0)
-      // 思考下发态（relay 兜底/agent 显式传参后的最终值）；无字段=旧日志，不展示。
+      // 思考下发态（强制档覆写 / agent 表态形状归一后的最终值；零表态无字段=不展示）。
       // 标签优先用上游自带中文名，目录外档位（透传/标准档补全）回退标准中文名，都没有则显示原值
       const effort = typeof rec.thinking_effort === 'string' ? rec.thinking_effort : ''
       const thinking = rec.thinking === true

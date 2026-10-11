@@ -6,8 +6,9 @@
   桌面档头族（B1 实测 2026-10-08：UA 三段式 + 归属四头，与登录档位身份一致）；
 - **请求改写钩子** `transform_request`：强制 `stream:true`；system 中性化（B3：agent
   身份句/超长 system 命中 11128 渠道风控 → 替换中性句，不重试）；思考形状
-  （BUG-3：deepseek 系注入 `thinking:{type:"enabled"}` + 缺档补目录默认档/超范围降级；
-  显式关 → `thinking:{type:"disabled"}` 真关；非 deepseek 维持 B4 透传口径）；
+  （透传档位 §2.2：**形状归一**——deepseek 系开意图 `thinking:{type:"enabled"}` +
+  agent 原档（不降级不改写、缺档不兜底）、关意图 `thinking:{type:"disabled"}` 真关、
+  零表态零注入；非 deepseek 维持 B4 口径；强制/透传语义由 relay 层决定）；
   多轮一致性（deepseek/kimi 回填 `reasoning_content`；出站工具配对安全网 BUG-4：
   fill→repack→cleanup，对齐 2api-panel/9router/chatcoder）；
 - **错误识别钩子** `parse_error`：错误码族映射（B6：11101→400 / 11128→400 /
@@ -95,15 +96,12 @@ _CODE_11102_MODEL_MISSING = 11102  # 模型不可用
 _CODE_11128_CHANNEL_BLOCKED = 11128  # 渠道风控（agent 身份句等）
 _CODE_6004_RATE_LIMIT = 6004  # 限流（msg 常附恢复时间文案）
 
-# ── BUG-3：deepseek 系思考注入（对齐 workbuddy2api-panel/internal/upstream/thinking.go）──
-# 官方客户端对 deepseek 系要求「thinking.type=enabled + 某档 reasoning_effort」同时满足
-# 才真思考（isThinkingEnabled = !!(reasoning_summary || reasoning_effort || reasoning?.effort)）；
-# 缺任一条件上游按不思考应答。当前 adapter 只透传 effort、从不注入 thinking 开关 →
-# chat/messages 协议下思考强度设置不生效（responses 协议因 reasoning item 恰好满足判定而通）。
-_DEEPSEEK_EFFORT_RANK = {   # 档位从低到高（同参考 effortRank）
-    "off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6,
-}
-_DEEPSEEK_DEFAULT_EFFORT = "high"  # 缺档兜底（参考 defaultDeepSeekEffort：configure 无来源 fallback "high"）
+# ── BUG-3：deepseek 系思考形状（对齐 workbuddy2api-panel/internal/upstream/thinking.go）──
+# 官方客户端对 deepseek 系「开思考」= `thinking.type=enabled` **且**带某档
+# `reasoning_effort`（isThinkingEnabled = !!(reasoning_summary || reasoning_effort ||
+# reasoning?.effort)）；裸 `reasoning_effort:"none"` 上游不认（BUG-3 探针实证仍出思考），
+# 关意图必须翻译成 `thinking:{type:"disabled"}`。本 adapter 只做**形状归一翻译**
+# （不选档、不降级、不兜底），强制/透传语义由 relay 层（routes）决定。
 
 
 def _is_deepseek_model(model: str) -> bool:
@@ -114,56 +112,6 @@ def _is_deepseek_model(model: str) -> bool:
 def _is_kimi_model(model: str) -> bool:
     """kimi 系（对齐 9router 模型级规则 `/^kimi-/i`；WB 目录如 kimi-k3/kimi-k3-1）。"""
     return str(model or "").strip().lower().startswith("kimi-")
-
-
-def _entry_default_effort(entry: dict) -> str:
-    """目录条目默认档（catalog `_to_entry` 取自 /v3/config reasoning.defaultEffort）。"""
-    opts = (entry or {}).get("completion_options") or {}
-    return str(opts.get("defaultEffort") or "").strip()
-
-
-def _entry_supported_efforts(entry: dict) -> list[str]:
-    """目录条目支持档位（thinkingLevels[].level；兼容 reasoning_efforts 裸串形态）。"""
-    opts = (entry or {}).get("completion_options") or {}
-    out: list[str] = []
-    for lv in opts.get("thinkingLevels") or []:
-        if isinstance(lv, dict):
-            s = str(lv.get("level") or "").strip()
-        else:
-            s = str(lv or "").strip()
-        if s and s not in out:
-            out.append(s)
-    if not out:
-        for s in opts.get("reasoning_efforts") or []:
-            s = str(s or "").strip()
-            if s and s not in out:
-                out.append(s)
-    return out
-
-
-def _downgrade_effort(effort: str, supported: list[str]) -> str:
-    """请求档位不在支持表时降级（对齐 normalizeReasoningEffort）：
-
-    - 支持档里有 ≤请求档的 → 取其中最高档；
-    - 支持档全高于请求档 → 取最低支持档（偏离最小）；
-    - 未知档位/空支持表 → 原样透传（上游自行处理，B4 口径）。
-    """
-    if not effort or not supported:
-        return effort
-    req = _DEEPSEEK_EFFORT_RANK.get(effort.strip().lower())
-    if req is None:
-        return effort
-    ranked = [(s, _DEEPSEEK_EFFORT_RANK.get(str(s).strip().lower())) for s in supported]
-    ranked = [(s, i) for s, i in ranked if i is not None]
-    if not ranked:
-        return effort
-    best, best_idx = "", -1
-    for s, i in ranked:
-        if i <= req and i > best_idx:
-            best, best_idx = s, i
-    if best:
-        return best
-    return min(ranked, key=lambda x: x[1])[0]
 
 
 def _has_reasoning_trace(messages: list) -> bool:
@@ -271,17 +219,12 @@ class WorkBuddyChatAdapter:
     """
 
     def __init__(self, bare_model: str, *, ctx=None, model_entry: dict | None = None,
-                 transport: httpx.AsyncBaseTransport | None = None,
-                 thinking_off_mode: str = "force") -> None:
+                 transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._model = str(bare_model or "")
         self._ctx = ctx          # 工具伪装上下文（B5：WorkBuddy 原生支持 tools，不做伪装）
-        self._entry = model_entry or {}
+        self._entry = model_entry or {}  # 目录条目（工厂契约保留；形状归一后暂无消费点）
         self._transport = transport
         self._active_uid = ""
-        # BUG-3 扩展位：「关」的语义。当前仅 "force"（真关：deepseek 系强制
-        # thinking.type=disabled）——设置页做「假关」选项后接线为 "default"
-        # （不注入、落上游默认思考），改动只在该分支一处。
-        self._off_mode = str(thinking_off_mode or "force")
 
     # ─────────────────────── 账号池选号（§4.3） ───────────────────────
 
@@ -354,21 +297,21 @@ class WorkBuddyChatAdapter:
         return body
 
     def _apply_thinking(self, body: dict, request: ChatRequest) -> None:
-        """思考字段出站形状（BUG-3：deepseek 系注入 thinking 开关 + 档位归一）。
+        """思考字段出站形状（透传档位 §2.2：**形状归一翻译**，不选档不改档）。
 
-        官方客户端口径（thinking.go 逆向结论）：「开思考」= `thinking:{type:"enabled"}`
-        **且**带某档 `reasoning_effort`；「关」= `thinking:{type:"disabled"}` 且删档位。
+        透传/强制语义由 relay 层决定（强制档在 routes 统一覆写 ChatRequest），本函数
+        只把 ChatRequest 的思考信号翻译成官方客户端形状——不补档、不降级、不兜底：
 
-        - 显式关（effort ∈ none/off/disabled，或 thinking=False）→ 真关形状
-          （B4 旧口径发 effort=none 在 deepseek 系不生效——探针实测仍出思考）；
-        - 其余（无 thinking / 只有档位 / enabled 缺档）→ 注入 enabled + 补默认档；
-        - 档位超支持范围 → 降级（`_downgrade_effort`）；
-        - 非 deepseek 模型：仅保留 B4 原透传口径（none 直发 / off 删字段），零注入。
+        - 关意图（effort ∈ none/off/disabled，或 thinking=False）→ deepseek 系
+          `thinking:{type:"disabled"}` 真关（裸 effort=none 上游不认，BUG-3 探针实证）；
+          非 deepseek 系 none 直发 / off 删字段（B4 实证有效）；
+        - 开意图（thinking=True 或带非关档位）→ deepseek 系 enabled + agent 原档
+          （不降级不改写，缺档不兜底——§5-6 探针观察上游行为）+ summary:auto；
+          非 deepseek 档位直发 + summary（B4）；
+        - 零表态（无 thinking 无档位）→ 零注入零兜底，落上游默认思考行为。
         """
         raw_effort = request.reasoning_effort
-        effort = raw_effort
-        if effort in ("off", "disabled"):
-            effort = None
+        effort = raw_effort if raw_effort not in ("off", "disabled") else None
         if not _is_deepseek_model(self._model):
             if effort:
                 body["reasoning_effort"] = effort
@@ -381,21 +324,15 @@ class WorkBuddyChatAdapter:
         thinking_off = (raw_effort in ("none", "off", "disabled")
                         or request.thinking is False)
         if thinking_off:
-            if self._off_mode == "default":
-                # 扩展位：「假关」= 不注入关闭/开启开关、不带档位，落上游默认（默认即思考）。
-                # 注意：接线该扩展位时需同步评估 `_backfill_reasoning_content` 的门控
-                # （它读注入后 thinking.type；假关不注入 → 落 hasTrace 半边）——
-                # 上游默认思考形态下若仍需多轮 rc 一致，应在此传「视为 enabled」信号。
-                return
             # 真关（用户拍板 2026-10-09：强制传关闭参数，探针直连实证 reasoning_tokens=0）
             body["thinking"] = {"type": "disabled"}
             return
-        body["thinking"] = {"type": "enabled"}
-        if not effort:
-            effort = _entry_default_effort(self._entry) or _DEEPSEEK_DEFAULT_EFFORT
-        effort = _downgrade_effort(effort, _entry_supported_efforts(self._entry))
-        body["reasoning_effort"] = effort
-        body["reasoning_summary"] = "auto"  # 上游暴露思考的配对参数
+        if request.thinking or effort:
+            body["thinking"] = {"type": "enabled"}
+            if effort:
+                body["reasoning_effort"] = effort
+            body["reasoning_summary"] = "auto"  # 上游暴露思考的配对参数
+        # 零表态：什么都不发（默认档兜底已随「每模型默认思考强度」语义一并退役）
 
     # ─────────────────────── 错误识别钩子 ───────────────────────
 

@@ -397,3 +397,80 @@ def test_workbuddy_tools_pass_through_unmodified(client, monkeypatch):
         adapter_registry.unregister_provider("WorkBuddy")
         from relay.platforms.workbuddy.chat import factory
         adapter_registry.register_provider("WorkBuddy", factory=factory)
+
+
+# ─────────────── 思考强度透传档位：routes 层透传/强制覆写 ───────────────
+
+class _CaptureRequestProvider(_FakeOkProvider):
+    """捕获 chat 收到的 ChatRequest（思考档位透传/强制断言用）。"""
+
+    def __init__(self):
+        self.request = None
+
+    async def chat(self, request):
+        self.request = request
+        return await super().chat(request)
+
+
+def _post_chat(client, **extra):
+    return client.post("/v1/chat/completions",
+                       json={"model": "glm-5.3",
+                             "messages": [{"role": "user", "content": "hi"}], **extra},
+                       headers=_auth())
+
+
+def test_thinking_forced_gear_overrides_agent(client, monkeypatch):
+    """强制档：GUI 配置的具体档覆写 agent 传参（含冲突档位）——routes 层统一覆写。"""
+    _run(storage.save_models(_MODELS))
+    _run(storage.save_thinking_defaults({"牛码/glm-5.3": "low"}))
+    cap = _CaptureRequestProvider()
+    monkeypatch.setattr(routes_mod, "build_provider", lambda model, name, ctx=None: cap)
+    r = _post_chat(client, reasoning_effort="max")
+    assert r.status_code == 200
+    assert cap.request.thinking is True
+    assert cap.request.reasoning_effort == "low"  # 无视 agent 的 max
+
+
+def test_thinking_forced_none_overrides_open_intent(client, monkeypatch):
+    """强制关：agent 传了开+档位也一律覆写为 effort=none（ta3 关路径接住）。"""
+    _run(storage.save_models(_MODELS))
+    _run(storage.save_thinking_defaults({"glm-5.3": "none"}))  # 裸名键 → 读时归一牛码/
+    cap = _CaptureRequestProvider()
+    monkeypatch.setattr(routes_mod, "build_provider", lambda model, name, ctx=None: cap)
+    r = _post_chat(client, thinking=True, reasoning_effort="high")
+    assert r.status_code == 200
+    assert cap.request.thinking is True
+    assert cap.request.reasoning_effort == "none"
+
+
+def test_thinking_passthrough_default_keeps_agent_params(client, monkeypatch):
+    """透传（默认，未配置）：agent 表态原样保留，relay 不碰 ChatRequest。"""
+    _run(storage.save_models(_MODELS))
+    cap = _CaptureRequestProvider()
+    monkeypatch.setattr(routes_mod, "build_provider", lambda model, name, ctx=None: cap)
+    r = _post_chat(client, thinking=True, reasoning_effort="max")
+    assert r.status_code == 200
+    assert cap.request.thinking is True
+    assert cap.request.reasoning_effort == "max"  # 不降级不改写
+
+
+def test_thinking_passthrough_zero_intent_no_injection(client, monkeypatch):
+    """透传 + agent 零表态 → 零注入（行为翻转：旧「兜底 none 强制关」已退役）。"""
+    _run(storage.save_models(_MODELS))
+    cap = _CaptureRequestProvider()
+    monkeypatch.setattr(routes_mod, "build_provider", lambda model, name, ctx=None: cap)
+    r = _post_chat(client)
+    assert r.status_code == 200
+    assert cap.request.thinking is None
+    assert cap.request.reasoning_effort is None
+
+
+def test_thinking_explicit_passthrough_value_keeps_agent(client, monkeypatch):
+    """显式配置 "passthrough" → 同默认透传（值域扩展，覆写不触发）。"""
+    _run(storage.save_models(_MODELS))
+    _run(storage.save_thinking_defaults({"牛码/glm-5.3": "passthrough"}))
+    cap = _CaptureRequestProvider()
+    monkeypatch.setattr(routes_mod, "build_provider", lambda model, name, ctx=None: cap)
+    r = _post_chat(client, reasoning_effort="high")
+    assert r.status_code == 200
+    assert cap.request.reasoning_effort == "high"

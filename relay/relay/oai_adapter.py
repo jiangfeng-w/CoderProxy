@@ -321,38 +321,6 @@ def _parse_tool_calls(tool_calls) -> list[dict] | None:
     return out or None
 
 
-def apply_thinking_default(body: dict, request: ChatRequest, defaults: dict,
-                           unset_mode: str = "default") -> None:
-    """agent 未显式传思考参数时，按兜底策略下发（GUI 模型页/设置页配置）。
-
-    - agent 传了任何思考意图（thinking / enable_thinking / reasoning_effort /
-      output_config / reasoning 任一出现）→ 尊重 agent，不动；
-    - unset_mode="off"（真关）：一律显式关思考，忽略每模型默认值；
-    - unset_mode="default"（假关）：按每模型默认档位下发（未配置 = "none" 关）。
-    "none" → thinking=True + reasoning_effort="none"，走 ta3.py 的
-    thinking:disabled 路径显式关思考（上游默认行为可能是高档位思考，烧 token）。
-
-    键比较统一走前缀命名空间归一（§4.1）：request.model 与 defaults 的键都可能是
-    「裸名 / `牛码/x` / `WorkBuddy/x`」形态，先归一到规范全名再比较。
-    """
-    # 「是否表态」用原始 body 判定（含未识别形态如 thinking:"auto"、未知 type——
-    # 传了就不覆盖）；与 routes 层「归一后 ChatRequest」判定互补：那层防已识别信号
-    # 被默认值覆盖，本层兜「未识别但确有意图」的形态。
-    if (body.get("thinking") is not None
-            or body.get("enable_thinking") is not None
-            or body.get("output_config") or body.get("reasoning")
-            or body.get("reasoning_effort")):
-        return
-    if unset_mode == "off":
-        effort = "none"
-    else:
-        key = model_ref.canonical_key(request.model)
-        table = {model_ref.canonical_key(k): v for k, v in (defaults or {}).items()}
-        effort = str(table.get(key) or "none")
-    request.thinking = True
-    request.reasoning_effort = effort
-
-
 def oai_request_to_chat_request(body: dict) -> ChatRequest:
     """OpenAI 请求体 → ChatRequest。"""
     messages: list[ChatMessage] = []

@@ -688,14 +688,20 @@ async def _handle_chat(request: Request, path_protocol: str):
         raise HTTPException(status_code=400, detail="messages 不能为空")
 
     # agent 显式传的思考档位不在该模型上游档位内时**透传**（2026-09-06 用户拍板）：
-    # 不做回退改写，档位合法性由上游网关自行处理。
+    # 不做回退改写，档位合法性由上游网关自行处理（adapter 层降级改写已随之退役）。
 
-    # 每模型默认思考强度（GUI 模型页配置）：agent 未显式传思考参数时按默认值下发。
-    # 判断依据用**归一后的 ChatRequest**（三协议都会把自家思考形态转成 thinking/
-    # reasoning_effort），避免 Responses 的 `reasoning.effort` 被当成「没传」覆盖掉。
-    if chat_request.thinking is None and not chat_request.reasoning_effort:
-        oai_adapter.apply_thinking_default(
-            body, chat_request, await storage.get_thinking_defaults())
+    # 每模型思考档位（GUI 模型页配置，spec 思考强度透传档位 §2.2，2026-10-11 拍板）：
+    # - 未配置 / "passthrough"（默认）→ 透传：不碰 chat_request，出站 adapter 做形状
+    #   归一翻译（agent 未表态零注入，不再有「兜底 none 强制关」——行为翻转见 spec §4）；
+    # - 具体档（none/low/high/…）→ 强制：无视 agent 传参覆写 thinking=True + effort，
+    #   关 = effort"none"，两家 adapter 既有关路径自然接住（ta3 → thinking:disabled、
+    #   WB deepseek → 真关 / 非 deepseek → none 直发）。三链路（牛码/WB/自定义）
+    #   在此一处生效，provider 层零改动。
+    forced_effort = (await storage.get_thinking_defaults()).get(
+        model_ref.canonical_key(chat_request.model))
+    if forced_effort and forced_effort != storage.THINKING_EFFORT_PASSTHROUGH:
+        chat_request.thinking = True
+        chat_request.reasoning_effort = forced_effort
 
     # M11：工具指纹采集（被动）。在伪装前抓 agent 声明的真实工具，落库供语义映射；
     # 跳过连通性探针（probe）请求，避免污染指纹表。
@@ -927,7 +933,6 @@ async def auth_config():
         "tool_mode": settings.tool_mode,
         "model_whitelist": await storage.get_model_whitelist(),
         "thinking_defaults": await storage.get_thinking_defaults(),
-        "thinking_unset_mode": await storage.get_thinking_unset_mode(),
     }
 
 
@@ -965,13 +970,7 @@ async def auth_config_update(request: Request):
         or not all(isinstance(k, str) and storage.valid_thinking_effort(v)
                    for k, v in thinking_defaults.items())
     ):
-        raise HTTPException(status_code=400, detail="思考强度默认值格式不正确")
-
-    thinking_unset_mode = body.get("thinking_unset_mode")
-    if thinking_unset_mode is not None and (
-        thinking_unset_mode not in storage.VALID_THINKING_UNSET_MODES
-    ):
-        raise HTTPException(status_code=400, detail="无效的思考兜底策略")
+        raise HTTPException(status_code=400, detail="思考强度档位格式不正确")
 
     port = body.get("port")
     if port is not None and (not isinstance(port, int) or not (1 <= port <= 65535)):
@@ -990,8 +989,6 @@ async def auth_config_update(request: Request):
         await storage.set_model_whitelist(model_whitelist)
     if thinking_defaults is not None:
         await storage.save_thinking_defaults(thinking_defaults)
-    if thinking_unset_mode is not None:
-        await storage.save_thinking_unset_mode(thinking_unset_mode)
     if port is not None:
         await storage.save_port(port)
 

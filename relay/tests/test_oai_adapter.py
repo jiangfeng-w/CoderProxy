@@ -4,7 +4,6 @@ from app.models.schemas import ChatRequest
 from relay.oai_adapter import (
     _finish_reason_to_openai,
     _sanitize_fingerprint,
-    apply_thinking_default,
     model_to_openai,
     oai_request_to_chat_request,
 )
@@ -153,15 +152,6 @@ def test_parse_thinking_adaptive_is_on():
     assert req.thinking is True
 
 
-def test_apply_thinking_default_respects_output_config():
-    """兜底门控：output_config 已表态 → 默认思考值不覆盖（raw-body 意图判定）。"""
-    body = {"model": "glm-5.3", "messages": [{"role": "user", "content": "x"}],
-            "output_config": {"effort": "max"}}
-    req = oai_request_to_chat_request(body)
-    apply_thinking_default(body, req, {"glm-5.3": "none"})
-    assert req.reasoning_effort == "max"  # 非被覆盖成 none
-
-
 def test_parse_thinking_dict_glm_style():
     """GLM/智谱系（ZCode）发 {"type": "enabled"}，不得在校验阶段炸 500。"""
     body = {
@@ -201,16 +191,6 @@ def test_parse_enable_thinking_bool():
     assert off.reasoning_effort == "none"
 
 
-def test_apply_thinking_default_respects_enable_thinking():
-    # agent 只传了 enable_thinking（无 thinking/reasoning_effort）→ 尊重，默认值不覆盖
-    body = {"model": "glm-5.3", "messages": [{"role": "user", "content": "x"}],
-            "enable_thinking": True}
-    req = oai_request_to_chat_request(body)
-    apply_thinking_default(body, req, {"glm-5.3": "none"})
-    assert req.thinking is True
-    assert req.reasoning_effort is None
-
-
 def test_parse_thinking_str_and_bool():
     base = {"model": "m", "messages": [{"role": "user", "content": "x"}]}
     assert oai_request_to_chat_request({**base, "thinking": "enabled"}).thinking is True
@@ -220,45 +200,6 @@ def test_parse_thinking_str_and_bool():
     off = oai_request_to_chat_request({**base, "thinking": "disabled"})
     assert off.thinking is True
     assert off.reasoning_effort == "none"
-
-
-def test_apply_thinking_default_unset_means_off():
-    # 未配置默认档位的模型 → 显式关思考（thinking + reasoning_effort="none"）
-    req = oai_request_to_chat_request({"model": "glm-5.3",
-                                       "messages": [{"role": "user", "content": "x"}]})
-    apply_thinking_default({"model": "glm-5.3"}, req, {})
-    assert req.thinking is True
-    assert req.reasoning_effort == "none"
-
-
-def test_apply_thinking_default_configured_level():
-    req = oai_request_to_chat_request({"model": "glm-5.3",
-                                       "messages": [{"role": "user", "content": "x"}]})
-    apply_thinking_default({"model": "glm-5.3"}, req, {"glm-5.3": "high"})
-    assert req.thinking is True
-    assert req.reasoning_effort == "high"
-
-
-def test_apply_thinking_default_hard_off_ignores_model_default():
-    # 真关（off）：agent 不传时一律关思考，忽略每模型默认值
-    req = oai_request_to_chat_request({"model": "glm-5.3",
-                                       "messages": [{"role": "user", "content": "x"}]})
-    apply_thinking_default({"model": "glm-5.3"}, req, {"glm-5.3": "high"}, unset_mode="off")
-    assert req.thinking is True
-    assert req.reasoning_effort == "none"
-
-
-def test_apply_thinking_default_respects_agent_params():
-    # agent 显式传了 thinking 或 reasoning_effort → 不动
-    for body in (
-        {"thinking": False},
-        {"reasoning_effort": "low"},
-        {"thinking": {"type": "enabled"}},
-    ):
-        full = {"model": "glm-5.3", "messages": [{"role": "user", "content": "x"}], **body}
-        req = oai_request_to_chat_request(full)
-        apply_thinking_default(full, req, {"glm-5.3": "high"})
-        assert req.reasoning_effort != "high" or body.get("reasoning_effort") == "high"
 
 
 def test_finish_reason_anthropic_mapped():
