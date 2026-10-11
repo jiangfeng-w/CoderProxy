@@ -79,7 +79,10 @@ async function pollStatus() {
     store.relay = await relayStatus()
     // relay 就绪后补一次配置装载：顶栏模式/端口展示以 config store（relay 真值）为准，
     // 不读壳的启动快照。装载失败不打扰（下轮重试；各页挂载也会兜底 load）。
-    if (store.relay.running && !configStore.loaded) {
+    // api_key 为空也补载（2026-10-11 401 防复发）：dev 会话 HMR 会重置 api.ts 模块级
+    // _authKey，而 store 的 loaded 跨热更新存活——只看 loaded 会漏掉「已装载但 key 空」，
+    // 空 key 无法自愈（全部请求 401 缺少 Authorization）。relay 的 key 恒非空，此条件安全。
+    if (store.relay.running && (!configStore.loaded || !configStore.api_key)) {
       try {
         await configStore.load()
       } catch {
