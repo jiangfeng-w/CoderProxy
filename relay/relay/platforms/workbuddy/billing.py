@@ -38,6 +38,11 @@ _client = WbClient()
 # 已签到幂等码：官方 CLI 语义（workbuddy-switch 交叉验证）
 CHECKED_IN_CODES = (10001, 14001)
 
+# SaaS/CLI 回退皮肤的 UA（对齐 9router providers/registry/codebuddy-cn.js）——9router
+# 实证该组合在旧 get-user-resource 上对免费号有效，版本**刻意钉死**、不随
+# settings.wb_client_version 走；test_wb_billing 断言字面量防无意改动。
+SAAS_FALLBACK_UA = "CLI/2.108.1 CodeBuddy/2.108.1"
+
 # get-user-resource 响应的数组形态（顺序即优先级，对齐 cockpit-tools user_resource_items）
 _QUOTA_ITEMS_PATHS = (
     "/data/resources",
@@ -200,7 +205,7 @@ def _saas_headers(account: dict) -> dict[str, str]:
     实测该组合在旧 get-user-resource 上对免费号有效。
     """
     return {
-        "User-Agent": "CLI/2.108.1 CodeBuddy/2.108.1",
+        "User-Agent": SAAS_FALLBACK_UA,
         "X-Product": "SaaS",
         "X-IDE-Type": "CLI",
         "X-IDE-Name": "CLI",
