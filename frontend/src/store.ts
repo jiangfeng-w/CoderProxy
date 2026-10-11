@@ -66,3 +66,12 @@ export const STANDARD_EFFORT_LABELS: Record<string, string> = {
 export function offThinkingUnsupported(model?: string | null): boolean {
   return !!model && model.toLowerCase().includes('glm-5.3')
 }
+
+/** 「关」已实测上游支持的系列（下拉标「·上游」，保证生效）：deepseek 系实测真关
+ * （B4 探针，off 意图翻译成 thinking:{type:"disabled"} 生效）；kimi-k3 关思考实测正常
+ * 且未降级（2026-09-06 小号）。上游目录 thinkingLevels 均不含 none，无法用目录数据判断，
+ * 只能维护此实测清单；其余模型无实测数据，下拉按「·目录外」口径标注（不保证生效）。
+ * 仅用于思考下拉的「关」选项标注（无档位的模型不渲染下拉，不受此清单影响）。 */
+export function offThinkingSupported(model?: string | null): boolean {
+  return !!model && /deepseek|kimi-k3/i.test(model)
+}
