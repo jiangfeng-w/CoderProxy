@@ -5,7 +5,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { NButton, NDatePicker, NEmpty, NPagination, NPopconfirm, NSelect, NSpin, useMessage } from 'naive-ui'
 import { fetchLogs, fetchLogKinds, fetchLogModels, deleteLogs, getModels, type LogRow, type LogsQuery } from '../api'
-import { STANDARD_EFFORT_LABELS } from '../store'
+import { STANDARD_EFFORT_LABELS, offThinkingUnsupported } from '../store'
 
 const message = useMessage()
 const POLL_MS = 2500
@@ -160,7 +160,7 @@ function detailOf(row: LogRow): string {
       const effort = typeof rec.thinking_effort === 'string' ? rec.thinking_effort : ''
       const thinking = rec.thinking === true
       const label = (effort && row.model && effortLabels.value[row.model]?.[effort]) || STANDARD_EFFORT_LABELS[effort] || ''
-      const thinkText = effort ? (effort === 'none' ? ' · 思考关' : ` · 思考 ${label ? `${label}（${effort}）` : effort}`) : thinking ? ' · 思考开' : ''
+      const thinkText = effort ? (effort === 'none' ? ` · 思考关${offThinkingUnsupported(row.model) ? '（上游不支持，仍思考）' : ''}` : ` · 思考 ${label ? `${label}（${effort}）` : effort}`) : thinking ? ' · 思考开' : ''
       return `工具 ${tools} 个${row.stream ? ' · 流式' : ''}${thinkText}`
     }
     case 'chat_error': {

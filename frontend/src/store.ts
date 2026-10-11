@@ -58,3 +58,11 @@ export const STANDARD_EFFORT_LABELS: Record<string, string> = {
   xhigh: '超高',
   max: '极致'
 }
+
+/** GLM-5.3 系列上游（智谱）强制思考、不支持关闭：官方文档明确该系列
+ * "use forced thinking and cannot be disabled"（仅认 low/high/max，直连关参数报 400/1210）；
+ * 2026-10-11 WB 小号实测网关对 none/disabled/minimal 不报错也不降档，静默忽略、模型仍思考。
+ * 模型 id 带平台前缀（如 牛码/glm-5.3-flash），故用包含匹配而非 startsWith。 */
+export function offThinkingUnsupported(model?: string | null): boolean {
+  return !!model && model.toLowerCase().includes('glm-5.3')
+}

@@ -6,7 +6,7 @@
 import { h, type VNodeChild } from 'vue'
 import { NSelect, NTooltip } from 'naive-ui'
 import type { OaiModel } from '../api'
-import { STANDARD_EFFORTS, STANDARD_EFFORT_LABELS, useConfigStore } from '../store'
+import { STANDARD_EFFORTS, STANDARD_EFFORT_LABELS, offThinkingUnsupported, useConfigStore } from '../store'
 
 defineProps<{ model: OaiModel }>()
 const config = useConfigStore()
@@ -26,7 +26,7 @@ const EFFORT_DESC: Record<string, string> = {
 
 /** 每个档位选项的 hover 说明：head=一句话概括（首行高亮），body=详细描述（次行起）。
  * 具体档 = 强制下发（无视 agent 传参）；目录档位保证生效，目录外标注不保证。
- * 「关」的 GLM-5.3 风险提示仅对 glm-5.3 系列显示（官方文档称该系列不支持关思考）。 */
+ * 「关」的 GLM-5.3 警告仅对 glm-5.3 系列显示（官方文档 + 实测确认该系强制思考不可关闭）。 */
 function effortTip(m: OaiModel, value: string): { head: string; body: string } {
   if (value === PASSTHROUGH) {
     return {
@@ -35,7 +35,7 @@ function effortTip(m: OaiModel, value: string): { head: string; body: string } {
     }
   }
   if (value === 'none') {
-    const body = m.id.toLowerCase().startsWith('glm-5.3') ? '注意：GLM-5.3 系列官方不支持关闭思考（直连会报错），牛码网关可能映射为低档位，以实测为准' : '无视 agent 传参，一律显式关闭思考（强制）'
+    const body = offThinkingUnsupported(m.id) ? '注意：GLM-5.3 系列上游强制思考、不支持关闭（智谱直连报 400）；实测网关不报错也不降档，关闭参数被静默忽略，模型仍会思考' : '无视 agent 传参，一律显式关闭思考（强制）'
     return { head: '显式关闭思考（强制）', body }
   }
   const head = EFFORT_DESC[value] ?? value
@@ -62,7 +62,8 @@ function effortRenderer(m: OaiModel) {
 
 /** 思考强度下拉选项：透传（默认）置顶，关（none）次之；目录档位 + 目录外标准档合并后
  * 统一按强度排序（微/低/中/高/超高/最大）。每个档位统一「中文名（level）·来源」格式：
- * 上游档位标「·上游」（无上游中文名时兜底标准名），目录外标「·目录外」，详细说明在 hover tooltip。 */
+ * 上游档位标「·上游」（无上游中文名时兜底标准名），目录外标「·目录外」，详细说明在 hover tooltip。
+ * glm-5.3 系的「关」额外标「·上游不支持」（强制思考关不掉，见 store.offThinkingUnsupported）。 */
 function effortOptions(m: OaiModel): { label: string; value: string }[] {
   const labels = m.reasoning_labels ?? {}
   const catalogLevels = m.reasoning_efforts ?? []
@@ -78,7 +79,8 @@ function effortOptions(m: OaiModel): { label: string; value: string }[] {
     }
     return { label: `${STANDARD_EFFORT_LABELS[lv] ?? lv}（${lv}）·目录外`, value: lv }
   })
-  return [{ label: '透传（默认）', value: PASSTHROUGH }, { label: '关（不思考）', value: 'none' }, ...opts]
+  const offLabel = offThinkingUnsupported(m.id) ? '关（不思考）· 上游不支持' : '关（不思考）'
+  return [{ label: '透传（默认）', value: PASSTHROUGH }, { label: offLabel, value: 'none' }, ...opts]
 }
 
 /** 当前生效的思考档位（未配置 = 透传）。 */
