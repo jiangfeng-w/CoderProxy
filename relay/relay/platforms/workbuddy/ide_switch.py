@@ -568,3 +568,32 @@ def start_client() -> None:
         subprocess.Popen([str(exe)], cwd=str(exe.parent), **kwargs)
     except OSError as e:
         raise IdeSwitchError(f"启动 WorkBuddy 客户端失败：{e}") from e
+
+
+# ── 切换编排（用户拍板 2026-10-11：客户端运行中 → 自动关闭 → 写入 → 自动重启） ──
+
+
+async def switch_account(account: dict) -> dict:
+    """账号池凭证 → 官方客户端登录态文件，返回切换结果。
+
+    顺序：先派生密钥（失败时客户端未受影响）→ 关客户端（写窗口前提，退出时
+    旧 token 会回写覆盖）→ 写登录态 → 重启。写失败不重启，客户端保持关闭，
+    用户重试时 close 对已退进程无害（check=False 忽略 taskkill 非零码）。
+    """
+    if sys.platform != "win32":
+        raise IdeSwitchError("IDE 切号当前仅支持 Windows")
+    key = await get_official_key()
+    auth_file = auth_file_path()
+    if auth_file is None:
+        raise IdeSwitchError("无法定位 WorkBuddy 登录态文件路径（本机缺少 LOCALAPPDATA）")
+    await asyncio.to_thread(close_client)
+    await asyncio.to_thread(write_account_to_auth_file_sync, account, auth_file, key)
+    await asyncio.to_thread(start_client)
+    return {"status": "ok", "current_uid": str(account.get("uid") or "")}
+
+
+async def ide_state() -> dict:
+    """客户端概览 + 运行状态（供前端「IDE 在用」标记与按钮可用性）。"""
+    state = await asyncio.to_thread(read_ide_state_sync)
+    state["running"] = await asyncio.to_thread(is_client_running)
+    return state

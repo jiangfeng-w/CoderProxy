@@ -187,6 +187,65 @@ async def test_quota_via_routes(client):
     assert r.json()["quota"]["remaining"] == 70
 
 
+# ─────────────────────────── IDE 账号切换 ───────────────────────────
+
+def test_ide_endpoints_require_api_key(client):
+    assert client.get("/v1/platforms/workbuddy/ide-state").status_code == 401
+    assert client.post("/v1/platforms/workbuddy/accounts/x/ide-switch").status_code == 401
+
+
+def test_ide_state_via_routes(client, monkeypatch):
+    from relay.platforms.workbuddy import ide_switch
+
+    async def fake_ide_state():
+        return {"installed": True, "exe_path": "X:/wb/WorkBuddy.exe", "auth_exists": True,
+                "logged_out": False, "current_uid": "u_live", "running": False}
+
+    monkeypatch.setattr(ide_switch, "ide_state", fake_ide_state)
+    r = client.get("/v1/platforms/workbuddy/ide-state", headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["current_uid"] == "u_live"
+    assert r.json()["running"] is False
+
+
+async def test_ide_switch_via_routes(client, monkeypatch):
+    """切换端点把账号池凭证（含 token）交给编排层，本机副作用全部 mock。"""
+    from relay.platforms.workbuddy import ide_switch
+
+    await store.upsert_account("workbuddy", {"uid": "u_sw", "access_token": "at-sw"})
+    calls: dict = {}
+
+    async def fake_switch(account):
+        calls["account"] = account
+        return {"status": "ok", "current_uid": account["uid"]}
+
+    monkeypatch.setattr(ide_switch, "switch_account", fake_switch)
+    r = client.post("/v1/platforms/workbuddy/accounts/u_sw/ide-switch", headers=_auth())
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "current_uid": "u_sw"}
+    assert calls["account"]["access_token"] == "at-sw"
+
+
+async def test_ide_switch_404_unknown_account(client):
+    r = client.post("/v1/platforms/workbuddy/accounts/u_missing/ide-switch", headers=_auth())
+    assert r.status_code == 404
+
+
+async def test_ide_switch_error_maps_409(client, monkeypatch):
+    """IdeSwitchError（客户端缺失/密钥/格式/hash 冲突）→ 409 + 中文 detail。"""
+    from relay.platforms.workbuddy import ide_switch
+
+    await store.upsert_account("workbuddy", {"uid": "u_err", "access_token": "at"})
+
+    async def failing(account):
+        raise ide_switch.IdeSwitchError("WorkBuddy 官方加密格式不受支持，已停止覆盖")
+
+    monkeypatch.setattr(ide_switch, "switch_account", failing)
+    r = client.post("/v1/platforms/workbuddy/accounts/u_err/ide-switch", headers=_auth())
+    assert r.status_code == 409
+    assert "不受支持" in r.json()["detail"]
+
+
 # ─────────────────────────── ta3 回归（挂载不侵入）──────────────────────────
 
 def test_ta3_routes_unaffected(client):

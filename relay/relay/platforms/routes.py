@@ -22,6 +22,7 @@ from relay.platforms.base import (
     PlatformError,
     PlatformUpstreamError,
 )
+from relay.platforms.workbuddy.ide_switch import IdeSwitchError
 
 router = APIRouter(prefix="/v1/platforms", dependencies=[Depends(require_api_key)])
 
@@ -110,3 +111,33 @@ async def checkin_status(platform: str, uid: str):
 @router.post("/{platform}/accounts/{uid}/quota")
 async def refresh_quota(platform: str, uid: str):
     return await _dispatch(platform, lambda a: a.refresh_quota(uid))
+
+
+# ── WorkBuddy IDE 账号切换（专用子路径：客户端登录态读写是 WB 桌面端特有概念，
+#    不进通用 {platform} 抽象；spec「WorkBuddy-IDE账号切换」） ──
+
+
+@router.get("/workbuddy/ide-state")
+async def wb_ide_state():
+    """本机官方客户端概览：安装/运行/登录态（current_uid 明文读取，无需密钥）。"""
+    from relay.platforms.workbuddy import ide_switch
+
+    try:
+        return await ide_switch.ide_state()
+    except IdeSwitchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/workbuddy/accounts/{uid}/ide-switch")
+async def wb_ide_switch(uid: str):
+    """把账号池该账号的凭证写入官方客户端登录态文件并重启客户端。"""
+    from relay.platforms import store
+    from relay.platforms.workbuddy import ide_switch
+
+    account = await store.find_account("workbuddy", uid)
+    if account is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    try:
+        return await ide_switch.switch_account(account)
+    except IdeSwitchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
