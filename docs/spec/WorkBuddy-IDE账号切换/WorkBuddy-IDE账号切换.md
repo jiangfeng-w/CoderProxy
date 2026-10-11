@@ -1,6 +1,6 @@
 # WorkBuddy IDE 账号切换
 
-> **状态**：已实现（2026-10-11；真机只读探针 4 项 PASS——密钥派生/keyId 一致/解密/round-trip；**真机切换到号验证待用户手动验收**）
+> **状态**：已实现（2026-10-11；真机只读探针 4 项 PASS——密钥派生/keyId 一致/解密/round-trip；用户验收通过：真机切号正常）
 > **优先级**：核心
 > **来源**：用户需求「像 cockpit tools 一样切换 WorkBuddy 登录的账号」；承接「WorkBuddy多账号登录与签到」的账号池（该需求 UI 文案「添加账号并用于 IDE 切换」的预留意图落地）
 > **隐私声明**：本文档不含任何真实账号、凭证、token；keyId 为密钥指纹（sha256 前 16 hex），非密钥本身。
@@ -154,4 +154,4 @@ docs/spec/WorkBuddy-IDE账号切换/探针-IDE切换只读校验.py   # 真机�
 - [x] 源码真机冒烟：ide-state 返回真实安装路径/current_uid（明文零密钥），鉴权 401 门禁生效
 - [x] 只读探针 4 项 PASS（`探针-IDE切换只读校验.py`）：密钥派生 → keyId 一致 → 白名单字段解密（JWT 非空）→ encode/decode round-trip 全等
 - [x] 打包冒烟：`py -3.13 build_sidecar.py` onefile 产物 ide-state 200（cryptography 随包跟进，hiddenimports 双保险登记生效）
-- [ ] 手动验收（待用户）：真机点「切到此号」→ 客户端自动关闭/重启并登录目标账号；切回验证
+- [x] 手动验收（2026-10-11 用户确认）：真机「切到此号」→ 客户端自动关闭/重启并登录目标账号正常
