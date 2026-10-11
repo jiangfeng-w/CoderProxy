@@ -1,6 +1,6 @@
 # WorkBuddy 账号多方式导入
 
-> **状态**：方案已定稿（2026-10-11；`GET /v2/plugin/accounts` 端点契约与 JWT 声明结构已本机只读实测）
+> **状态**：已实现（2026-10-11；端点契约/JWT 兜底已本机只读实测（探针 3 项 PASS）；**三种方式真机导入待用户手动验收**）
 > **优先级**：核心
 > **来源**：用户需求「像 cockpit tools 一样，添加账号有三种方式：OAuth 授权、json 粘贴导入、读取本地 workbuddy 配置导入」（附 cockpit-tools 弹窗三 tab 截图）
 > **隐私声明**：本文档不含任何真实账号、凭证、token；响应契约仅字段名级脱敏记录。
@@ -130,8 +130,9 @@ docs/spec/WorkBuddy账号多方式导入/探针-账号端点契约.py   # /v2/pl
 
 ## 验收
 
-- [ ] `pytest tests/ -x -q` 全绿（新增解析/路由用例；安全断言：导入响应不含 token）
-- [ ] ruff（新文件）+ `npm run format:check` + `npm run build` 通过
-- [ ] 源码起服冒烟：import 端点 JSON/纯 token 分流正确、import-local 真机返回账号池同 uid 账号
-- [ ] 打包冒烟：onefile 产物 import-local 200
+- [x] `pytest tests/ -x -q` 全绿（517 passed；test_wb_imports 17 例解析/补全/本机导入；test_wb_routes +6 例路由含安全断言：导入响应不含 token）
+- [x] ruff（新文件）+ `npm run format:check` + `npm run build` 通过
+- [x] 源码起服冒烟：JSON 批量导入入库正确（无 uid 降级主键）、坏 JSON 400、**import-local 真机读出真实登录账号**（隔离数据目录）、token 零泄漏
+- [x] 只读探针 3 项 PASS（`探针-账号端点契约.py`）：登录态解密 → /v2/plugin/accounts 契约 → 字段形态（确认不含 email/refreshToken/expiresAt，JWT 兜底设计成立）
+- [x] 打包冒烟：onefile 产物 import 端点 200（hiddenimports 双保险登记生效）
 - [ ] 手动验收（待用户）：三种方式各导入一次成功，账号卡片正确显示
