@@ -2,6 +2,8 @@
 
 不触网：oauth/billing 模块的 WbClient 以 MockTransport 注入；存储落 tmp。
 """
+import json
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -192,6 +194,8 @@ async def test_quota_via_routes(client):
 def test_ide_endpoints_require_api_key(client):
     assert client.get("/v1/platforms/workbuddy/ide-state").status_code == 401
     assert client.post("/v1/platforms/workbuddy/accounts/x/ide-switch").status_code == 401
+    assert client.post("/v1/platforms/workbuddy/accounts/import").status_code == 401
+    assert client.post("/v1/platforms/workbuddy/accounts/import-local").status_code == 401
 
 
 def test_ide_state_via_routes(client, monkeypatch):
@@ -244,6 +248,87 @@ async def test_ide_switch_error_maps_409(client, monkeypatch):
     r = client.post("/v1/platforms/workbuddy/accounts/u_err/ide-switch", headers=_auth())
     assert r.status_code == 409
     assert "不受支持" in r.json()["detail"]
+
+
+# ─────────────────────────── 账号导入（粘贴/JSON/本机） ───────────────────────────
+
+async def test_import_json_via_routes(client):
+    """JSON 粘贴导入：不联网、批量、响应经 AccountView 不含 token。"""
+    text = json.dumps([
+        {"access_token": "ACCESS_SECRET_1", "uid": "u_imp1", "nickname": "导入一号"},
+        {"access_token": "ACCESS_SECRET_2"},
+    ])
+    r = client.post("/v1/platforms/workbuddy/accounts/import",
+                    json={"text": text}, headers=_auth())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["imported"] == 2
+    assert body["accounts"][0]["uid"] == "u_imp1"
+    assert body["accounts"][1]["uid"].startswith("wb_")  # 无 uid 降级主键
+    assert "ACCESS_SECRET" not in r.text  # 安全断言：响应不含 token
+
+
+async def test_import_plain_token_via_routes(client, monkeypatch):
+    """纯 token 走 accounts 补全（MockTransport）；预取 mock 掉。"""
+    from relay.platforms.workbuddy import imports as wb_imports
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/v2/plugin/accounts")
+        return httpx.Response(200, json={"code": 0, "data": {"accounts": [
+            {"uid": "u_tok", "nickname": "贴入号", "lastLogin": True}]}})
+
+    client_ctx = _ClientCtx(oauth.WbClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(wb_imports, "WbClient", lambda: client_ctx)
+
+    async def fake_prefetch(account):
+        return
+
+    monkeypatch.setattr(oauth, "prefetch_caches", fake_prefetch)
+    r = client.post("/v1/platforms/workbuddy/accounts/import",
+                    json={"text": "u_tok+jwt-token"}, headers=_auth())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["imported"] == 1
+    assert body["accounts"][0]["uid"] == "u_tok"
+    assert "jwt-token" not in r.text
+
+
+def test_import_parse_error_maps_400(client):
+    r = client.post("/v1/platforms/workbuddy/accounts/import",
+                    json={"text": "{bad"}, headers=_auth())
+    assert r.status_code == 400
+    assert "不是有效 JSON" in r.json()["detail"]
+
+
+def test_import_empty_text_maps_400(client):
+    r = client.post("/v1/platforms/workbuddy/accounts/import",
+                    json={"text": ""}, headers=_auth())
+    assert r.status_code == 400
+
+
+def test_import_local_maps_409_when_absent(client, monkeypatch):
+    """本机无登录态 → 409（中文 detail）。"""
+    from relay.platforms.workbuddy import ide_switch
+    from relay.platforms.workbuddy import imports as wb_imports
+
+    monkeypatch.setattr(ide_switch, "auth_file_path", lambda: None)
+    r = client.post("/v1/platforms/workbuddy/accounts/import-local", headers=_auth())
+    assert r.status_code == 409
+    assert "未在本机" in r.json()["detail"]
+    assert wb_imports.PLATFORM_ID == "workbuddy"
+
+
+class _ClientCtx:
+    """路由测试用 WbClient 薄包装（对齐 test_wb_imports._Ctx）。"""
+
+    def __init__(self, client: "oauth.WbClient"):
+        self._client = client
+
+    async def request_json(self, *args, **kwargs):
+        return await self._client.request_json(*args, **kwargs)
+
+    async def close(self):
+        await self._client.close()
 
 
 # ─────────────────────────── ta3 回归（挂载不侵入）──────────────────────────

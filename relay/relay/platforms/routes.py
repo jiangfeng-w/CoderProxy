@@ -141,3 +141,35 @@ async def wb_ide_switch(uid: str):
         return await ide_switch.switch_account(account)
     except IdeSwitchError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/workbuddy/accounts/import")
+async def wb_import(body: dict):
+    """粘贴 Token/JSON 与 JSON 文件的统一导入入口（body {text}）。
+
+    响应一律 AccountView 序列化（不含 token）；解析错误 400、accounts 补全失败 502。
+    """
+    from relay.platforms.base import AccountView
+    from relay.platforms.workbuddy import imports
+
+    text = str((body or {}).get("text") or "")
+    try:
+        rows = await imports.import_text(text)
+    except imports.ImportParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PlatformUpstreamError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"imported": len(rows), "accounts": [AccountView.from_dict(r).to_dict() for r in rows]}
+
+
+@router.post("/workbuddy/accounts/import-local")
+async def wb_import_local():
+    """读本机官方客户端当前登录账号入库；本机无登录态 → 409。"""
+    from relay.platforms.base import AccountView
+    from relay.platforms.workbuddy import imports
+
+    try:
+        row = await imports.import_local()
+    except imports.ImportParseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"imported": 1, "accounts": [AccountView.from_dict(row).to_dict()]}
