@@ -149,6 +149,7 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
 | 顶栏 | 供应商页已拍板「完全去牛码态」，本需求不动前端顶栏（服务开关按钮仍在，语义已中立） |
 | 自定义供应商转发 | **本期一并接入**（供应商页 F5 明确依赖本需求 adapter 层）：`enabled=true` 的条目进 `/v1/models`（`<name>/<model>`，模型清单手填）+ `adapter_for` 命中即转发（OpenAI 兼容 baseurl + Bearer key + 默认实现，无钩子）；`enabled=false` 不出现。密钥不出 relay（管理 API 不回显口径不变） |
 | 自定义供应商流式/非流式 | 默认实现按 `stream` 原样转发；上游 SSE 帧清洗（复用 9router「白名单重建」思路：只留 `id`/`object`/`created`/`model`/`choices[].delta|finish_reason`/`usage`） |
+| 自定义供应商连接重试（2026-10-11 增补） | 连接阶段瞬时错误重试，对齐 WorkBuddy 同款口径（`custom_openai.py`）：仅 `ConnectError`/`ConnectTimeout`（连接未建立、请求未发出，幂等安全），2 次尝试 + 1s 退避；进流后绝不重试（结构性保证，防重复产出/重复计费）；HTTP 错误响应语义不变。流式（AsyncExitStack + 重试进入）与非流式两路径均覆盖，4xx 退流聚合路径经流式入口天然带上 |
 
 ### 4.5 出口管道与横切
 

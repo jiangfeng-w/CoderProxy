@@ -1,12 +1,18 @@
 <script setup lang="ts">
-// 自定义供应商 tab（供应商页 F5，本期仅配置管理，转发待聚合需求 adapter 层）：
+// 自定义供应商 tab（供应商页 F5 + 聚合 §4.4）：
 // 账号区=供应商条目（名称/baseurl/apikey/启停，增删改，参考 cc-switch）；模型区=选中条目的模型清单（手填）。
+// 请求转发已生效：agent 以「供应商名/模型名」调用即经 OpenAI 兼容协议转发至 base_url。
+// 「模型显示」弹窗（对齐 WorkBuddy tab）：全部自定义模型逐条显示开关（显示+启用双写）；
+// 自定义默认恒可见（无「无档位默认隐藏」规则），隐藏即停用；恢复默认只清自定义前缀覆盖。
 // api_key 永不回显（响应只有 has_api_key）；编辑框留空 = 保留原 key。
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { NButton, NEmpty, NInput, NModal, NPopconfirm, NSwitch, NTag, useMessage } from 'naive-ui'
-import { createCustomProvider, deleteCustomProvider, listCustomProviders, updateCustomProvider, type CustomProvider } from '../../api'
+import { createCustomProvider, deleteCustomProvider, getModels, listCustomProviders, updateCustomProvider, type CustomProvider, type OaiModel } from '../../api'
+import { useConfigStore } from '../../store'
 
 const message = useMessage()
+const config = useConfigStore()
+const DISABLE_ALL = '__none__'
 
 const providers = ref<CustomProvider[]>([])
 const selectedId = ref('')
@@ -131,6 +137,126 @@ async function removeModel(p: CustomProvider, model: string) {
   }
 }
 
+// ── 「模型显示」弹窗（对齐 WorkBuddy tab；自定义默认恒可见，无「无档位默认隐藏」规则） ──
+const showVisDlg = ref(false)
+const visSearch = ref('')
+const customModels = ref<OaiModel[]>([])
+const visLoading = ref(false)
+
+/** 目录中属于自定义供应商的条目（前缀=供应商名；/v1/models 仅聚合 enabled 条目）。 */
+async function refreshVisModels() {
+  const all = (await getModels(true)).data
+  customModels.value = all.filter(m => providers.value.some(p => m.id.startsWith(`${p.name}/`)))
+}
+
+async function openVisDlg() {
+  try {
+    visLoading.value = true
+    await load() // 供应商名是前缀判定来源，先取最新清单
+    await refreshVisModels()
+    if (!config.loaded) await config.load()
+    showVisDlg.value = true
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    visLoading.value = false
+  }
+}
+
+const visibilityList = computed(() => {
+  const q = visSearch.value.trim().toLowerCase()
+  return q ? customModels.value.filter(m => m.id.toLowerCase().includes(q)) : customModels.value
+})
+
+const hiddenCount = computed(() => customModels.value.filter(m => m.visible === false).length)
+
+/** 白名单三态加入（空=全启用 / __none__ 哨兵 / 显式名单）；null = 无需变更。 */
+function wlAdd(id: string): string[] | null {
+  const w = config.model_whitelist
+  if (w.length === 0) return null
+  if (w.length === 1 && w[0] === DISABLE_ALL) return [id]
+  return w.includes(id) ? null : [...w, id]
+}
+
+/** 白名单三态移除；null = 无需变更。 */
+async function wlRemove(id: string): Promise<string[] | null> {
+  const w = config.model_whitelist
+  if (w.length === 0) {
+    // 全部启用 → 显式列出除该模型外的全部（含牛码/WorkBuddy 条目，保证其它供应商语义不变）
+    const all = (await getModels(true)).data.map(m => m.id)
+    const next = all.filter(x => x !== id)
+    return next.length ? next : [DISABLE_ALL]
+  }
+  if (w.length === 1 && w[0] === DISABLE_ALL) return null
+  const next = w.filter(x => x !== id)
+  return next.length ? next : [DISABLE_ALL] // 空名单语义 = 全部启用，落哨兵防反转
+}
+
+/** 弹窗「显示」开关（对齐 WorkBuddy 拍板简化）：同时操控显示与启用——
+ * 关 ⇒ 隐藏+停用成对写入（chat 404）；开 ⇒ 显示+启用双开。 */
+async function onToggleShow(m: OaiModel, show: boolean) {
+  try {
+    const patch: Record<string, unknown> = {
+      model_visibility: { ...config.model_visibility, [m.id]: show ? 'show' : 'hide' }
+    }
+    const next = show ? wlAdd(m.id) : await wlRemove(m.id)
+    if (next) patch.model_whitelist = next
+    await config.update(patch)
+    await refreshVisModels() // 重拉 all=1 刷新 visible（口径由 relay 单点计算，前端不复刻）
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+/** 「全部显示」：当前隐藏项全部双开（显示 + 启用）。 */
+async function onShowAllHidden() {
+  try {
+    const hidden = customModels.value.filter(m => m.visible === false)
+    if (hidden.length === 0) return
+    const vis = { ...config.model_visibility }
+    for (const m of hidden) vis[m.id] = 'show'
+    const patch: Record<string, unknown> = { model_visibility: vis }
+    const w = config.model_whitelist
+    if (w.length === 1 && w[0] === DISABLE_ALL) {
+      patch.model_whitelist = hidden.map(m => m.id)
+    } else if (w.length > 0) {
+      const ids = new Set(hidden.map(m => m.id))
+      patch.model_whitelist = [...w.filter(x => !ids.has(x)), ...ids]
+    } // 白名单空 = 全启用，无需动
+    await config.update(patch)
+    await refreshVisModels()
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+/** 「恢复默认」（与 WorkBuddy 的差异点）：默认判定=自定义恒可见，故只清**自定义前缀**
+ * 的显示覆盖，不动牛码/WorkBuddy 的覆盖；白名单不动。 */
+async function onResetVisibility() {
+  try {
+    const vis = { ...config.model_visibility }
+    const ids = new Set(customModels.value.map(m => m.id))
+    for (const k of Object.keys(vis)) {
+      if (ids.has(k)) delete vis[k]
+    }
+    await config.update({ model_visibility: vis })
+    await refreshVisModels()
+    message.info('已恢复默认（自定义模型重新全部显示）')
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+/** 点击模型名即复制到剪贴板（对齐 WorkBuddy/牛码 tab）。 */
+async function onCopy(id: string) {
+  try {
+    await navigator.clipboard.writeText(id)
+    message.success(`已复制模型名：${id}`)
+  } catch (e) {
+    message.error(`复制失败：${String(e)}`)
+  }
+}
+
 onMounted(() => load(false))
 </script>
 
@@ -140,7 +266,7 @@ onMounted(() => load(false))
     <div class="card">
       <div class="head">
         <span class="zone-title">账号 · 供应商条目</span>
-        <span class="note">本期仅配置管理，请求转发将在多平台聚合需求落地后生效</span>
+        <span class="note">OpenAI 兼容转发已生效：agent 以「供应商名/模型名」调用即转发至 base_url</span>
         <div class="spacer" />
         <NButton
           size="small"
@@ -148,6 +274,13 @@ onMounted(() => load(false))
           @click="openCreate"
         >
           添加供应商
+        </NButton>
+        <NButton
+          size="small"
+          :loading="visLoading"
+          @click="openVisDlg"
+        >
+          模型显示
         </NButton>
       </div>
 
@@ -299,7 +432,7 @@ onMounted(() => load(false))
           <span class="fld-label">启用</span>
           <NSwitch v-model:value="form.enabled" />
         </div>
-        <p class="form-note"> 本期仅保存配置；该供应商的请求转发将在「多平台聚合」adapter 层落地后生效。 </p>
+        <p class="form-note"> 保存即生效：agent 以「供应商名/模型名」调用，请求经 OpenAI 兼容协议转发至该 Base URL。 </p>
       </div>
       <template #footer>
         <div class="dlg-actions">
@@ -310,6 +443,76 @@ onMounted(() => load(false))
             @click="onSave"
           >
             保存
+          </NButton>
+        </div>
+      </template>
+    </NModal>
+
+    <!-- 模型显示弹窗（对齐 WorkBuddy tab）：列出全部自定义模型（含隐藏）逐条开关；
+         单一「显示」开关同时驱动显示+启用（隐藏 ⇒ 双关，chat 404）。 -->
+    <NModal
+      v-model:show="showVisDlg"
+      preset="card"
+      title="模型显示"
+      :style="{ width: '640px' }"
+    >
+      <p class="dlg-text vis-hint"> 自定义模型默认全部显示。开关同时控制「显示」与「启用」：关 = 隐藏且停用（agent 侧不可见且调用 404）；开 = 显示且启用。即时保存。 </p>
+      <div class="vis-toolbar">
+        <NInput
+          v-model:value="visSearch"
+          size="small"
+          clearable
+          placeholder="搜索模型名"
+        />
+        <NButton
+          size="small"
+          :disabled="hiddenCount === 0"
+          @click="onShowAllHidden"
+        >
+          全部显示（{{ hiddenCount }}）
+        </NButton>
+        <NPopconfirm @positive-click="onResetVisibility">
+          <template #trigger>
+            <NButton size="small"> 恢复默认 </NButton>
+          </template>
+          清空自定义模型的显示覆盖？自定义模型将恢复默认全部显示，启用状态不变；WorkBuddy/牛码的显示设置不受影响。
+        </NPopconfirm>
+      </div>
+      <NEmpty
+        v-if="visibilityList.length === 0"
+        description="暂无自定义供应商模型——请先添加供应商并在其模型清单里维护模型"
+        size="small"
+      />
+      <div
+        v-else
+        class="vis-list"
+      >
+        <div
+          v-for="m in visibilityList"
+          :key="m.id"
+          class="vis-row"
+        >
+          <span
+            class="mono copyable vis-name"
+            title="点击复制模型名"
+            @click="onCopy(m.id)"
+            >{{ m.id }}</span
+          >
+          <span class="vis-switch-label">显示</span>
+          <NSwitch
+            size="small"
+            :value="m.visible !== false"
+            @update:value="(v: boolean) => onToggleShow(m, v)"
+          />
+        </div>
+      </div>
+      <template #footer>
+        <div class="dlg-actions">
+          <NButton
+            size="small"
+            @click="showVisDlg = false"
+          >
+            关闭
           </NButton>
         </div>
       </template>
@@ -438,5 +641,58 @@ onMounted(() => load(false))
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+.dlg-text {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.copyable {
+  cursor: pointer;
+  user-select: text;
+  transition: color 0.15s;
+}
+.copyable:hover {
+  color: var(--cp-cyan);
+}
+/* 模型显示弹窗（对齐 WorkBuddy tab）：提示行 + 工具行 + 全量模型行内滚动列表 */
+.vis-hint {
+  color: var(--cp-dim);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.vis-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.vis-list {
+  max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid var(--cp-border);
+  border-radius: 8px;
+}
+.vis-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+  font-size: 13px;
+}
+.vis-row:last-child {
+  border-bottom: none;
+}
+.vis-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vis-switch-label {
+  flex: none;
+  color: var(--cp-dim);
+  font-size: 12px;
 }
 </style>

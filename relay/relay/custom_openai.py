@@ -15,9 +15,11 @@ models[]}）在此接成出站 adapter：**零代码纯配置**（9router openai
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 
 import httpx
 
@@ -29,6 +31,45 @@ logger = logging.getLogger(__name__)
 
 # 允许的 delta 字段（白名单重建；防供应商扩展字段泄漏给 agent，硬性规则 2）
 _DELTA_KEYS = ("role", "content", "reasoning_content", "tool_calls")
+
+# ── 连接阶段瞬时错误重试（对齐 platforms/workbuddy/chat.py 同款口径） ──
+# 仅重试「连接建立/请求发出前」的失败（ConnectError/ConnectTimeout：上游未收到任何
+# 字节、请求未生效，重试幂等安全）；一旦进入流绝不重试（防重复产出/重复计费）；
+# HTTP 错误响应语义不变。1 次重试 + 1s 退避——秒级抖动完全无感，分钟级断网仍快速
+# 报错（2026-10-11 DNS 抖动实测：直透 agent 当日 3 连败、5 分钟后自愈）。
+_CONNECT_RETRY_ATTEMPTS = 2
+_CONNECT_RETRY_BACKOFF_S = 1.0
+
+
+async def _enter_stream_with_connect_retry(stack: AsyncExitStack, client: httpx.AsyncClient,
+                                           method: str, url: str,
+                                           **kwargs) -> httpx.Response:
+    """经 stack 进入 ``client.stream()``，连接阶段失败时退避重试（仅进流前）。
+
+    返回已进入的 Response；调用方经同一 stack 统一退出。重试只包裹「进入」动作：
+    进入成功后的任何异常都不经过这里，结构性保证不在流中重试。
+    """
+    for attempt in range(1, _CONNECT_RETRY_ATTEMPTS + 1):
+        try:
+            return await stack.enter_async_context(client.stream(method, url, **kwargs))
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if attempt >= _CONNECT_RETRY_ATTEMPTS:
+                raise
+            await asyncio.sleep(_CONNECT_RETRY_BACKOFF_S)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def _post_with_connect_retry(client: httpx.AsyncClient, url: str,
+                                   **kwargs) -> httpx.Response:
+    """非流式请求的连接阶段重试（ConnectError/ConnectTimeout 时请求未发出，幂等安全）。"""
+    for attempt in range(1, _CONNECT_RETRY_ATTEMPTS + 1):
+        try:
+            return await client.post(url, **kwargs)
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if attempt >= _CONNECT_RETRY_ATTEMPTS:
+                raise
+            await asyncio.sleep(_CONNECT_RETRY_BACKOFF_S)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 class UpstreamHttpError(RuntimeError):
@@ -101,32 +142,34 @@ class OpenAICompatProvider:
         raw_tail: list[str] = []
 
         try:
-            async with self._new_client() as client:
-                async with client.stream("POST", self._url(), headers=self._headers(),
-                                         json=self._body(request, stream=True)) as resp:
-                    if resp.status_code != 200:
-                        text = (await resp.aread()).decode("utf-8", "replace")
-                        raise UpstreamHttpError(_error_text(resp.status_code, text),
-                                                status=resp.status_code)
-                    async for line in resp.aiter_lines():
-                        frame = _parse_sse_line(line)
-                        if frame is None:
-                            continue
-                        raw_tail = [*raw_tail[-7:],
-                                    json.dumps(frame, ensure_ascii=False, default=str)[:300]]
-                        if frame.get("usage"):
-                            usage = _usage_from_upstream(frame["usage"])
-                        if frame.get("finish_reason"):
-                            finish_reason = str(frame["finish_reason"])
-                        if frame.get("content"):
-                            content_parts.append(frame["content"])
-                            yield {"type": "content", "delta": frame["content"]}
-                        if frame.get("reasoning_content"):
-                            thinking_parts.append(frame["reasoning_content"])
-                            yield {"type": "thinking", "delta": frame["reasoning_content"]}
-                        for tc in frame.get("tool_calls") or []:
-                            _merge_tool_call(tool_calls, tc)
-                            yield {"type": "tool_call", "delta": tc}
+            async with AsyncExitStack() as stack:
+                client = await stack.enter_async_context(self._new_client())
+                resp = await _enter_stream_with_connect_retry(
+                    stack, client, "POST", self._url(),
+                    headers=self._headers(), json=self._body(request, stream=True))
+                if resp.status_code != 200:
+                    text = (await resp.aread()).decode("utf-8", "replace")
+                    raise UpstreamHttpError(_error_text(resp.status_code, text),
+                                            status=resp.status_code)
+                async for line in resp.aiter_lines():
+                    frame = _parse_sse_line(line)
+                    if frame is None:
+                        continue
+                    raw_tail = [*raw_tail[-7:],
+                                json.dumps(frame, ensure_ascii=False, default=str)[:300]]
+                    if frame.get("usage"):
+                        usage = _usage_from_upstream(frame["usage"])
+                    if frame.get("finish_reason"):
+                        finish_reason = str(frame["finish_reason"])
+                    if frame.get("content"):
+                        content_parts.append(frame["content"])
+                        yield {"type": "content", "delta": frame["content"]}
+                    if frame.get("reasoning_content"):
+                        thinking_parts.append(frame["reasoning_content"])
+                        yield {"type": "thinking", "delta": frame["reasoning_content"]}
+                    for tc in frame.get("tool_calls") or []:
+                        _merge_tool_call(tool_calls, tc)
+                        yield {"type": "tool_call", "delta": tc}
         except httpx.HTTPError as exc:
             # 网络层错误（DNS/连接/超时）：502 语义（上游不可达），不裸露 httpx 类型
             raise UpstreamHttpError(f"上游网络错误: {exc}", status=502) from exc
@@ -146,7 +189,8 @@ class OpenAICompatProvider:
         body = self._body(request, stream=False)
         try:
             async with self._new_client() as client:
-                resp = await client.post(self._url(), headers=self._headers(), json=body)
+                resp = await _post_with_connect_retry(client, self._url(),
+                                                      headers=self._headers(), json=body)
         except httpx.HTTPError as exc:
             raise UpstreamHttpError(f"上游网络错误: {exc}", status=502) from exc
         if resp.status_code == 200:

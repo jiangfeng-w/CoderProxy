@@ -134,6 +134,84 @@ def test_chat_nonstream_error_passthrough():
     assert ei.value.status == 401
 
 
+# ─────────────────────────── 连接阶段重试 ───────────────────────────
+
+def _retry_handler(calls: dict, *, fail: type[Exception] | None, ok_json: dict):
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1 and fail is not None:
+            raise fail("getaddrinfo failed", request=request)
+        return httpx.Response(200, json=ok_json)
+
+    return handler
+
+
+_OK_JSON = {
+    "id": "x", "object": "chat.completion", "model": "glm-5.3-flash",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                 "finish_reason": "stop"}],
+    "usage": {},
+}
+
+
+def test_chat_connect_retry_then_success(monkeypatch):
+    """非流式：第 1 次 ConnectError（连接未建立、请求未发出，幂等安全）→ 退避重试 → 成功。"""
+    monkeypatch.setattr(custom_openai, "_CONNECT_RETRY_BACKOFF_S", 0)
+    calls = {"n": 0}
+    a = _provider(_retry_handler(calls, fail=httpx.ConnectError, ok_json=_OK_JSON))
+    resp = _run(a.chat(REQ))
+    assert calls["n"] == 2
+    assert resp.content == "ok"
+
+
+def test_chat_connect_retry_exhausted_maps_502(monkeypatch):
+    """重试耗尽仍连不上：抛 UpstreamHttpError 502（网络层错误语义不变），恰尝试 2 次。"""
+    monkeypatch.setattr(custom_openai, "_CONNECT_RETRY_BACKOFF_S", 0)
+
+    def handler(request):
+        raise httpx.ConnectError("getaddrinfo failed", request=request)
+
+    a = _provider(handler)
+    with pytest.raises(UpstreamHttpError) as ei:
+        _run(a.chat(REQ))
+    assert ei.value.status == 502
+
+
+def test_stream_connect_retry_then_success(monkeypatch):
+    """流式：进流前 ConnectTimeout 同样重试；成功进入后正常产出事件。"""
+    monkeypatch.setattr(custom_openai, "_CONNECT_RETRY_BACKOFF_S", 0)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectTimeout("connect timeout", request=request)
+        return _sse(_SSE_OK)
+
+    a = _provider(handler)
+    events = _run(_collect(a, REQ))
+    assert calls["n"] == 2
+    assert events[-1]["content"] == "你好"
+
+
+def test_http_error_response_not_retried(monkeypatch):
+    """HTTP 错误响应（已进入请求-响应周期）不重试——仅连接阶段失败才重试。
+
+    用 5xx 验证（4xx 会走既有「退回流式聚合」路径再发一次，语义不同）。
+    """
+    monkeypatch.setattr(custom_openai, "_CONNECT_RETRY_BACKOFF_S", 0)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(500, json={"error": {"message": "boom"}})
+
+    a = _provider(handler)
+    with pytest.raises(UpstreamHttpError) as ei:
+        _run(a.chat(REQ))
+    assert ei.value.status == 500 and calls["n"] == 1
+
+
 # ─────────────────────────── 工具调用 ───────────────────────────
 
 def test_stream_tool_call_merge():
