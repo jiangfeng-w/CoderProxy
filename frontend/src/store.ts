@@ -62,16 +62,21 @@ export const STANDARD_EFFORT_LABELS: Record<string, string> = {
 /** GLM-5.3 系列上游（智谱）强制思考、不支持关闭：官方文档明确该系列
  * "use forced thinking and cannot be disabled"（仅认 low/high/max，直连关参数报 400/1210）；
  * 2026-10-11 WB 小号实测网关对 none/disabled/minimal 不报错也不降档，静默忽略、模型仍思考。
+ * 同为强制思考的还有 GLM-4.7 / GLM-4.5V（智谱文档），但目录里无档位下拉、不渲染「关」，不在此列。
  * 模型 id 带平台前缀（如 牛码/glm-5.3-flash），故用包含匹配而非 startsWith。 */
 export function offThinkingUnsupported(model?: string | null): boolean {
   return !!model && model.toLowerCase().includes('glm-5.3')
 }
 
-/** 「关」已实测上游支持的系列（下拉标「·上游」，保证生效）：deepseek 系实测真关
- * （B4 探针，off 意图翻译成 thinking:{type:"disabled"} 生效）；kimi-k3 关思考实测正常
- * 且未降级（2026-09-06 小号）。上游目录 thinkingLevels 均不含 none，无法用目录数据判断，
- * 只能维护此实测清单；其余模型无实测数据，下拉按「·目录外」口径标注（不保证生效）。
- * 仅用于思考下拉的「关」选项标注（无档位的模型不渲染下拉，不受此清单影响）。 */
+/** 「关」已确认上游支持的系列（下拉标「·上游」，保证生效）。证据（2026-10-11 上网核实 +
+ * 小号实测）：deepseek-v3/v4 混合思考系——官方 thinking:{type:"disabled"} 开关，B4 探针实测
+ * 真关；kimi-k3——WB 实测关后无推理输出且未降级（2026-09-06；Moonshot 官方 API 称 K3 始终
+ * 思考，官方客户端「关」靠路由到无思考版本实现，观测行为一致）；glm-5.2——智谱官方文档明确
+ * 传 none/minimal 放弃思考、thinking.type 支持 disabled，relay 关形状 reasoning_effort:"none"
+ * 正是官方认可的形状。上游目录 thinkingLevels 均不含 none，无法用目录数据判断，只能维护此
+ * 证据清单；其余模型（hy3/hy4 混元系、kimi-k2.8-preview、space-bunny 等）WB 网关未实测，
+ * 下拉按「·目录外」口径标注（不保证生效）。仅用于思考下拉的「关」选项标注（无档位的模型
+ * 不渲染下拉，不受此清单影响）。 */
 export function offThinkingSupported(model?: string | null): boolean {
-  return !!model && /deepseek|kimi-k3/i.test(model)
+  return !!model && /deepseek-v\d|kimi-k3|glm-5\.2/i.test(model)
 }

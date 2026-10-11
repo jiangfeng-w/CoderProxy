@@ -38,7 +38,7 @@ function effortTip(m: OaiModel, value: string): { head: string; body: string } {
   if (value === 'none') {
     let body = '无视 agent 传参，一律显式关闭思考（强制）；目录外档位：上游未列出，不保证生效'
     if (offThinkingUnsupported(m.id)) body = '注意：GLM-5.3 系列上游强制思考、不支持关闭（智谱直连报 400）；实测网关不报错也不降档，关闭参数被静默忽略，模型仍会思考'
-    else if (offThinkingSupported(m.id)) body = '无视 agent 传参，一律显式关闭思考（强制）；该系列上游实测支持关闭（真关），保证生效'
+    else if (offThinkingSupported(m.id)) body = '无视 agent 传参，一律显式关闭思考（强制）；上游支持关闭思考（官方文档/实测已验证），保证生效'
     return { head: '显式关闭思考（强制）', body }
   }
   const head = EFFORT_DESC[value] ?? value
