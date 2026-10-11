@@ -22,10 +22,12 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 
 import httpx
 
@@ -40,6 +42,34 @@ from relay.platforms.workbuddy.client import CN_ORIGIN, derive_stable_id
 from relay.tool_repair import repair_tool_pairing
 
 logger = logging.getLogger(__name__)
+
+
+# ── 连接阶段瞬时错误重试 ─────────────────────────────────────────────
+# 2026-10-11 实测：DNS 抖动数分钟 → getaddrinfo failed 直透 agent（当日 3 连败、
+# 5 分钟后自愈）。仅重试「连接建立/请求发出前」的失败（ConnectError/ConnectTimeout，
+# 此时上游未收到任何字节、请求未生效，重试绝对幂等安全）；一旦进入流绝不重试
+# （防重复产出/重复计费）；HTTP 错误响应语义不变。1 次重试 + 1s 退避——分钟级
+# 断网仍快速报错，由 agent 决定重试时机（秒级抖动则完全无感）。
+_CONNECT_RETRY_ATTEMPTS = 2
+_CONNECT_RETRY_BACKOFF_S = 1.0
+
+
+async def _enter_stream_with_connect_retry(stack: AsyncExitStack, client: httpx.AsyncClient,
+                                           method: str, url: str,
+                                           **kwargs) -> httpx.Response:
+    """经 stack 进入 ``client.stream()``，连接阶段失败时退避重试（仅进流前）。
+
+    返回已进入的 Response；调用方经同一 stack 统一退出。重试只包裹「进入」动作：
+    进入成功后的任何异常都不经过这里，结构性保证不在流中重试。
+    """
+    for attempt in range(1, _CONNECT_RETRY_ATTEMPTS + 1):
+        try:
+            return await stack.enter_async_context(client.stream(method, url, **kwargs))
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if attempt >= _CONNECT_RETRY_ATTEMPTS:
+                raise
+            await asyncio.sleep(_CONNECT_RETRY_BACKOFF_S)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 PLATFORM_ID = "workbuddy"
 
@@ -446,26 +476,29 @@ class WorkBuddyChatAdapter:
 
         网络层错误（断连/超时/DNS）包成 PlatformUpstreamError(502)——与自定义供应商
         链路同口径，不把 httpx 异常裸露成 500（步骤 8 小号 e2e 断网实测暴露）。
+        连接建立/请求发出前的瞬时失败（DNS 抖动等）先经一次退避重试（见
+        `_enter_stream_with_connect_retry`），仍失败才按上述口径 502。
         """
         url = f"{settings.wb_api_base}{CHAT_PATH}"
         try:
-            async with self._new_client() as client:
-                async with client.stream("POST", url, headers=self._headers(account),
-                                         json=body) as resp:
-                    if resp.status_code != 200:
-                        text = (await resp.aread()).decode("utf-8", "replace")
-                        err = self.parse_error(resp.status_code, text)
-                        if resp.status_code in (401, 403):
-                            raise _CredentialRejected(str(err)) from None
-                        raise err
-                    async for line in resp.aiter_lines():
-                        frame = _parse_frame(line)
-                        if frame is None:
-                            continue
-                        if "__error__" in frame:
-                            status, text = frame["__error__"]
-                            raise self.parse_error(status, text)
-                        yield frame
+            async with AsyncExitStack() as stack:
+                client = await stack.enter_async_context(self._new_client())
+                resp = await _enter_stream_with_connect_retry(
+                    stack, client, "POST", url, headers=self._headers(account), json=body)
+                if resp.status_code != 200:
+                    text = (await resp.aread()).decode("utf-8", "replace")
+                    err = self.parse_error(resp.status_code, text)
+                    if resp.status_code in (401, 403):
+                        raise _CredentialRejected(str(err)) from None
+                    raise err
+                async for line in resp.aiter_lines():
+                    frame = _parse_frame(line)
+                    if frame is None:
+                        continue
+                    if "__error__" in frame:
+                        status, text = frame["__error__"]
+                        raise self.parse_error(status, text)
+                    yield frame
         except httpx.HTTPError as exc:
             raise PlatformUpstreamError(f"上游网络错误: {exc}", status=502) from exc
 

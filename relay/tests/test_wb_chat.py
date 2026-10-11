@@ -651,3 +651,73 @@ def test_message_payload_tool_roundtrip():
 
 async def _collect(adapter, request):
     return [e async for e in adapter.stream_structured(request)]
+
+
+# ─────────────────────── 连接阶段瞬时错误重试（2026-10-11 DNS 抖动实测后加）───────────────────────
+
+def test_connect_error_retried_then_success(data_dir, monkeypatch):
+    """首连 DNS 抖动（getaddrinfo failed）→ 退避重试 1 次后成功，handler 恰好 2 次。"""
+    monkeypatch.setattr(wbchat, "_CONNECT_RETRY_BACKOFF_S", 0.0)
+    _run(_seed_account())
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ConnectError("[Errno 11001] getaddrinfo failed")
+        return _sse_response(_SSE_OK)
+
+    events = _run(_collect(_adapter(handler), REQ))
+    assert events[-1]["type"] == "done" and events[-1]["finish_reason"] == "stop"
+    assert len(calls) == 2
+
+
+def test_connect_error_exhausted_maps_502(data_dir, monkeypatch):
+    """连续连接失败 → 仅重试 1 次（共 2 次尝试），最终 PlatformUpstreamError(502)。"""
+    monkeypatch.setattr(wbchat, "_CONNECT_RETRY_BACKOFF_S", 0.0)
+    _run(_seed_account())
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        raise httpx.ConnectError("[Errno 11001] getaddrinfo failed")
+
+    with pytest.raises(PlatformUpstreamError) as ei:
+        _run(_collect(_adapter(handler), REQ))
+    assert ei.value.status == 502
+    assert len(calls) == 2
+
+
+def test_http_error_response_not_retried(data_dir, monkeypatch):
+    """HTTP 错误响应（500）语义不变、不重试：handler 恰好 1 次。"""
+    monkeypatch.setattr(wbchat, "_CONNECT_RETRY_BACKOFF_S", 0.0)
+    _run(_seed_account())
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return _sse_response(['data: {"code": 500, "msg": "boom"}'], status=500)
+
+    with pytest.raises(PlatformUpstreamError):
+        _run(_collect(_adapter(handler), REQ))
+    assert len(calls) == 1
+
+
+def test_mid_stream_failure_not_retried(data_dir, monkeypatch):
+    """进入流后失败（ReadError）不重试：handler 恰好 1 次（重试只包裹进入动作）。"""
+    monkeypatch.setattr(wbchat, "_CONNECT_RETRY_BACKOFF_S", 0.0)
+    _run(_seed_account())
+    calls = []
+
+    async def broken_stream():
+        yield (_SSE_OK[0] + "\n\n").encode()
+        raise httpx.ReadError("mid-stream reset")
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(200, content=broken_stream(),
+                              headers={"Content-Type": "text/event-stream"})
+
+    with pytest.raises(PlatformUpstreamError):
+        _run(_collect(_adapter(handler), REQ))
+    assert len(calls) == 1

@@ -21,6 +21,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 
 import httpx
 
@@ -55,6 +56,31 @@ _ZAI_IDENT = ("zai",)
 # 静默丢弃的场景）；正常响应不带，避免大流量场景内存/诊断开销。
 _RAW_TAIL_MAX = 8
 _RAW_TAIL_LINE_MAX = 300
+
+# 本地修订（原实现无此重试）：连接阶段瞬时错误重试。2026-10-11 实测 DNS 抖动数分钟
+# → getaddrinfo failed 直透 agent；仅重试「连接建立/请求发出前」的失败
+# （ConnectError/ConnectTimeout，此时上游未收到任何字节，重试幂等安全）；一旦进入流
+# 绝不重试（防重复产出）；HTTP 错误响应语义不变。1 次重试 + 1s 退避——分钟级断网
+# 仍快速报错，由 agent 决定重试时机。与 relay 侧 platforms/workbuddy/chat.py 同口径。
+_TA3_CONNECT_RETRY_ATTEMPTS = 2
+_TA3_CONNECT_RETRY_BACKOFF_S = 1.0
+
+
+async def _enter_stream_with_connect_retry(stack, client, method: str, url: str,
+                                           **kwargs):
+    """经 stack 进入 ``client.stream()``，连接阶段失败时退避重试（仅进流前）。
+
+    返回已进入的 Response；调用方经同一 stack 统一退出。重试只包裹「进入」动作：
+    进入成功后的任何异常都不经过这里，结构性保证不在流中重试。
+    """
+    for attempt in range(1, _TA3_CONNECT_RETRY_ATTEMPTS + 1):
+        try:
+            return await stack.enter_async_context(client.stream(method, url, **kwargs))
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if attempt >= _TA3_CONNECT_RETRY_ATTEMPTS:
+                raise
+            await asyncio.sleep(_TA3_CONNECT_RETRY_BACKOFF_S)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 _OPENAI_THINKING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
@@ -721,7 +747,11 @@ class Ta3Provider(ModelProvider):
         _thinking_seen = False
         _content_seen = False
         try:
-            async with self._client.stream("POST", url, json=body, headers=headers) as resp:
+            # 本地修订（原实现直接 async with stream）：连接阶段瞬时错误经
+            # `_enter_stream_with_connect_retry` 一次退避重试（仅进流前）
+            async with AsyncExitStack() as stack:
+                resp = await _enter_stream_with_connect_retry(
+                    stack, self._client, "POST", url, json=body, headers=headers)
                 if resp.status_code != 200:
                     text = (await resp.aread()).decode("utf-8", errors="replace")[:400]
                     raise RuntimeError(f"模型请求失败 {resp.status_code}：{text}")
