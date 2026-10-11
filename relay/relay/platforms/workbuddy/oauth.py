@@ -162,11 +162,11 @@ async def _archive_account(state: str, access_token: str, token_data: dict) -> d
         "status": "normal",
     }
     account = await store.upsert_account(PLATFORM_ID, entry, preserve=True)
-    await _prefetch_caches(account)
+    await prefetch_caches(account)
     return account
 
 
-async def _prefetch_caches(account: dict) -> None:
+async def prefetch_caches(account: dict) -> None:
     """登录归档后 best-effort 预拉签到状态与配额（弹窗承诺「授权完成后自动刷新
     资源包配额数据」；不做的话已签到账号首屏会误显「今日未签」，需手动刷新状态）。
 
