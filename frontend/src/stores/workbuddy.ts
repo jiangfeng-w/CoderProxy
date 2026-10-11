@@ -5,7 +5,7 @@
 // - 登录流程状态机：startLogin → pending（前端开浏览器 + 轮询）→ success/failed；
 // - 轮询节奏由 WorkBuddyTab 组件驱动（2s 间隔，成功/失败/关闭弹窗即停）。
 import { defineStore } from 'pinia'
-import { listWbAccounts, wbCheckin, wbCheckinStatus, wbDeleteAccount, wbIdeState, wbIdeSwitch, wbLoginCancel, wbLoginStart, wbLoginStatus, wbRefreshQuota, type WbAccount, type WbIdeState } from '../api'
+import { listWbAccounts, wbCheckin, wbCheckinStatus, wbDeleteAccount, wbIdeState, wbIdeSwitch, wbImportLocal, wbImportText, wbLoginCancel, wbLoginStart, wbLoginStatus, wbRefreshQuota, type WbAccount, type WbIdeState } from '../api'
 import { pinia } from '../pinia'
 
 type LoginPhase = 'idle' | 'starting' | 'pending' | 'success' | 'failed'
@@ -117,6 +117,19 @@ export const useWorkbuddyStore = defineStore('workbuddy', {
       } finally {
         this.busyUid = ''
       }
+    },
+    /** 粘贴 Token/JSON 或 JSON 文件内容导入（同一解析入口；成功后整表重拉）。 */
+    async importText(text: string): Promise<number> {
+      const res = await wbImportText(text)
+      await this.load()
+      return res.imported
+    },
+    /** 从本机官方客户端登录态导入（可能正是 IDE 当前号，顺带刷新概览）。 */
+    async importLocal(): Promise<number> {
+      const res = await wbImportLocal()
+      await this.load()
+      await this.loadIdeState()
+      return res.imported
     }
   }
 })

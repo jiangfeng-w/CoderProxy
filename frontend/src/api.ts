@@ -280,6 +280,8 @@ export const wbCheckinStatus = (uid: string): Promise<WbAccount> => relay('GET',
 export const wbRefreshQuota = (uid: string): Promise<WbAccount> => relay('POST', `/v1/platforms/workbuddy/accounts/${uid}/quota`)
 export const wbIdeState = (): Promise<WbIdeState> => relay('GET', '/v1/platforms/workbuddy/ide-state')
 export const wbIdeSwitch = (uid: string): Promise<{ status: string; current_uid: string }> => relay('POST', `/v1/platforms/workbuddy/accounts/${uid}/ide-switch`)
+export const wbImportText = (text: string): Promise<{ imported: number; accounts: WbAccount[] }> => relay('POST', '/v1/platforms/workbuddy/accounts/import', { text })
+export const wbImportLocal = (): Promise<{ imported: number; accounts: WbAccount[] }> => relay('POST', '/v1/platforms/workbuddy/accounts/import-local')
 
 // ─────────────────────────── /v1/stats（M8：Token 统计页）───────────────────────────
 

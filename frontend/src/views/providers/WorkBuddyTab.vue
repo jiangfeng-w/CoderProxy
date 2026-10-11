@@ -5,7 +5,7 @@
 // 模型区：WorkBuddy 目录（all=1 过滤前缀；主列表仅可见模型）+ 白名单启停 + 手动连通性测试
 // + 「模型显示」弹窗（模型列表过时治理：无档位默认隐藏，显示/启用双开关联动——隐藏即停用）。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NButton, NCard, NEmpty, NInput, NModal, NPagination, NPopconfirm, NSwitch, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NEmpty, NInput, NModal, NPagination, NPopconfirm, NSwitch, NTabPane, NTabs, NTag, useMessage } from 'naive-ui'
 import { getModels, openAuthorizeUrl, type OaiModel, type WbAccount } from '../../api'
 import { workbuddyStore } from '../../stores/workbuddy'
 import { store, useConfigStore } from '../../store'
@@ -240,8 +240,21 @@ function fmtContext(w?: number | null): string {
 const showLoginDlg = ref(false)
 let pollTimer: number | undefined
 
+// 添加账号三 tab（对齐 cockpit-tools：OAuth 授权 / Token·JSON 粘贴 / 本地导入）
+type AddTab = 'oauth' | 'token' | 'local'
+const addTab = ref<AddTab>('oauth')
+const importText = ref('')
+const importing = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+
+watch(addTab, () => {
+  // 切 tab 清空输入（对齐 cockpit resetAddModalState）
+  importText.value = ''
+})
+
 function openLoginDlg() {
   showLoginDlg.value = true
+  addTab.value = 'oauth' // 打开即 OAuth 授权页（默认主路径）
   if (wb.loginPhase === 'pending' && wb.loginId) {
     // 复用进行中的登录（HMR/重开弹窗场景）：恢复轮询，不重复发起
     startPolling()
@@ -302,6 +315,56 @@ watch(showLoginDlg, open => {
     stopPolling()
   }
 })
+
+// ── 导入动作（Token/JSON 粘贴、本机客户端、JSON 文件）──
+async function onImportText() {
+  if (!importText.value.trim() || importing.value) return
+  importing.value = true
+  try {
+    const n = await wb.importText(importText.value)
+    showLoginDlg.value = false
+    message.success(`成功导入 ${n} 个账号`)
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    importing.value = false
+  }
+}
+
+async function onImportLocal() {
+  if (importing.value) return
+  importing.value = true
+  try {
+    await wb.importLocal()
+    showLoginDlg.value = false
+    message.success('成功导入本机 WorkBuddy 登录账号')
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    importing.value = false
+  }
+}
+
+function pickJsonFile() {
+  fileInput.value?.click()
+}
+
+async function onJsonFile(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = '' // 允许重复选择同一文件
+  if (!file || importing.value) return
+  importing.value = true
+  try {
+    const n = await wb.importText(await file.text())
+    showLoginDlg.value = false
+    message.success(`成功导入 ${n} 个账号`)
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    importing.value = false
+  }
+}
 
 // ── 账号动作 ──
 const accounts = computed(() => wb.accounts)
@@ -657,85 +720,164 @@ onUnmounted(stopPolling)
       </table>
     </NCard>
 
-    <!-- 添加账号弹窗（设备授权 + 轮询等待） -->
+    <!-- 添加账号弹窗：三 tab（OAuth 授权 / Token·JSON 粘贴 / 本地导入，对齐 cockpit-tools） -->
     <NModal
       v-model:show="showLoginDlg"
       preset="card"
       title="添加 WorkBuddy 账号"
-      :style="{ width: '440px' }"
+      :style="{ width: '480px' }"
       :mask-closable="false"
     >
-      <template v-if="wb.loginPhase === 'pending'">
-        <p class="dlg-text">点击下方按钮将在浏览器中打开 WorkBuddy（CodeBuddy CN）授权页面。</p>
-        <div class="auth-box">
-          <p class="auth-box-title">授权 IDE 登录信息</p>
-          <ul class="auth-box-list">
-            <li>在浏览器完成 OAuth 后即可添加账号并用于 IDE 切换。</li>
-            <li>授权完成后会自动刷新资源包配额数据。</li>
-            <li>账号卡片将按资源包展示额度、进度和刷新/到期时间。</li>
-          </ul>
-        </div>
-        <div class="url-row">
-          <input
-            class="url-input mono"
-            readonly
-            :value="wb.authorizeUrl"
-            @focus="($event.target as HTMLInputElement).select()"
-          />
-          <button
-            class="copy-btn"
-            title="复制授权链接"
-            @click="copyAuthorizeUrl"
-          >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <rect
-                x="9"
-                y="9"
-                width="13"
-                height="13"
-                rx="2"
-                ry="2"
-              />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-          </button>
-        </div>
-        <p class="dlg-expire">授权有效期：600s；轮询间隔：2s</p>
-        <NButton
-          class="open-btn"
-          type="primary"
-          size="large"
-          @click="openAuthorizeUrl(wb.authorizeUrl)"
+      <NTabs
+        v-model:value="addTab"
+        type="segment"
+        size="small"
+      >
+        <!-- Tab 1：OAuth 授权（设备授权 + 轮询等待，原有流程原样迁入） -->
+        <NTabPane
+          name="oauth"
+          tab="OAuth 授权"
         >
-          <span class="open-btn-inner">&#127760; 在浏览器中打开</span>
-        </NButton>
-      </template>
-      <template v-else-if="wb.loginPhase === 'failed'">
-        <p class="dlg-text err"> 登录失败：{{ wb.loginError || '请重试' }} </p>
-      </template>
-      <template v-else-if="wb.loginPhase === 'starting'">
-        <p class="dlg-text">正在发起设备授权…</p>
-      </template>
+          <template v-if="wb.loginPhase === 'pending'">
+            <p class="dlg-text">点击下方按钮将在浏览器中打开 WorkBuddy（CodeBuddy CN）授权页面。</p>
+            <div class="auth-box">
+              <p class="auth-box-title">授权 IDE 登录信息</p>
+              <ul class="auth-box-list">
+                <li>在浏览器完成 OAuth 后即可添加账号并用于 IDE 切换。</li>
+                <li>授权完成后会自动刷新资源包配额数据。</li>
+                <li>账号卡片将按资源包展示额度、进度和刷新/到期时间。</li>
+              </ul>
+            </div>
+            <div class="url-row">
+              <input
+                class="url-input mono"
+                readonly
+                :value="wb.authorizeUrl"
+                @focus="($event.target as HTMLInputElement).select()"
+              />
+              <button
+                class="copy-btn"
+                title="复制授权链接"
+                @click="copyAuthorizeUrl"
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <rect
+                    x="9"
+                    y="9"
+                    width="13"
+                    height="13"
+                    rx="2"
+                    ry="2"
+                  />
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+              </button>
+            </div>
+            <p class="dlg-expire">授权有效期：600s；轮询间隔：2s</p>
+            <NButton
+              class="open-btn"
+              type="primary"
+              size="large"
+              @click="openAuthorizeUrl(wb.authorizeUrl)"
+            >
+              <span class="open-btn-inner">&#127760; 在浏览器中打开</span>
+            </NButton>
+          </template>
+          <template v-else-if="wb.loginPhase === 'failed'">
+            <p class="dlg-text err"> 登录失败：{{ wb.loginError || '请重试' }} </p>
+          </template>
+          <template v-else-if="wb.loginPhase === 'starting'">
+            <p class="dlg-text">正在发起设备授权…</p>
+          </template>
+        </NTabPane>
+
+        <!-- Tab 2：Token / JSON 粘贴导入 -->
+        <NTabPane
+          name="token"
+          tab="Token / JSON"
+        >
+          <p class="dlg-text imp-hint">粘贴 WorkBuddy 的 access token：</p>
+          <NInput
+            v-model:value="importText"
+            type="textarea"
+            :rows="5"
+            placeholder='示例：ghu_xxx / sk-ws-xxx / {"access_token":"eyJ...","refresh_token":"rt_..."} / [{...}]'
+          />
+          <NButton
+            class="imp-btn"
+            type="primary"
+            size="large"
+            block
+            :loading="importing"
+            :disabled="!importText.trim()"
+            @click="onImportText"
+          >
+            导入
+          </NButton>
+          <p class="dlg-expire">JSON 支持单对象 / 数组 / accounts 包裹；纯 token 将联网校验并补全资料</p>
+        </NTabPane>
+
+        <!-- Tab 3：本地导入（本机客户端登录态 / JSON 文件） -->
+        <NTabPane
+          name="local"
+          tab="本地导入"
+        >
+          <p class="dlg-text imp-hint">支持从本机 WorkBuddy 客户端或 JSON 文件导入账号数据。</p>
+          <NButton
+            size="large"
+            block
+            :loading="importing"
+            @click="onImportLocal"
+          >
+            从本机 WorkBuddy 导入
+          </NButton>
+          <p class="dlg-or">或从 JSON 文件导入</p>
+          <NButton
+            type="primary"
+            size="large"
+            block
+            :loading="importing"
+            @click="pickJsonFile"
+          >
+            选择 JSON 文件导入
+          </NButton>
+          <input
+            ref="fileInput"
+            type="file"
+            accept="application/json"
+            class="file-hidden"
+            @change="onJsonFile"
+          />
+        </NTabPane>
+      </NTabs>
       <template #footer>
         <div class="dlg-actions">
+          <template v-if="addTab === 'oauth'">
+            <NButton
+              v-if="wb.loginPhase === 'failed'"
+              type="primary"
+              @click="doStartLogin"
+            >
+              重试
+            </NButton>
+            <NButton @click="showLoginDlg = false">
+              {{ wb.loginPhase === 'pending' ? '取消' : '关闭' }}
+            </NButton>
+          </template>
           <NButton
-            v-if="wb.loginPhase === 'failed'"
-            type="primary"
-            @click="doStartLogin"
+            v-else
+            @click="showLoginDlg = false"
           >
-            重试
-          </NButton>
-          <NButton @click="showLoginDlg = false">
-            {{ wb.loginPhase === 'pending' ? '取消' : '关闭' }}
+            关闭
           </NButton>
         </div>
       </template>
@@ -1251,6 +1393,22 @@ onUnmounted(stopPolling)
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+/* 导入 tab（Token/JSON 粘贴 + 本地导入） */
+.imp-hint {
+  margin-bottom: 10px;
+}
+.imp-btn {
+  margin-top: 12px;
+}
+.dlg-or {
+  margin: 10px 0;
+  text-align: center;
+  color: var(--cp-dim);
+  font-size: 12px;
+}
+.file-hidden {
+  display: none;
 }
 /* 模型显示弹窗（过时治理）：提示行 + 工具行 + 全量模型行内滚动列表 */
 .vis-hint {
