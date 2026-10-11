@@ -180,6 +180,14 @@ def _backfill_reasoning_content(messages: list[dict], model: str,
     因此：① 占位与真值同效，**勿投入「真值缓存回填」类升级**（零质量收益）；
     ② 若未来要让模型真正记得历史思考，唯一机制是正文注入（`<thought>…</thought>`
     进 content），属独立议题。
+
+    ⚠ 口径校准（2026-10-11 11155 探针，见 spec §5 / 探针-wb-11155-trailing-assistant.py）：
+    「缺失即 400」在 deepseek-v4.1-flash + thinking enabled 上**未复现**——历史 assistant
+    不带 rc 键直连上游 200；「tools + trailing assistant 即 11155」的 OmniRoute 口径
+    （对 www.workbuddy.ai 实证）同样不适用我方上游（同形状 200）；我方日志亦从未出现
+    该 400/11155/11128/11101。本函数**维持不动、定位降级为纯保险**（2api-panel 口径 +
+    零成本：rc 本就被上游静默丢弃、不计费；防其它模型/租户/上游收紧校验），勿据此
+    删除，也勿据「400 校验」表述再投入升级。
     """
     if not messages:
         return

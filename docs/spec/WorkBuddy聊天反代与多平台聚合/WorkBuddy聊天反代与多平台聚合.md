@@ -197,6 +197,7 @@ CoderProxy 最终形态 = 多平台 AI 账号聚合网关：agent 只见 OpenAI 
   - 结论：字段级回填（含真值缓存）仅过 400 校验、模型收不到内容 → **真值缓存升级不立项**（现有占位回填维持，其价值=过校验）；`<thought>` 正文注入为唯一可让模型真记得的机制（独立议题，待用户拍板）
   - 实测警示已写入 `chat.py::_backfill_reasoning_content` docstring（防未来重复投入）
 - [x] 同 id 去重口径修订（2026-10-11，OmniRoute（9router TS fork）借鉴调研触发，见 [已知问题.md](../../已知问题.md) BUG-004c）：repack 同 id 去重「无条件留先到」→「**空内容让位有内容者**」（对齐 OmniRoute `preferResult`——空占位携带零信息，防其顶掉真实结果；双空/双非空仍先到者）；单测 +7、全量 **451 passed**、ruff 干净
+- [x] 11155 触发条件探针（2026-10-11，P2，探针-wb-11155-trailing-assistant.py，小号 6 请求）：「tools + trailing assistant 即 11155」（OmniRoute 对 www.workbuddy.ai 的口径）与「历史 assistant 缺 rc 即 400」（2api-panel #165，backfill 立项依据）在我方上游（deepseek-v4.1-flash + thinking on）**均未复现**——同形状全 200，缺 rc 组 prompt_tokens 与带 rc 组完全相同（与静默丢弃实验互证）；折叠修复组也 200；我方日志查无 11155/11128/11101。**结论：无需修复**；`_backfill_reasoning_content` 维持不动、定位降级为纯保险（docstring 口径校准）
 
 ### 与多协议端点兼容的验收衔接（2026-10-08 补，2026-10-09 执行完毕）
 
