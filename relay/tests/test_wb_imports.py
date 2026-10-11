@@ -108,6 +108,79 @@ def test_expiry_ms_dual_scale():
     assert imports._expiry_ms(-5) == 0
 
 
+def test_expiry_ms_iso_string():
+    """9router expiresAt 是 ISO 8601 串（Z 后缀）→ 毫秒。"""
+    assert imports._expiry_ms("2026-11-17T06:42:05.117Z") == 1794897725117
+    assert imports._expiry_ms("2026-11-17T06:42:05+00:00") == 1794897725000
+
+
+# ── 真实物件格式兼容（2026-10-12 用户提供 cockpit 导出与 9router 备份实测） ──
+
+def test_parse_cockpit_export_real_shape():
+    """cockpit-tools export_accounts 实物：纯数组 + snake 键 + 未知键忽略。"""
+    doc = [{
+        "id": "workbuddy_484f40674aac7caef126c03f37ee76c2",
+        "email": "峰",  # cockpit 的 email 字段实为昵称兜底
+        "uid": "7b8c5312-6758-4080-af64-05c556a14602",
+        "nickname": "峰",
+        "access_token": "eyJhbGci.c2ln",
+        "refresh_token": "eyJhbGci.rt",
+        "token_type": "Bearer",
+        "expires_at": 1794153837092,
+        "domain": "www.workbuddy.cn",
+        "dosage_notify_code": "0",  # 账号池无此字段 → 忽略
+        "payment_type": "free",
+        "quota_raw": {"dosage": {}, "payment": {}, "userResource": {}},
+    }]
+    [p] = imports.parse_import_text(json.dumps(doc))
+    assert p["uid"] == "7b8c5312-6758-4080-af64-05c556a14602"
+    assert p["nickname"] == "峰"
+    assert p["refresh_token"] == "eyJhbGci.rt"
+    assert p["expires_at"] == 1794153837092
+    assert p["domain"] == "www.workbuddy.cn"
+
+
+def test_parse_9router_backup_real_shape():
+    """9router 设置导出实物：providerConnections 包裹 + camelCase + ISO expiresAt + 无 uid。"""
+    jwt_sub = _jwt(sub="7b8c5312-6758-4080-af64-05c556a14602")
+    doc = {
+        "settings": {"requireLogin": True},
+        "providerConnections": [{
+            "accessToken": jwt_sub,
+            "refreshToken": "rt-9router",
+            "expiresAt": "2026-11-17T06:42:05.117Z",
+            "expiresIn": 4751983,
+            "id": "afb43990-e3bc-483f-b716-6cc845f96401",
+            "provider": "codebuddy-cn",
+            "authType": "oauth",
+            "name": "6683",
+            "email": None,
+            "priority": 1,
+            "isActive": True,
+        }],
+        "apiKeys": [{"key": "sk-x"}],
+    }
+    [p] = imports.parse_import_text(json.dumps(doc))
+    assert p["uid"] == "7b8c5312-6758-4080-af64-05c556a14602"   # JWT sub 兜底
+    assert p["nickname"] == "6683"                              # name → 显示名
+    assert p["refresh_token"] == "rt-9router"
+    assert p["expires_at"] == 1794897725117                     # ISO → 毫秒
+    assert p["source"] == "json"
+
+
+def test_parse_9router_skips_other_providers():
+    """providerConnections 混入其它平台（codex 等）→ 跳过；全被跳过则报错。"""
+    mixed = {"providerConnections": [
+        {"accessToken": "codex-tok", "provider": "codex", "name": "x"},
+        {"accessToken": _jwt(sub="uid-wb"), "provider": "codebuddy-cn", "name": "wb"},
+    ]}
+    [p] = imports.parse_import_text(json.dumps(mixed))
+    assert p["uid"] == "uid-wb"
+    with pytest.raises(ImportParseError, match="无 codebuddy-cn"):
+        imports.parse_import_text(json.dumps(
+            {"providerConnections": [{"accessToken": "t", "provider": "kiro"}]}))
+
+
 # ── JWT 兜底 ──
 
 def test_decode_jwt_claims():

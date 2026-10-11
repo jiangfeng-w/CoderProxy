@@ -14,6 +14,12 @@ workbuddy_oauth.rs build_payload_from_token / commands/workbuddy.rs 本机导入
 - 粘贴纯 token：联网 GET /v2/plugin/accounts 补全，失败报错不入库（防坏 token 污染账号池）
 - JSON（粘贴或文件）：全程不联网，最简条目只需 access_token
 - 本机导入：解密成功即入库（凭证来自官方客户端），配额预取 best-effort
+
+格式兼容（2026-10-12 增补，用户实物文件实测）：
+- cockpit-tools export_accounts：数组/单对象、snake 键名——天然兼容
+- 9router 设置导出：providerConnections[] 包裹、camelCase、expiresAt 为 ISO 串、
+  无 uid（JWT sub 兜底）、name 为显示名；只吃 provider=="codebuddy-cn" 的条目，
+  其它平台（codex/kiro 等）跳过
 """
 from __future__ import annotations
 
@@ -22,6 +28,8 @@ import base64
 import hashlib
 import json
 import logging
+import time
+from datetime import datetime, timezone
 
 from relay.config import settings
 from relay.platforms import store
@@ -65,7 +73,16 @@ def normalize_token(raw: str) -> str:
 
 
 def _expiry_ms(value: object) -> int:
-    """expires_at 双口径归一：秒（<1e11）×1000；数字字符串兼容；其余 0。"""
+    """expires_at 归一：秒/毫秒数字（或数字字符串，<1e11 视为秒）→ 毫秒；
+    ISO 8601 字符串（9router expiresAt："2026-11-17T06:42:05.117Z"）→ 毫秒；其余 0。"""
+    if isinstance(value, str) and value.strip() and not value.lstrip("+-").isdigit():
+        try:
+            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return 0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
     try:
         ts = int(str(value).strip())
     except (TypeError, ValueError):
@@ -76,7 +93,11 @@ def _expiry_ms(value: object) -> int:
 
 
 def payload_from_import_value(value: object, index: int | None = None) -> dict:
-    """单条导入记录 → payload（缺 access_token 报错；未知键忽略；不联网）。"""
+    """单条导入记录 → payload（缺 access_token 报错；未知键忽略；不联网）。
+
+    键名兼容：cockpit-tools 导出（snake，uid 直接给）+ 9router providerConnections
+    条目（camel，无 uid——JWT sub 兜底；name 为显示名兜底）。
+    """
     prefix = f"第 {index} 条记录解析失败：" if index is not None else ""
     if not isinstance(value, dict):
         raise ImportParseError(f"{prefix}记录必须是 JSON 对象")
@@ -94,10 +115,22 @@ def payload_from_import_value(value: object, index: int | None = None) -> dict:
             if value.get(key):
                 payload[field] = str(value[key]).strip()
                 break
+    if not payload.get("nickname") and value.get("name"):
+        payload["nickname"] = str(value["name"]).strip()  # 9router 显示名
+    if not payload.get("uid"):
+        sub = decode_jwt_claims(token).get("sub")  # 9router 无 uid → JWT sub 兜底
+        if sub:
+            payload["uid"] = str(sub).strip()
     for key in ("expires_at", "expiresAt"):
         if value.get(key) is not None:
             payload["expires_at"] = _expiry_ms(value[key])
             break
+    if not payload.get("expires_at") and value.get("expiresIn") is not None:
+        # 9router expiresIn = 秒偏移（expiresAt 缺失时的回退口径）
+        try:
+            payload["expires_at"] = int(time.time() * 1000) + int(value["expiresIn"]) * 1000
+        except (TypeError, ValueError):
+            pass
     return payload
 
 
@@ -136,6 +169,21 @@ def _parse_import_json(text: str) -> list[dict]:
                 if not items:
                     raise ImportParseError(f"导入 JSON 的 {key} 数组为空")
                 return [payload_from_import_value(item, i + 1) for i, item in enumerate(items)]
+        # 9router 设置导出：providerConnections[]（只吃 codebuddy-cn，其它平台跳过）
+        conns = doc.get("providerConnections")
+        if isinstance(conns, list):
+            picked, skipped = [], 0
+            for conn in conns:
+                if not isinstance(conn, dict) or not any(conn.get(k) for k in _TOKEN_KEYS):
+                    continue
+                if conn.get("provider") not in (None, "codebuddy-cn"):
+                    skipped += 1
+                    continue
+                picked.append(conn)
+            if not picked:
+                hint = f"（{skipped} 条其它平台账号已跳过）" if skipped else ""
+                raise ImportParseError(f"providerConnections 中无 codebuddy-cn 账号{hint}")
+            return [payload_from_import_value(item, i + 1) for i, item in enumerate(picked)]
         # 无包裹也无 token：按单条记录解析，报出「缺少 access_token」（cockpit 三级降级口径）
         return [payload_from_import_value(doc)]
     raise ImportParseError("导入 JSON 必须是账号对象或数组（支持 accounts/items 包裹）")

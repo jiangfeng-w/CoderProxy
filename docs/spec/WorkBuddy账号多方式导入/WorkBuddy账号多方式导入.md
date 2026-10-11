@@ -120,6 +120,19 @@ docs/spec/WorkBuddy账号多方式导入/探针-账号端点契约.py   # /v2/pl
 | 4 | `chore: 探针脚本 + spec 台账`（探针-账号端点契约.py + 文档收尾） | 探针只读 PASS |
 | 5 | 手动验收：粘贴真实 token 导入 / JSON 文件导入 / 本机导入（账号池出现同 uid 账号且配额刷新） | 小号优先（规则 5） |
 
+## 实物格式兼容增补（2026-10-12，用户提供两份真实文件实测驱动）
+
+用户指出 9router 亦有 codebuddy-cn 账号（此前仅查其 oauth 目录误判不支持；实际在**设置导出**里），并提供两份实物文件驱动增补：
+
+| 来源 | 实物格式 | 兼容结论 |
+|---|---|---|
+| cockpit-tools `export_accounts`（`workbuddy_accounts_*.json`） | 纯数组 + snake 键（id/email/uid/nickname/access_token/refresh_token/token_type/expires_at 毫秒/domain/dosage_notify_code/payment_type/quota_raw） | **设计时已对齐，实物直接吃进**（未知键 quota_raw 等忽略）；email 字段实为昵称兜底、照存无害 |
+| 9router 设置导出（`9router-backup-*.json`） | 顶层 `{settings, providerConnections, apiKeys, …}`；账号在 `providerConnections[]`：camelCase（accessToken/refreshToken/expiresAt **ISO 串**/expiresIn 秒偏移/**无 uid**/name 为显示名/provider/authType） | **增补后兼容**：识别 `providerConnections` 包裹，**只吃 `provider=="codebuddy-cn"`**（codex/kiro 等其它平台跳过并提示）；`expiresAt` ISO→毫秒（缺省回退 `expiresIn` 秒偏移）；uid 缺失 JWT `sub` 兜底；`name` → nickname 兜底 |
+
+- 9router 的 codebuddy-cn 设备授权流与本项目同源（同一套 `/v2/plugin/auth` 端点，`X-Product: SaaS` 档），token 体系互通；但其 accessToken issuer 为 `www.codebuddy.cn`（console 档），对 workbuddy 域 plugin API 的适用性**导入后用「刷新配额」验证**（401 换号机制兜底）
+- 测试：`test_wb_imports.py` 按两份实物结构脱敏构造 3 例（cockpit 实物形态 / 9router 实物形态 / 其它平台混入跳过）；pytest 521 绿
+- 两份实物文件均为同一账号（uid 相同）——导入按 uid 去重覆盖（preserve 保留缓存），互不冲突
+
 ## 已知边界
 
 - `/v2/plugin/accounts` 不返回 email/refreshToken/expiresAt/domain：email 留空（store 可空）；expires_at 从 JWT exp 兜底；refresh_token 缺失 → 该号 chat 401 后无法刷新（`refresh_credentials` 会跳过无 refresh_token 的号换下一号，现有机制天然兜底）；domain 空 → X-Domain 头省略（现有可选逻辑）
