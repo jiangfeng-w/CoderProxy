@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // WorkBuddy tab（供应商页 F4）：账号区=多账号卡片（昵称/配额/签到状态/连签天数）+
-// 添加（设备授权弹窗+轮询）/删除（二次确认）/签到（loading/已签到态）/配额刷新；
+// 添加（设备授权弹窗+轮询）/删除（二次确认）/签到（loading/已签到态）/配额刷新
+// + IDE 账号切换（「切到此号」= 凭证写入本机官方客户端并重启，见 spec「WorkBuddy-IDE账号切换」）；
 // 模型区：WorkBuddy 目录（all=1 过滤前缀；主列表仅可见模型）+ 白名单启停 + 手动连通性测试
 // + 「模型显示」弹窗（模型列表过时治理：无档位默认隐藏，显示/启用双开关联动——隐藏即停用）。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -387,8 +388,26 @@ async function onRemove(a: WbAccount) {
   }
 }
 
+// ── IDE 账号切换（用户拍板 2026-10-11：客户端运行中自动关闭→写入→重启）──
+const switchingUid = ref('')
+/** 当前官方客户端登录的账号 uid（读登录态文件 account.uid，明文无需密钥）。 */
+const ideUid = computed(() => wb.ideState?.current_uid ?? '')
+
+async function onSwitchIde(a: WbAccount) {
+  switchingUid.value = a.uid
+  try {
+    await wb.switchIde(a.uid)
+    message.success(`官方客户端已切换登录：${a.nickname || a.uid}`)
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    switchingUid.value = ''
+  }
+}
+
 onMounted(() => {
   void wb.load().catch(e => message.error(String(e)))
+  void wb.loadIdeState()
   void loadWbModels()
 })
 // 账号区「添加账号」成功后 / 其它页面同步目录 → 刷新模型列表
@@ -405,7 +424,7 @@ onUnmounted(stopPolling)
     <div class="card">
       <div class="head">
         <span class="zone-title">账号</span>
-        <span class="note">设备授权登录（浏览器完成授权后自动加入账号池）</span>
+        <span class="note">设备授权登录加入账号池；「切到此号」把该账号写入本机官方客户端并自动重启</span>
         <div class="spacer" />
         <NButton
           size="small"
@@ -449,8 +468,30 @@ onUnmounted(stopPolling)
             >
               {{ a.checkin.today_checked_in ? '今日已签' : '今日未签' }}
             </NTag>
+            <NTag
+              v-if="ideUid === a.uid"
+              size="small"
+              type="info"
+              :bordered="false"
+            >
+              IDE 在用
+            </NTag>
             <span class="spacer" />
             <div class="acct-ops">
+              <NPopconfirm @positive-click="onSwitchIde(a)">
+                <template #trigger>
+                  <NButton
+                    size="tiny"
+                    type="primary"
+                    ghost
+                    :loading="switchingUid === a.uid"
+                    :disabled="ideUid === a.uid || switchingUid !== '' || wb.busyUid !== ''"
+                  >
+                    {{ ideUid === a.uid ? 'IDE 登录中' : '切到此号' }}
+                  </NButton>
+                </template>
+                将关闭并重启本机 WorkBuddy 客户端，登录切换为「{{ a.nickname || a.uid }}」。确定切换？
+              </NPopconfirm>
               <NButton
                 size="tiny"
                 type="primary"

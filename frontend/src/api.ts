@@ -259,6 +259,16 @@ export interface WbLoginStatus {
   error?: string
 }
 
+/** 本机官方客户端概览（GET /v1/platforms/workbuddy/ide-state；WorkBuddy-IDE账号切换）。 */
+export interface WbIdeState {
+  installed: boolean
+  exe_path: string
+  running: boolean
+  auth_exists: boolean
+  logged_out: boolean
+  current_uid: string
+}
+
 export const listPlatforms = (): Promise<{ platforms: PlatformInfo[] }> => relay('GET', '/v1/platforms')
 export const listWbAccounts = (): Promise<{ accounts: WbAccount[] }> => relay('GET', '/v1/platforms/workbuddy/accounts')
 export const wbLoginStart = (): Promise<WbLoginStart> => relay('POST', '/v1/platforms/workbuddy/login/start')
@@ -268,6 +278,8 @@ export const wbDeleteAccount = (uid: string): Promise<{ status: string }> => rel
 export const wbCheckin = (uid: string): Promise<{ result: WbCheckinResult; account: WbAccount }> => relay('POST', `/v1/platforms/workbuddy/accounts/${uid}/checkin`)
 export const wbCheckinStatus = (uid: string): Promise<WbAccount> => relay('GET', `/v1/platforms/workbuddy/accounts/${uid}/checkin-status`)
 export const wbRefreshQuota = (uid: string): Promise<WbAccount> => relay('POST', `/v1/platforms/workbuddy/accounts/${uid}/quota`)
+export const wbIdeState = (): Promise<WbIdeState> => relay('GET', '/v1/platforms/workbuddy/ide-state')
+export const wbIdeSwitch = (uid: string): Promise<{ status: string; current_uid: string }> => relay('POST', `/v1/platforms/workbuddy/accounts/${uid}/ide-switch`)
 
 // ─────────────────────────── /v1/stats（M8：Token 统计页）───────────────────────────
 

@@ -5,7 +5,7 @@
 // - 登录流程状态机：startLogin → pending（前端开浏览器 + 轮询）→ success/failed；
 // - 轮询节奏由 WorkBuddyTab 组件驱动（2s 间隔，成功/失败/关闭弹窗即停）。
 import { defineStore } from 'pinia'
-import { listWbAccounts, wbCheckin, wbCheckinStatus, wbDeleteAccount, wbLoginCancel, wbLoginStart, wbLoginStatus, wbRefreshQuota, type WbAccount } from '../api'
+import { listWbAccounts, wbCheckin, wbCheckinStatus, wbDeleteAccount, wbIdeState, wbIdeSwitch, wbLoginCancel, wbLoginStart, wbLoginStatus, wbRefreshQuota, type WbAccount, type WbIdeState } from '../api'
 import { pinia } from '../pinia'
 
 type LoginPhase = 'idle' | 'starting' | 'pending' | 'success' | 'failed'
@@ -19,8 +19,10 @@ export const useWorkbuddyStore = defineStore('workbuddy', {
     loginId: '',
     authorizeUrl: '',
     loginError: '',
-    /** 操作中的账号（签到/配额按钮 loading 定向到对应卡片）。 */
-    busyUid: '' as string
+    /** 操作中的账号（签到/配额/切号按钮 loading 定向到对应卡片）。 */
+    busyUid: '' as string,
+    /** 本机官方客户端概览（IDE 切号）；null = 尚未拉取/不可用。 */
+    ideState: null as WbIdeState | null
   }),
   actions: {
     /** 拉取账号列表（挂载/登录成功后；动作成功走局部收敛不整表重拉）。 */
@@ -28,6 +30,14 @@ export const useWorkbuddyStore = defineStore('workbuddy', {
       const res = await listWbAccounts()
       this.accounts = res.accounts
       this.loaded = true
+    },
+    /** 拉取本机官方客户端概览（挂载/切号后；失败静默——概览缺失不阻塞账号区）。 */
+    async loadIdeState(): Promise<void> {
+      try {
+        this.ideState = await wbIdeState()
+      } catch {
+        this.ideState = null
+      }
     },
     /** 用最新 AccountView 局部替换对应账号（签到/配额刷新的收敛入口）。 */
     applyAccount(account: WbAccount): void {
@@ -93,6 +103,17 @@ export const useWorkbuddyStore = defineStore('workbuddy', {
       this.busyUid = uid
       try {
         this.applyAccount(await wbCheckinStatus(uid))
+      } finally {
+        this.busyUid = ''
+      }
+    },
+    /** IDE 切号：把该账号凭证写入本机官方客户端并重启（成功后刷新概览）。 */
+    async switchIde(uid: string): Promise<{ current_uid: string }> {
+      this.busyUid = uid
+      try {
+        const res = await wbIdeSwitch(uid)
+        await this.loadIdeState()
+        return res
       } finally {
         this.busyUid = ''
       }
