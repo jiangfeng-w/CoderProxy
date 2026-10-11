@@ -61,7 +61,8 @@ function effortRenderer(m: OaiModel) {
 }
 
 /** 思考强度下拉选项：透传（默认）置顶，关（none）次之；目录档位 + 目录外标准档合并后
- * 统一按强度排序（微/低/中/高/超高/最大），目录外标签标「目录外」，说明在 hover tooltip。 */
+ * 统一按强度排序（微/低/中/高/超高/最大）。每个档位统一「中文名（level）·来源」格式：
+ * 上游档位标「·上游」（无上游中文名时兜底标准名），目录外标「·目录外」，详细说明在 hover tooltip。 */
 function effortOptions(m: OaiModel): { label: string; value: string }[] {
   const labels = m.reasoning_labels ?? {}
   const catalogLevels = m.reasoning_efforts ?? []
@@ -70,7 +71,13 @@ function effortOptions(m: OaiModel): { label: string; value: string }[] {
     return i === -1 ? 99 : i
   }
   const all = [...new Set([...catalogLevels, ...STANDARD_EFFORTS])].sort((a, b) => order(a) - order(b))
-  const opts = all.map(lv => (catalogLevels.includes(lv) ? { label: labels[lv] ? `${labels[lv]}（${lv}）` : lv, value: lv } : { label: `${STANDARD_EFFORT_LABELS[lv] ?? lv}（${lv}）·目录外`, value: lv }))
+  const opts = all.map(lv => {
+    if (catalogLevels.includes(lv)) {
+      const name = labels[lv] ?? STANDARD_EFFORT_LABELS[lv] ?? lv
+      return { label: `${name}（${lv}）·上游`, value: lv }
+    }
+    return { label: `${STANDARD_EFFORT_LABELS[lv] ?? lv}（${lv}）·目录外`, value: lv }
+  })
   return [{ label: '透传（默认）', value: PASSTHROUGH }, { label: '关（不思考）', value: 'none' }, ...opts]
 }
 
