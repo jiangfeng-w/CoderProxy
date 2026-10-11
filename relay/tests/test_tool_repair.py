@@ -133,6 +133,54 @@ def test_repack_duplicate_noncontiguous_dedupes_keeps_first():
     assert out[2] is msgs[2]
 
 
+def test_repack_duplicate_empty_placeholder_yields_to_real_result():
+    """空占位 + 真结果并存：真结果胜出（对齐 OmniRoute preferResult：有内容者优先）。"""
+    msgs = [_asst(["c1"]), _tool("c1", ""), _tool("c1", "real")]
+    out = repack_tool_results(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool"]
+    assert out[1]["content"] == "real"
+
+
+def test_repack_duplicate_real_result_beats_later_empty():
+    """真结果在前 + 空占位在后：真结果保留（非空者优先，先到非空不回退）。"""
+    msgs = [_asst(["c1"]), _tool("c1", "real"), _tool("c1", "")]
+    out = repack_tool_results(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool"]
+    assert out[1]["content"] == "real"
+
+
+def test_repack_duplicate_missing_content_yields_to_real_result():
+    """缺 content 键（None）的占位 + 真结果：真结果胜出（null 视为空）。"""
+    msgs = [_asst(["c1"]), {"role": "tool", "tool_call_id": "c1"}, _tool("c1", "real")]
+    out = repack_tool_results(msgs)
+    assert len([m for m in out if m.get("role") == "tool"]) == 1
+    assert out[-1]["content"] == "real"
+
+
+def test_repack_duplicate_whitespace_only_yields_to_real_result():
+    """仅空白的 content（" "）视为空占位：真结果胜出。"""
+    msgs = [_asst(["c1"]), _tool("c1", " "), _tool("c1", "real")]
+    out = repack_tool_results(msgs)
+    assert out[-1]["content"] == "real"
+
+
+def test_repack_duplicate_both_empty_keeps_first():
+    """双空占位并存：保持先到者（空与空等价，不做无谓替换）。"""
+    msgs = [_asst(["c1"]), _tool("c1", ""), _tool("c1", " ")]
+    out = repack_tool_results(msgs)
+    assert len([m for m in out if m.get("role") == "tool"]) == 1
+    assert out[1]["content"] == ""
+
+
+def test_repack_duplicate_empty_noncontiguous_yields_to_real():
+    """非连续重复：空占位 | X | 真结果 → 真结果胜出、X 后移（窗口内同口径）。"""
+    msgs = [_asst(["c1"]), _tool("c1", ""), _dev("X"), _tool("c1", "real")]
+    out = repack_tool_results(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool", "developer"]
+    assert out[1]["content"] == "real"
+    assert out[2] is msgs[2]
+
+
 def test_repack_orphan_tool_does_not_block_relocation():
     """孤儿 tool 挡在组头与乱序结果之间：不阻碍探测与归位（孤儿后移、交 cleanup 裁）。"""
     msgs = [_asst(["c1", "c2"]), _tool("ghost"), _tool("c2"), _tool("c1")]

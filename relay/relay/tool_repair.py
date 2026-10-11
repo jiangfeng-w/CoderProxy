@@ -13,9 +13,9 @@
   **错位收拢**（紧邻位置无本组结果时向后探测，找到则前移；对齐 magpie
   `pairToolMessages` / LiteLLM Case A「不要求紧邻」口径）、**声明序归位**
   （批内结果按 tool_calls 声明顺序重排，对齐 magpie/Reasonix）、**同 id 去重**
-  （批内同一 tool_call_id 只留最先一条——对齐 magpie `pairToolMessages`/qwen
-  `makeToolResultDeduper` 先到者口径；后到重复更可能是重放/回声，LiteLLM Case D
-  为「留最后」的少数派）；
+  （批内同一 tool_call_id 只留一条：**空内容让位有内容者**——对齐 OmniRoute
+  `preferResult`「空占位携带零信息，丢弃无损失」，防空占位顶掉真实结果；双空
+  或双非空保持先到者——同 magpie/qwen 先到口径）；
 - `cleanup_orphan_tool_calls(messages)`：按 id 集合**双侧对称**裁剪孤儿——
   assistant.tool_calls 只留有结果配对的项（空了删 `tool_calls` 键），`role:tool`
   只留调用被保留的项（孤儿结果整条删）；顺手清理**空 `tool_calls: []`** 键
@@ -70,6 +70,21 @@ def _is_group_head(msg: object) -> bool:
         return False
     tcs = msg.get("tool_calls")
     return isinstance(tcs, list) and len(tcs) > 0
+
+
+def _content_is_empty(msg: object) -> bool:
+    """结果消息的 content 是否为空占位（对齐 OmniRoute `preferResult` 的 contentIsEmpty）：
+    缺键 / None / 空串 / 仅空白串 / 空数组 / 空对象 → True；其余（含数字等）→ False。"""
+    if not isinstance(msg, dict):
+        return True
+    content = msg.get("content")
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return content.strip() == ""
+    if isinstance(content, (list, dict)):
+        return len(content) == 0
+    return False
 
 
 def fill_missing_tool_results(messages: list) -> list:
@@ -166,9 +181,10 @@ def repack_tool_results(messages: list) -> list:
     `cleanup_orphan_tool_calls`。**非本组 tool**（孤儿/他组结果）不挡探测——随夹心
     后移，孤儿由 cleanup 随后裁掉（否则孤儿夹在组头与结果之间会让乱序结果得不到
     归位）。结果**按 tool_calls 声明顺序**稳定归位（并行工具结果常乱序；声明序即
-    上游位置式校验的对齐序）；同 id 重复只留**最先一条**（对齐 magpie
-    `pairToolMessages`/qwen `makeToolResultDeduper` 先到者口径；LiteLLM Case D 为
-    「留最后」——取「首读 = 原始结果、后到多为重放回声」语义）。
+    上游位置式校验的对齐序）；同 id 重复去留：**空内容让位有内容者**（对齐
+    OmniRoute `preferResult`——空占位零信息，防其顶掉真实结果；形态如
+    `tool c1(空) | tool c1(真实)`），双空或双非空保持先到者（magpie/qwen 先到
+    口径；LiteLLM Case D「留最后」为少数派）。
 
     只调顺序、不改内容；无改动时返回原对象（identity 零分配）。下一组
     assistant.tool_calls 是新的组头，绝不会被当作插入物吞掉（否则它自己那批结果
@@ -209,7 +225,11 @@ def repack_tool_results(messages: list) -> list:
             continue  # 窗口内无本组结果：本组原地不动
         deduped: dict = {}
         for r in results:
-            deduped.setdefault(r["tool_call_id"], r)  # 同 id 先到者为准（后者丢弃）
+            # 同 id 重复：非空内容让位于有内容者（对齐 OmniRoute preferResult——
+            # 「空占位携带零信息，丢弃无损失」）；双空/双非空保持先到者。
+            prev = deduped.get(r["tool_call_id"])
+            if prev is None or (_content_is_empty(prev) and not _content_is_empty(r)):
+                deduped[r["tool_call_id"]] = r
         ordered = sorted(deduped.values(), key=lambda r: order[r["tool_call_id"]])
         candidate = ordered + others
         if (len(candidate) == j - i - 1
