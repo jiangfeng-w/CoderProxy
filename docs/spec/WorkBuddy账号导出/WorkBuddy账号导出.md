@@ -1,6 +1,6 @@
 # WorkBuddy 账号导出
 
-> **状态**：已实现（2026-10-12；真机只读重建与 9router 官方导出 10 段逐字节对拍一致；**真机导出→9router 恢复待用户手动验收**）
+> **状态**：已实现（2026-10-12；真机只读重建与 9router 官方导出 10 段逐字节对拍一致；用户验收通过：导出功能正常）
 > **优先级**：核心
 > **来源**：用户需求「有了导入，是不是也应该有导出功能」；由 [WorkBuddy账号多方式导入](../WorkBuddy账号多方式导入/) 自然延伸（导入/导出一对）
 > **隐私声明**：本文档不含任何真实账号、凭证、token。
@@ -131,4 +131,5 @@ docs/spec/WorkBuddy账号导出/探针-9router只读读取.py  # 真机只读探
 - [x] 源码起服冒烟：cockpit 导出内容正确（token 保留、id=md5(uid)）；9router 导出读到真实配置（10 段 + apiKeys + settings），合成号 append、原有连接原样保留（拍板①验证）、400/404 映射
 - [x] 真机只读探针 PASS（`探针-9router只读读取.py`）：只读重建 10 段 → 与 9router 官方导出 API 逐字节一致；只读不改库
 - [x] 打包登记：两个 spec hiddenimports 加 `relay.platforms.workbuddy.exports`；onefile 产物冒烟
-- [ ] 手动验收（待用户）：cockpit 文件导出→ cockpit-tools 导入（或本应用回导）；9router 完整备份导出→ 9router 恢复（号更新、apiKeys/设置保留）
+- [x] 手动验收（2026-10-12 用户确认）：导出功能正常（弹窗勾选 + 系统另存为；cockpit 兼容格式与 9router 完整备份导出）
+- [ ] 手动验收（可选，待用户）：备份文件在 cockpit-tools / 本应用回导、9router 恢复的成功落地（恢复为 9router 整库覆盖语义，用户按需自行执行）
