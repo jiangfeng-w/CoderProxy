@@ -2,7 +2,7 @@
 // 顶栏（纯服务语义：运行状态/端口/启停）+ 左侧导航 + 页面内容区。深色主题，全局轮询服务与登录态。
 // 供应商页（2026-10-07 定稿）：顶栏完全去牛码态——登录/登出按钮、账号名、未登录门控文案全部
 // 移除（登录入口迁入供应商页牛码 tab）；重启按钮解除牛码登录态绑定。
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NButton, NModal, useMessage } from 'naive-ui'
 import { listen } from '@tauri-apps/api/event'
 import { relayStatus, relayRestart, authStatus, authSync, windowHide, appExit, serviceStatus, serviceEnable, serviceDisable } from './api'
@@ -36,8 +36,44 @@ const showCloseDlg = ref(false)
 // = relay 进程就绪 && relay 侧判定服务已开放（已登录 且 未手动停止）。
 const serviceRunning = computed(() => store.relay.running && store.serviceEnabled)
 
+// 首启就绪门控（BUG-006）：sidecar 是 onefile，冷启动需解包 + 数据初始化（数秒），
+// 而业务页 onMounted 即请求，会落进两个失败窗口——① relay 未就绪（壳报「服务尚未
+// 就绪」）；② relay 就绪但鉴权 key 未装载（config store 未 load，请求 401）→
+// 首启满屏假报错（可自愈但观感似故障）。门控：**relay 就绪且 config 装载完成**后才
+// 挂载业务页；放行后永久保持（停止/重启服务窗口不卸载业务页、页内状态不丢）。
+// 20s 兜底放行：sidecar 持续启动失败的边角场景恢复原行为（页面报错可引导排查），
+// 不无限转圈。
+const bootRevealed = ref(false)
+let bootTimer: number | undefined
+
+function revealBoot() {
+  bootRevealed.value = true
+  if (bootTimer !== undefined) {
+    clearTimeout(bootTimer)
+    bootTimer = undefined
+  }
+}
+
+watch(
+  [() => store.relay.running, () => configStore.loaded],
+  ([running, loaded]) => {
+    if (running && loaded) {
+      revealBoot()
+    }
+  },
+  { immediate: true }
+)
+// 首启即启动兜底：sidecar 启动失败（relay 永不就绪）/config 装载持续异常时，
+// 20s 后放行恢复原行为（页面报错引导排查），不无限停留在占位符。
+// （守卫：watch immediate 若已同步放行，则不再挂无用定时器）
+if (!bootRevealed.value) {
+  bootTimer = window.setTimeout(revealBoot, 20000)
+}
+
 function serviceStatusText(): string {
-  // 纯服务语义：未登录导致的停止不再由顶栏解释（登录引导在供应商页牛码 tab）
+  // 首启门控窗口内 relay 未就绪 →「启动中…」（与页面占位符语义一致）；
+  // 门控放行后回归原语义——未运行即「已停止」（sidecar 真故障时不永久误显启动中）。
+  if (!bootRevealed.value && !store.relay.running) return '启动中…'
   return serviceRunning.value ? '运行中' : '已停止'
 }
 
@@ -155,6 +191,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   clearInterval(timer)
+  if (bootTimer !== undefined) clearTimeout(bootTimer)
   closeUnlisten?.then(fn => fn())
 })
 </script>
@@ -223,7 +260,19 @@ onUnmounted(() => {
       </aside>
 
       <main class="content">
-        <component :is="views[store.view]?.comp" />
+        <!-- 首启就绪门控占位（BUG-006）：relay 就绪 + config 装载前不挂载业务页，
+             避免页面 onMounted 即请求落在未就绪/未鉴权窗口产生假报错 -->
+        <div
+          v-if="!bootRevealed"
+          class="boot-placeholder"
+        >
+          <span class="boot-spinner" />
+          正在启动本地服务…
+        </div>
+        <component
+          :is="views[store.view]?.comp"
+          v-else
+        />
       </main>
     </div>
 
@@ -425,6 +474,29 @@ onUnmounted(() => {
   min-width: 0;
   overflow: auto;
   padding: 18px 20px;
+}
+/* 首启就绪门控占位（BUG-006）：居中提示 + 呼吸灯 */
+.boot-placeholder {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--cp-dim);
+  font-size: 13px;
+}
+.boot-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--cp-border);
+  border-top-color: var(--cp-cyan);
+  border-radius: 50%;
+  animation: boot-spin 0.9s linear infinite;
+}
+@keyframes boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* 内容区滚动条（深色主题可见） */
