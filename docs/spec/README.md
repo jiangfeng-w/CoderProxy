@@ -78,7 +78,7 @@ spec/
 | 模型列表过时治理 | 交付 | 已实现（2026-10-11：WB 无档位模型默认隐藏+联动停用（隐藏即停用，chat 404）+ 供应商页「模型显示」弹窗——单一「显示」开关同批双写显示+启用（验收反馈去掉冗余启用列）/全部显示/恢复默认；`model_visibility` 覆盖优先于默认；**同日增补**：弹窗扩展到自定义供应商 tab（自定义默认恒可见、恢复默认只清自定义前缀覆盖），pytest 469 绿 + format/build 绿；e2e 冒烟 17/19——2 失败为本机牛码目录 0 条（主账号封禁）环境问题，与改动无关） | [模型列表过时治理](模型列表过时治理/) |
 | WorkBuddy IDE 账号切换 | 核心 | 已实现（2026-10-11：账号池凭证写官方客户端 `workbuddy-desktop.info`（`$wbEncrypted` AES-256-GCM + Electron 密钥派生）+ 自动关闭/重启客户端；密钥派生/解密全链路装机实测通过，用户验收真机切号正常） | [WorkBuddy-IDE账号切换](WorkBuddy-IDE账号切换/) |
 | WorkBuddy 账号多方式导入 | 核心 | 已实现（2026-10-11：添加账号三 tab——OAuth 已有 + Token/JSON 粘贴导入（`/v2/plugin/accounts` 补全，失败不入库）+ 本机客户端/JSON 文件导入；格式兼容 cockpit-tools 导出；pytest 517 绿 + 探针 3 项 PASS + 打包/源码冒烟 token 零泄漏，用户验收本地导入正常） | [WorkBuddy账号多方式导入](WorkBuddy账号多方式导入/) |
-| WorkBuddy 账号导出 | 核心 | 方案已定稿（2026-10-12：cockpit 兼容格式（备份+互导）+ 9router 读取合并流（只读库→完整可恢复备份，拍板①保留未选中连接；读不到降级剪贴板片段）；9router 全量覆盖语义/库结构/只读可行性已源码+实测双证） | [WorkBuddy账号导出](WorkBuddy账号导出/) |
+| WorkBuddy 账号导出 | 核心 | 已实现（2026-10-12：cockpit 兼容格式（备份+互导，id=md5(uid) 实物验证）+ 9router 读取合并流（只读 SQLite→完整可恢复备份，拍板①保留未选中连接；读不到降级剪贴板片段）；**只读重建与 9router 官方导出 10 段逐字节对拍一致**；pytest 542 绿 + 探针 PASS + 打包冒烟 full_backup 10 段；导出→9router 恢复待用户手动验收） | [WorkBuddy账号导出](WorkBuddy账号导出/) |
 | WorkBuddy 反代账号优先级 | 交付 | 方案已定稿（2026-10-11：账号池 `priority` 字段（1 起、越小越优先、默认 1）+ 反代选号最小优先级组内轮询 + 401/403 才跨组降级；默认全 1 与现状逐请求等价；评估=好做，改动集中 store/chat/routes 三处无新依赖） | [WorkBuddy反代账号优先级](WorkBuddy反代账号优先级/) |
 
 ## 演进顺序（历史，仅作追溯）

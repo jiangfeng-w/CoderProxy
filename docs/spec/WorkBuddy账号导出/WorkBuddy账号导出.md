@@ -1,6 +1,6 @@
 # WorkBuddy 账号导出
 
-> **状态**：方案已定稿（2026-10-12；cockpit 导出格式实物验证 + 9router 库结构/导出函数源码双证）
+> **状态**：已实现（2026-10-12；真机只读重建与 9router 官方导出 10 段逐字节对拍一致；**真机导出→9router 恢复待用户手动验收**）
 > **优先级**：核心
 > **来源**：用户需求「有了导入，是不是也应该有导出功能」；由 [WorkBuddy账号多方式导入](../WorkBuddy账号多方式导入/) 自然延伸（导入/导出一对）
 > **隐私声明**：本文档不含任何真实账号、凭证、token。
@@ -126,8 +126,9 @@ docs/spec/WorkBuddy账号导出/探针-9router只读读取.py  # 真机只读探
 
 ## 验收
 
-- [ ] `pytest tests/ -x -q` 全绿（新增导出用例；round-trip 断言）
-- [ ] ruff（新文件）+ `npm run format:check` + `npm run build` 通过
-- [ ] 源码起服冒烟：cockpit 导出文本正确；9router 完整备份导出含 settings/apiKeys
-- [ ] 真机 9router 只读探针 PASS（不写库）
-- [ ] 手动验收（待用户）：cockpit 文件导出→导入 cockpit-tools 成功；9router 完整备份→恢复后号更新且 apiKeys/设置保留
+- [x] `pytest tests/ -x -q` 全绿（542 passed；test_wb_exports 16 例含实物 id 向量/round-trip 回导/只读不改库断言/合并三分支；test_wb_routes +5 例）
+- [x] ruff（新文件）+ `npm run format:check` + `npm run build` 通过
+- [x] 源码起服冒烟：cockpit 导出内容正确（token 保留、id=md5(uid)）；9router 导出读到真实配置（10 段 + apiKeys + settings），合成号 append、原有连接原样保留（拍板①验证）、400/404 映射
+- [x] 真机只读探针 PASS（`探针-9router只读读取.py`）：只读重建 10 段 → 与 9router 官方导出 API 逐字节一致；只读不改库
+- [x] 打包登记：两个 spec hiddenimports 加 `relay.platforms.workbuddy.exports`；onefile 产物冒烟
+- [ ] 手动验收（待用户）：cockpit 文件导出→ cockpit-tools 导入（或本应用回导）；9router 完整备份导出→ 9router 恢复（号更新、apiKeys/设置保留）
