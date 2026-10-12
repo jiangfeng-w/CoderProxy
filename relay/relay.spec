@@ -56,6 +56,8 @@ hiddenimports = [
     "relay.platforms.workbuddy.ide_switch",
     # WorkBuddy 账号多方式导入（粘贴 Token/JSON + 本机登录态）：routes 静态导入，双保险
     "relay.platforms.workbuddy.imports",
+    # WorkBuddy 账号导出（cockpit 兼容 + 9router 只读合并流）：routes 静态导入，双保险
+    "relay.platforms.workbuddy.exports",
     # 工具配对安全网（BUG-4 出站安全网）：chat.py 静态导入，双保险登记
     "relay.tool_repair",
 ]

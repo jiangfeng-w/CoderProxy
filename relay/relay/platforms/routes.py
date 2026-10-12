@@ -173,3 +173,23 @@ async def wb_import_local():
     except imports.ImportParseError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"imported": 1, "accounts": [AccountView.from_dict(row).to_dict()]}
+
+
+@router.post("/workbuddy/accounts/export")
+async def wb_export(body: dict):
+    """账号导出（cockpit 兼容数组 / 9router 读取合并流备份；spec「WorkBuddy账号导出」）。
+
+    响应含明文 token（导出语义；本地文件与剪贴板，不进日志）——**不经 AccountView**。
+    uids 空 = 全部；未知 uid → 404；格式非法 → 400。
+    """
+    from relay.platforms.workbuddy import exports
+
+    data = body or {}
+    uids = data.get("uids") if isinstance(data.get("uids"), list) else []
+    fmt = str(data.get("format") or "")
+    try:
+        return await exports.export_selected([str(u) for u in uids], fmt)
+    except exports.ExportAccountNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except exports.ExportRequestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

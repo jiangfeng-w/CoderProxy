@@ -318,6 +318,69 @@ def test_import_local_maps_409_when_absent(client, monkeypatch):
     assert wb_imports.PLATFORM_ID == "workbuddy"
 
 
+# ─────────────────────────── 账号导出（cockpit / 9router） ───────────────────────────
+
+async def test_export_cockpit_via_routes(client):
+    """cockpit 格式导出：含 token 属导出语义；字段对齐实物（id=md5(uid)）。"""
+    await store.upsert_account("workbuddy", {
+        "uid": "u_exp", "nickname": "导出号", "access_token": "ACCESS_SECRET_X",
+        "refresh_token": "REFRESH_SECRET_X", "expires_at": 1794144709133})
+    r = client.post("/v1/platforms/workbuddy/accounts/export",
+                    json={"uids": ["u_exp"], "format": "cockpit"}, headers=_auth())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "cockpit"
+    assert body["filename"].startswith("workbuddy_accounts_")
+    doc = json.loads(body["content"])
+    assert doc[0]["uid"] == "u_exp"
+    assert doc[0]["access_token"] == "ACCESS_SECRET_X"  # 导出语义：含 token（本地使用）
+    assert doc[0]["id"].startswith("workbuddy_")
+
+
+async def test_export_9router_fragment_when_no_db(client, monkeypatch, tmp_path):
+    from relay.platforms.workbuddy import exports as wb_exports
+
+    monkeypatch.setenv("RELAY_9ROUTER_DB", str(tmp_path / "nope.sqlite"))
+    await store.upsert_account("workbuddy", {"uid": "u_frag", "access_token": "tok-frag"})
+    r = client.post("/v1/platforms/workbuddy/accounts/export",
+                    json={"uids": [], "format": "9router"}, headers=_auth())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "fragment"
+    [conn] = json.loads(body["content"])
+    assert conn["provider"] == "codebuddy-cn"
+    assert wb_exports.NINE_ROUTER_PROVIDER == "codebuddy-cn"
+
+
+async def test_export_9router_full_backup_via_routes(client, monkeypatch, tmp_path):
+    from relay.platforms.workbuddy import exports as wb_exports
+    from tests.test_wb_exports import _make_9router_db, _conn_row
+
+    db = tmp_path / "data.sqlite"
+    _make_9router_db(db, connections=[_conn_row("c-1", token="plain")])
+    monkeypatch.setenv("RELAY_9ROUTER_DB", str(db))
+    await store.upsert_account("workbuddy", {"uid": "u_full", "access_token": "tok-full"})
+    r = client.post("/v1/platforms/workbuddy/accounts/export",
+                    json={"uids": [], "format": "9router"}, headers=_auth())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "full_backup"
+    doc = json.loads(body["content"])
+    assert "settings" in doc and "apiKeys" in doc  # 完整备份承载全部段
+    assert wb_exports.PLATFORM_ID == "workbuddy"
+
+
+def test_export_errors_via_routes(client):
+    # 格式非法 → 400；未知 uid → 404（空池也先走格式校验）
+    r = client.post("/v1/platforms/workbuddy/accounts/export",
+                    json={"uids": [], "format": "sub2api"}, headers=_auth())
+    assert r.status_code == 400
+    r = client.post("/v1/platforms/workbuddy/accounts/export",
+                    json={"uids": ["nope"], "format": "cockpit"}, headers=_auth())
+    assert r.status_code in (404, 400)  # 空池 →「没有可导出」；非空池 → 404 未知 uid
+    assert client.post("/v1/platforms/workbuddy/accounts/export").status_code == 401
+
+
 class _ClientCtx:
     """路由测试用 WbClient 薄包装（对齐 test_wb_imports._Ctx）。"""
 
