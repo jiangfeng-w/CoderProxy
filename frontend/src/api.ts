@@ -282,6 +282,15 @@ export const wbIdeState = (): Promise<WbIdeState> => relay('GET', '/v1/platforms
 export const wbIdeSwitch = (uid: string): Promise<{ status: string; current_uid: string }> => relay('POST', `/v1/platforms/workbuddy/accounts/${uid}/ide-switch`)
 export const wbImportText = (text: string): Promise<{ imported: number; accounts: WbAccount[] }> => relay('POST', '/v1/platforms/workbuddy/accounts/import', { text })
 export const wbImportLocal = (): Promise<{ imported: number; accounts: WbAccount[] }> => relay('POST', '/v1/platforms/workbuddy/accounts/import-local')
+/** 导出兼容格式（WorkBuddy账号导出）：cockpit 兼容数组 / 9router 读取合并流备份。 */
+export interface WbExportResult {
+  format: 'cockpit' | '9router'
+  mode: 'cockpit' | 'full_backup' | 'fragment'
+  filename: string
+  content: string
+  note: string
+}
+export const wbExport = (uids: string[], format: 'cockpit' | '9router'): Promise<WbExportResult> => relay('POST', '/v1/platforms/workbuddy/accounts/export', { uids, format })
 
 // ─────────────────────────── /v1/stats（M8：Token 统计页）───────────────────────────
 

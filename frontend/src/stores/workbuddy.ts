@@ -5,7 +5,7 @@
 // - 登录流程状态机：startLogin → pending（前端开浏览器 + 轮询）→ success/failed；
 // - 轮询节奏由 WorkBuddyTab 组件驱动（2s 间隔，成功/失败/关闭弹窗即停）。
 import { defineStore } from 'pinia'
-import { listWbAccounts, wbCheckin, wbCheckinStatus, wbDeleteAccount, wbIdeState, wbIdeSwitch, wbImportLocal, wbImportText, wbLoginCancel, wbLoginStart, wbLoginStatus, wbRefreshQuota, type WbAccount, type WbIdeState } from '../api'
+import { listWbAccounts, wbCheckin, wbCheckinStatus, wbDeleteAccount, wbExport, wbIdeState, wbIdeSwitch, wbImportLocal, wbImportText, wbLoginCancel, wbLoginStart, wbLoginStatus, wbRefreshQuota, type WbAccount, type WbExportResult, type WbIdeState } from '../api'
 import { pinia } from '../pinia'
 
 type LoginPhase = 'idle' | 'starting' | 'pending' | 'success' | 'failed'
@@ -130,6 +130,10 @@ export const useWorkbuddyStore = defineStore('workbuddy', {
       await this.load()
       await this.loadIdeState()
       return res.imported
+    },
+    /** 导出（cockpit 兼容 / 9router 读取合并流）；返回内容由组件负责下载或复制。 */
+    async exportAccounts(uids: string[], format: 'cockpit' | '9router'): Promise<WbExportResult> {
+      return wbExport(uids, format)
     }
   }
 })

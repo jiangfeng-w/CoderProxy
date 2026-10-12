@@ -5,7 +5,7 @@
 // 模型区：WorkBuddy 目录（all=1 过滤前缀；主列表仅可见模型）+ 白名单启停 + 手动连通性测试
 // + 「模型显示」弹窗（模型列表过时治理：无档位默认隐藏，显示/启用双开关联动——隐藏即停用）。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NButton, NCard, NEmpty, NInput, NModal, NPagination, NPopconfirm, NSwitch, NTabPane, NTabs, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NCheckbox, NEmpty, NInput, NModal, NPagination, NPopconfirm, NRadio, NRadioGroup, NSwitch, NTabPane, NTabs, NTag, useMessage } from 'naive-ui'
 import { getModels, openAuthorizeUrl, type OaiModel, type WbAccount } from '../../api'
 import { workbuddyStore } from '../../stores/workbuddy'
 import { store, useConfigStore } from '../../store'
@@ -468,6 +468,59 @@ async function onSwitchIde(a: WbAccount) {
   }
 }
 
+// ── 账号导出（WorkBuddy账号导出：cockpit 兼容 / 9router 读取合并流）──
+const showExportDlg = ref(false)
+const exportUids = ref<string[]>([])
+const exportFormat = ref<'cockpit' | '9router'>('cockpit')
+const exporting = ref(false)
+const exportNote = ref('')
+
+function openExportDlg() {
+  if (wb.accounts.length === 0) {
+    message.warning('暂无可导出的账号')
+    return
+  }
+  // 默认全选（账号卡片复选框状态保留，导出弹窗打开时不重置）
+  if (exportUids.value.length === 0) exportUids.value = wb.accounts.map(a => a.uid)
+  exportNote.value = ''
+  showExportDlg.value = true
+}
+
+function toggleExportUid(uid: string) {
+  const idx = exportUids.value.indexOf(uid)
+  if (idx >= 0) exportUids.value.splice(idx, 1)
+  else exportUids.value.push(uid)
+}
+
+async function onExport() {
+  exporting.value = true
+  try {
+    const res = await wb.exportAccounts(exportUids.value, exportFormat.value)
+    if (exportFormat.value === 'cockpit' || res.mode === 'full_backup') {
+      // 下载文件（cockpit 备份/迁移；9router 完整备份用于其设置里恢复）
+      const blob = new Blob([res.content], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = res.filename
+      a.click()
+      URL.revokeObjectURL(url)
+      message.success(`已导出 ${res.filename}`)
+    } else {
+      // 9router 读不到库 → 复制片段（用户手动合并进备份）
+      await navigator.clipboard.writeText(res.content)
+      message.success('未检测到 9router，已复制条目片段（请手动合并进备份）')
+    }
+    exportNote.value = res.note
+    // cockpit 无关键提示直接关；9router 保留弹窗展示 note（恢复语义/手动合并指引）
+    if (exportFormat.value === 'cockpit') showExportDlg.value = false
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    exporting.value = false
+  }
+}
+
 onMounted(() => {
   void wb.load().catch(e => message.error(String(e)))
   void wb.loadIdeState()
@@ -498,6 +551,13 @@ onUnmounted(stopPolling)
         </NButton>
         <NButton
           size="small"
+          :disabled="wb.accounts.length === 0"
+          @click="openExportDlg"
+        >
+          导出{{ exportUids.length ? `（${exportUids.length}）` : '' }}
+        </NButton>
+        <NButton
+          size="small"
           @click="showVisibilityDlg = true"
         >
           模型显示
@@ -519,6 +579,11 @@ onUnmounted(stopPolling)
           class="acct-card"
         >
           <div class="acct-head">
+            <NCheckbox
+              size="small"
+              :checked="exportUids.includes(a.uid)"
+              @update:checked="toggleExportUid(a.uid)"
+            />
             <span
               class="acct-name"
               :title="a.uid"
@@ -969,8 +1034,60 @@ onUnmounted(stopPolling)
       </template>
     </NModal>
 
-    <!-- 模型显示弹窗（过时治理）：列出全部 WB 模型（含隐藏）逐条开关；
-         单一「显示」开关同时驱动显示+启用（隐藏 ⇒ 双关，chat 404；2026-10-11 拍板简化）。 -->
+    <!-- 导出弹窗（WorkBuddy账号导出）：格式二选 + 选中账号摘要；
+         cockpit → 下载兼容文件；9router → 读到库下载完整备份（读不到复制片段）。 -->
+    <NModal
+      v-model:show="showExportDlg"
+      preset="card"
+      title="导出 WorkBuddy 账号"
+      :style="{ width: '480px' }"
+      :mask-closable="false"
+    >
+      <p class="dlg-text">
+        将导出
+        <b>{{ exportUids.length }}</b>
+        个账号（卡片左上角复选框可调整选择；一个都没勾时按全部导出）。
+      </p>
+      <NRadioGroup
+        v-model:value="exportFormat"
+        class="export-formats"
+      >
+        <div class="export-opt">
+          <NRadio value="cockpit"> cockpit-tools 兼容（备份 / 互导） </NRadio>
+          <p class="export-desc"> 导出 workbuddy_accounts 数组文件：可用于本应用备份迁移，或直接在 cockpit-tools 导入（同 uid 覆盖）。 </p>
+        </div>
+        <div class="export-opt">
+          <NRadio value="9router"> 9router 完整备份（读取本机配置合并） </NRadio>
+          <p class="export-desc"> 只读本机 9router 配置并把选中账号合并进去，产出完整可恢复备份（其余连接与 API key / 设置原样保留）。 未检测到 9router 时降级为条目片段（复制到剪贴板，手动合并进备份）。 </p>
+        </div>
+      </NRadioGroup>
+      <p
+        v-if="exportNote"
+        class="export-note"
+      >
+        {{ exportNote }}
+      </p>
+      <template #footer>
+        <div class="dlg-actions">
+          <NButton
+            size="small"
+            :disabled="exporting"
+            @click="showExportDlg = false"
+          >
+            关闭
+          </NButton>
+          <NButton
+            size="small"
+            type="primary"
+            :loading="exporting"
+            @click="onExport"
+          >
+            导出
+          </NButton>
+        </div>
+      </template>
+    </NModal>
+
     <NModal
       v-model:show="showVisibilityDlg"
       preset="card"
@@ -1409,6 +1526,30 @@ onUnmounted(stopPolling)
 }
 .file-hidden {
   display: none;
+}
+/* 导出弹窗（格式二选 + 说明行） */
+.export-formats {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+.export-opt {
+  border: 1px solid var(--cp-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.export-desc {
+  margin: 6px 0 0 22px;
+  color: var(--cp-dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.export-note {
+  margin: 10px 0 0;
+  color: var(--cp-cyan);
+  font-size: 12px;
+  line-height: 1.7;
 }
 /* 模型显示弹窗（过时治理）：提示行 + 工具行 + 全量模型行内滚动列表 */
 .vis-hint {
