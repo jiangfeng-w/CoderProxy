@@ -490,6 +490,37 @@ fn window_hide(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 导出文件：系统「另存为」对话框选位置 + 写文件（供应商页账号导出）。
+///
+/// 对话框与落盘都在壳侧（与 relay 命令同风格，前端不引入 fs 插件权限面）；
+/// 用户取消返回 `{"saved": false}`，成功返回 `{"saved": true, "path": …}`。
+/// 注意：`blocking_save_file` 不可在主线程调用；async command 运行于 async
+/// runtime 线程，满足该约束（见插件文档 Blocking APIs 节）。
+#[tauri::command]
+async fn save_text_file(
+    app: tauri::AppHandle,
+    default_name: String,
+    content: String,
+) -> Result<serde_json::Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let picked = app
+        .dialog()
+        .file()
+        .set_file_name(&default_name)
+        .add_filter("JSON", &["json"])
+        .blocking_save_file();
+    let Some(file_path) = picked else {
+        return Ok(serde_json::json!({ "saved": false }));
+    };
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("保存路径无效: {e}"))?;
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| format!("写入文件失败: {e}"))?;
+    Ok(serde_json::json!({ "saved": true, "path": path.to_string_lossy() }))
+}
+
 /// 真正退出应用——前端「退出应用」按钮调用，走 RunEvent::Exit 回收 sidecar。
 #[tauri::command]
 fn app_exit(app: tauri::AppHandle) -> Result<(), String> {
@@ -512,6 +543,8 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        // 导出「另存为」系统对话框（供应商页账号导出选保存位置）
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             sidecar: Mutex::new(None),
             job: Mutex::new(None),
@@ -525,6 +558,7 @@ pub fn run() {
             relay_stop,
             relay_restart,
             window_hide,
+            save_text_file,
             app_exit
         ])
         .setup(|app| {

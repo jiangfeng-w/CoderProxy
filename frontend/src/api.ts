@@ -77,6 +77,9 @@ export const relayRestart = (): Promise<{ restarting: boolean }> => invoke('rela
 export const windowHide = (): Promise<void> => invoke('window_hide')
 export const appExit = (): Promise<void> => invoke('app_exit')
 
+/** 导出文件：系统「另存为」对话框选位置 + 写文件（壳侧 save_text_file 命令）。 */
+export const saveTextFile = (defaultName: string, content: string): Promise<{ saved: boolean; path?: string }> => invoke('save_text_file', { defaultName, content })
+
 /** /v1/auth/* */
 export const authStatus = (): Promise<AuthStatus> => relay('GET', '/v1/auth/status')
 export const authLoginStart = (): Promise<AuthStatus> => relay('POST', '/v1/auth/login/start')
