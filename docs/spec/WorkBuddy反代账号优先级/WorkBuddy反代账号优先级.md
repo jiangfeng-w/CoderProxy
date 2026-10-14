@@ -74,6 +74,12 @@ relay/relay-onefile.spec、relay/relay.spec      # 无新模块则不动（route
 - 下一请求 tried 清空 → 回到 A/B（若 C 在用中发现高优恢复，同理）
 - A 设为 priority 3、B 保持 1、C 保持 2 → 用 B（1 组），B 拒 → C（2 组）→ A（3 组）
 
+## 同批协调（2026-10-13 追加）
+
+- 本需求的 `priority` 与《[WorkBuddy 反代账号池健康管理](../WorkBuddy反代账号池健康管理/)》（2026-10-13 立项）的 `fail_count` / `degraded_until` / `model_cooldowns` **共享 `store.py` preserve 名单与 `_pick_account` 选号链**——实施时两者同批合并：preserve 名单一次性加全四个字段，`_pick_account` 一次改成「priority 分组 → 组内过滤降权/冷却 → 游标轮询」。
+- 选号语义补充决策（健康管理 spec 追加）：**高优组全部冷却/降权时落到下一组**（可用性优先于优先级）。
+- `AccountView` 加 `priority` 时顺带透出 `degraded_until` / `model_cooldowns`（只读展示）。
+
 ## 已知边界
 
 - **「用完」= 凭证级失败才降级**：积分余额不足但 token 有效的号仍会被高优组选中，上游的「配额耗尽」错误（具体码未实测——不能拿真实账号压测耗尽）会作为普通 400 透传给 agent 而**不触发换号**。后续若实测拿到耗尽错误码，可把该 code 纳入 `_CredentialRejected` 同类处理（留作增强，不在本期）。

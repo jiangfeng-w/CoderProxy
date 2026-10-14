@@ -36,6 +36,8 @@ spec/
 > 追加（2026-10-11）：WorkBuddy账号多方式导入/ —— 添加账号三入口（OAuth 已有 + Token/JSON 粘贴 + 本机客户端/JSON 文件导入），JSON 格式兼容 cockpit-tools 导出。
 > 追加（2026-10-11）：WorkBuddy反代账号优先级/ —— 反代选号按账号 priority 分组（1 起、越小越优先、默认全 1、组内轮询），401/403 才跨组降级。
 > 追加（2026-10-12）：WorkBuddy账号导出/ —— 导出兼容 cockpit-tools（备份/互导兼用）与 9router（只读库合并产出完整可恢复备份；读不到降级剪贴板片段）。
+> 追加（2026-10-13）：WorkBuddy双域账号支持/ —— 国际版账号支持；**2026-10-14 改版并定稿**：由「单池每账号 realm 切换」改为「双平台实例拆分」（workbuddy + workbuddy-global 双池双前缀双 tab；realm 差异收敛到 profile 单点）；tab 名定稿 `WorkBuddy CN` / `WorkBuddy`；模型前缀定稿 `wbcn/`（CN）+ `wbg/`（国际版，二次拍板由 `wb` 改 `wbg`），旧 `WorkBuddy/` 停用为规范前缀、仅保留读兼容归一；**定位拍板**：国内版/国际版按两个独立平台完整区分（profile 仅代码实现手段），国际版反代沿用 CN 版同源参考谱系（panel 主线）不另寻新参考；**产品矩阵澄清**：workbuddy 系列 4 产品（CodeBuddy IDE 线 / WorkBuddy Agent 线 × 国内/国际）；同 locale 两软件共用账号体系、国内/国际完全互不干扰；国内版签到只在 WorkBuddy、**国际版无签到（定稿）**；国际版域选 `workbuddy.ai`（无签到故与 codebuddy.ai 功能等价，为统一取 WorkBuddy 域）；codebuddy 域若反代属另立项（第三、四平台）。
+> 追加（2026-10-13）：WorkBuddy反代账号池健康管理/ —— 连败软降级（只挂起不杀号）+ 6004 模型级冷却（切模型豁免）+ 11102 负缓存 + 全池挂起 429；由《WorkBuddy 反代优化方案》P0-2/P0-3/P2-6 合并立项（共享 store/选号/轮换链改动点）。
 
 每个子目录：`<需求名>.md`（需求）+ 该期其他文件（脚本/支撑文档，如 mock 脚本直接放同级）。历史需求文件名沿用 `M<序号>-<名>.md`；新需求为 `<需求名>.md`。
 
@@ -80,6 +82,8 @@ spec/
 | WorkBuddy 账号多方式导入 | 核心 | 已实现（2026-10-11：添加账号三 tab——OAuth 已有 + Token/JSON 粘贴导入（`/v2/plugin/accounts` 补全，失败不入库）+ 本机客户端/JSON 文件导入；格式兼容 cockpit-tools 导出；pytest 517 绿 + 探针 3 项 PASS + 打包/源码冒烟 token 零泄漏，用户验收本地导入正常） | [WorkBuddy账号多方式导入](WorkBuddy账号多方式导入/) |
 | WorkBuddy 账号导出 | 核心 | 已实现（2026-10-12：cockpit 兼容格式（备份+互导，id=md5(uid) 实物验证）+ 9router 读取合并流（只读 SQLite→完整可恢复备份，拍板①保留未选中连接；读不到降级剪贴板片段）；**只读重建与 9router 官方导出 10 段逐字节对拍一致**；导出 UI 弹窗勾选 + 系统另存为（壳命令 save_text_file）；pytest 542 绿 + 探针 PASS + 打包冒烟 full_backup 10 段；用户验收导出功能正常） | [WorkBuddy账号导出](WorkBuddy账号导出/) |
 | WorkBuddy 反代账号优先级 | 交付 | 方案已定稿（2026-10-11：账号池 `priority` 字段（1 起、越小越优先、默认 1）+ 反代选号最小优先级组内轮询 + 401/403 才跨组降级；默认全 1 与现状逐请求等价；评估=好做，改动集中 store/chat/routes 三处无新依赖） | [WorkBuddy反代账号优先级](WorkBuddy反代账号优先级/) |
+| WorkBuddy 双域账号支持（双平台拆分） | 核心 | 方案已定稿（2026-10-13 立稿、2026-10-14 改版并定稿：拆 `workbuddy` + `workbuddy-global` 双平台实例——双账号池 / 双模型前缀（`wbcn/` + `wbg/`，用户拍板改短、二次拍板 `wb`→`wbg`；旧 `WorkBuddy/` 停用为规范前缀、读兼容归一）/ 双 tab（`WorkBuddy CN` / `WorkBuddy`，用户拍板）；realm 差异（头族/base/路径/登录/目录）收敛到 profile 单点；国际版无签到（定稿）、IDE 切号/导出/本机导入不做；CN 零回归；单池混两域的三处硬伤：目录只手、选号错配、模型列表。**2026-10-14 定位拍板**：两版按两个独立平台完整区分（profile 仅实现手段），国际版反代沿用 CN 版同源参考谱系；**产品矩阵澄清**：4 产品（CodeBuddy/WorkBuddy × 国内/国际）、同 locale 共用账号体系、国内/国际互不干扰——国际版域选 `workbuddy.ai`（无签到故与 codebuddy.ai 等价、为统一取 WorkBuddy 域）。**2026-10-14 复核修订**：导入/导出口径统一、模块级单例（chat/catalog 两处写死 CN）改造落点、打包 spec 登记、`test_model_prefix.py` 同步、§9 三需求同批协调） | [WorkBuddy双域账号支持](WorkBuddy双域账号支持/) |
+| WorkBuddy 反代账号池健康管理 | 核心 | 方案已定稿（2026-10-13 立稿、2026-10-14 定稿：连败软降级只挂起不杀号 + 6004 模型级冷却切模型豁免 + 11102 负缓存 + 全池挂起 429+Retry-After；修正原方案 4 处事实错误——签到不解冻软冷却/6004 模型级/负缓存 TTL/9router 退避数值；与优先级需求同批协调） | [WorkBuddy反代账号池健康管理](WorkBuddy反代账号池健康管理/) |
 
 ## 演进顺序（历史，仅作追溯）
 
