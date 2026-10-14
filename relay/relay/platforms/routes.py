@@ -145,9 +145,10 @@ async def wb_ide_switch(uid: str):
 
 @router.post("/workbuddy/accounts/import")
 async def wb_import(body: dict):
-    """粘贴 Token/JSON 与 JSON 文件的统一导入入口（body {text}）。
+    """粘贴 Token/JSON 与 JSON 文件的统一导入入口（body {text}；CN 形态）。
 
     响应一律 AccountView 序列化（不含 token）；解析错误 400、accounts 补全失败 502。
+    国际版走泛化路径 `POST /v1/platforms/workbuddy-global/accounts/import`（§4 端点细分）。
     """
     from relay.platforms.base import AccountView
     from relay.platforms.workbuddy import imports
@@ -155,6 +156,30 @@ async def wb_import(body: dict):
     text = str((body or {}).get("text") or "")
     try:
         rows = await imports.import_text(text)
+    except imports.ImportParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PlatformUpstreamError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"imported": len(rows), "accounts": [AccountView.from_dict(r).to_dict() for r in rows]}
+
+
+@router.post("/{platform}/accounts/import")
+async def platform_import(platform: str, body: dict):
+    """粘贴导入泛化入口（双域 spec §4）：{platform} 仅允许 WorkBuddy 双域。
+
+    与 CN 专用 `/workbuddy/accounts/import` 等价（后者保留兼容存量前端调用）；
+    补全 base + 归属校验按 platform 的 profile 走。
+    """
+    from relay.platforms.base import AccountView
+    from relay.platforms.workbuddy import imports
+    from relay.platforms.workbuddy.realms import realm_for
+
+    profile = realm_for(platform)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"未知平台: {platform}")
+    text = str((body or {}).get("text") or "")
+    try:
+        rows = await imports.import_text(text, profile=profile)
     except imports.ImportParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PlatformUpstreamError as exc:

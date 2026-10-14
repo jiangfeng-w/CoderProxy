@@ -318,6 +318,60 @@ def test_import_local_maps_409_when_absent(client, monkeypatch):
     assert wb_imports.PLATFORM_ID == "workbuddy"
 
 
+# ─────────────── 双域端点细分（粘贴 import 泛化；CN 专用路径未挂载） ───────────────
+
+def test_platform_import_generalized_dual_realm(client):
+    """泛化粘贴导入：workbuddy 与 workbuddy-global 双平台可用（JSON 源不联网）。"""
+    r = client.post("/v1/platforms/workbuddy-global/accounts/import",
+                    json={"text": '[{"access_token": "tok_g", "uid": "u_g", '
+                                  '"domain": "www.workbuddy.ai"}]'},
+                    headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["accounts"][0]["uid"] == "u_g"
+    r2 = client.post("/v1/platforms/workbuddy/accounts/import",
+                     json={"text": '[{"access_token": "tok_c", "uid": "u_c", '
+                                   '"domain": "www.codebuddy.cn"}]'},
+                     headers=_auth())
+    assert r2.status_code == 200
+    assert r2.json()["accounts"][0]["uid"] == "u_c"
+
+
+def test_platform_import_unknown_platform_404(client):
+    r = client.post("/v1/platforms/nope/accounts/import",
+                    json={"text": "tok"}, headers=_auth())
+    assert r.status_code == 404
+
+
+def test_platform_import_ownership_rejected(client):
+    """归属校验经路由映射 400（国际号进 CN 泛化入口）。"""
+    r = client.post("/v1/platforms/workbuddy/accounts/import",
+                    json={"text": '[{"access_token": "t", "uid": "u", '
+                                  '"domain": "www.workbuddy.ai"}]'},
+                    headers=_auth())
+    assert r.status_code == 400
+    assert "国际版" in r.json()["detail"]
+
+
+def test_import_local_export_not_mounted_for_global(client):
+    """import-local / export 对 workbuddy-global 不可用（CN 生态专属）。
+
+    实现事实（2026-10-14 实测）：FastAPI 里这两个路径会命中原生 DELETE
+    `/{platform}/accounts/{uid}` 的路径模式（用 `import-local`/`export` 当 uid），
+    方法不匹配 → **405**（而非 spec 预估的「天然 404」）；ide-switch 无路径重合 → 404。
+    对外语义一致：国际版无此能力、前端不显示入口、绝不 2xx。
+    """
+    r1 = client.post("/v1/platforms/workbuddy-global/accounts/import-local",
+                     headers=_auth())
+    assert r1.status_code in (404, 405)
+    r2 = client.post("/v1/platforms/workbuddy-global/accounts/export",
+                     json={"uids": [], "format": "cockpit"}, headers=_auth())
+    assert r2.status_code in (404, 405)
+    # ide-switch（无路径重合 → 404）
+    r3 = client.post("/v1/platforms/workbuddy-global/accounts/u_x/ide-switch",
+                     headers=_auth())
+    assert r3.status_code == 404
+
+
 # ─────────────────────────── 账号导出（cockpit / 9router） ───────────────────────────
 
 async def test_export_cockpit_via_routes(client):
