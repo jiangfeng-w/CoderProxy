@@ -75,17 +75,18 @@ def _register_wb(models: list[dict]):
     async def _dir():
         return models
 
-    adapter_registry.register_provider("WorkBuddy", directory=_dir,
+    adapter_registry.register_provider("wbcn", directory=_dir,
                                        factory=lambda bare, **kw: _FakeWb(bare))
 
 
 def _restore_wb():
-    """还原真实注册（导入 routes 时已注册；连 directory/availability 一并还原）。"""
+    """还原真实注册（导入 routes 时已注册；双域前缀一并还原）。"""
     from relay.platforms.workbuddy import chat as wb_chat
-    adapter_registry.register_provider("WorkBuddy",
-                                       directory=wb_chat._catalog.load_models,  # noqa: SLF001
-                                       factory=wb_chat.factory,
-                                       availability=wb_chat._available)  # noqa: SLF001
+    adapter_registry.register_provider(
+        "wbcn",
+        directory=wb_chat._directory_for(wb_chat.REALM_CN),  # noqa: SLF001
+        factory=wb_chat.factory_for(wb_chat.REALM_CN),
+        availability=wb_chat._availability_for(wb_chat.REALM_CN))  # noqa: SLF001
 
 
 def _post_chat(client, model, **extra):
@@ -105,16 +106,24 @@ def _model_ref(name):
 def test_visibility_roundtrip_normalizes_keys(tmp_path, monkeypatch):
     """写入前/读出时键都归一为规范全名；裸名落盘 → 读视图归一（对齐白名单）。"""
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
-    saved = _run(storage.save_model_visibility({"wb-x": "show", "WorkBuddy/wb-y": "hide"}))
-    assert saved == {"牛码/wb-x": "show", "WorkBuddy/wb-y": "hide"}
-    assert _run(storage.get_model_visibility()) == {"牛码/wb-x": "show", "WorkBuddy/wb-y": "hide"}
+    saved = _run(storage.save_model_visibility({"wb-x": "show", "wbcn/wb-y": "hide"}))
+    assert saved == {"牛码/wb-x": "show", "wbcn/wb-y": "hide"}
+    assert _run(storage.get_model_visibility()) == {"牛码/wb-x": "show", "wbcn/wb-y": "hide"}
+    # legacy 键读归一（§5）：旧 WorkBuddy/ 键等价命中新规范键
+    from pathlib import Path as _P
+    import json as _json
+    p = _P(tmp_path) / "relay_state.json"
+    state = _json.loads(p.read_text("utf-8"))
+    state["config"]["model_visibility"]["WorkBuddy/wb-legacy"] = "hide"
+    p.write_text(_json.dumps(state, ensure_ascii=False), "utf-8")
+    assert _run(storage.get_model_visibility())["wbcn/wb-legacy"] == "hide"
 
 
 def test_visibility_invalid_values_dropped_and_corrupt_fallback(tmp_path, monkeypatch):
     """非法值键丢弃；整体损坏（非 dict）回退 {}，不炸读路径。"""
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
-    _run(storage.save_model_visibility({"WorkBuddy/a": "show", "WorkBuddy/b": "bogus"}))
-    assert _run(storage.get_model_visibility()) == {"WorkBuddy/a": "show"}
+    _run(storage.save_model_visibility({"wbcn/a": "show", "wbcn/b": "bogus"}))
+    assert _run(storage.get_model_visibility()) == {"wbcn/a": "show"}
     # 直接改落盘文件模拟存量脏数据
     p = Path(tmp_path) / "relay_state.json"
     state = json.loads(p.read_text("utf-8"))
@@ -125,7 +134,7 @@ def test_visibility_invalid_values_dropped_and_corrupt_fallback(tmp_path, monkey
 
 def test_config_api_invalid_visibility_400_not_persisted(client):
     """API 写入非法值 → 400 且不落盘（全字段先校验模式）。"""
-    r = client.post("/v1/auth/config", json={"model_visibility": {"WorkBuddy/x": "bogus"}},
+    r = client.post("/v1/auth/config", json={"model_visibility": {"wbcn/x": "bogus"}},
                     headers=_auth())
     assert r.status_code == 400
     assert _run(storage.get_model_visibility()) == {}
@@ -134,13 +143,13 @@ def test_config_api_invalid_visibility_400_not_persisted(client):
 def test_config_api_batch_whitelist_and_visibility(client):
     """弹窗「显示/启用联动」同批提交：一次 POST 双字段均落盘（成对写入契约）。"""
     r = client.post("/v1/auth/config",
-                    json={"model_visibility": {"WorkBuddy/wb-old": "show"},
-                          "model_whitelist": ["WorkBuddy/wb-old"]},
+                    json={"model_visibility": {"wbcn/wb-old": "show"},
+                          "model_whitelist": ["wbcn/wb-old"]},
                     headers=_auth())
     assert r.status_code == 200
-    assert r.json()["model_visibility"] == {"WorkBuddy/wb-old": "show"}
-    assert r.json()["model_whitelist"] == ["WorkBuddy/wb-old"]
-    assert _run(storage.get_model_visibility()) == {"WorkBuddy/wb-old": "show"}
+    assert r.json()["model_visibility"] == {"wbcn/wb-old": "show"}
+    assert r.json()["model_whitelist"] == ["wbcn/wb-old"]
+    assert _run(storage.get_model_visibility()) == {"wbcn/wb-old": "show"}
 
 
 # ─────────────────────────── 判定 + /v1/models 注入/过滤 ───────────────────────────
@@ -152,11 +161,11 @@ def test_models_visible_flag_and_agent_filter(client, monkeypatch):
     try:
         full = client.get("/v1/models?all=1", headers=_auth()).json()["data"]
         vis = {m["id"]: m["visible"] for m in full}
-        assert vis == {"牛码/glm-5.3": True, "WorkBuddy/wb-new": True,
-                       "WorkBuddy/wb-old": False}
+        assert vis == {"牛码/glm-5.3": True, "wbcn/wb-new": True,
+                       "wbcn/wb-old": False}
         # agent 侧：隐藏条目不出现；牛码与有档位 WB 正常
         ids = [m["id"] for m in client.get("/v1/models", headers=_auth()).json()["data"]]
-        assert ids == ["牛码/glm-5.3", "WorkBuddy/wb-new"]
+        assert ids == ["牛码/glm-5.3", "wbcn/wb-new"]
     finally:
         _restore_wb()
 
@@ -166,13 +175,13 @@ def test_visibility_override_priority_over_default(client):
     _run(storage.save_models(_NIUCODE_MODELS))
     _register_wb(_WB_MODELS)
     try:
-        _run(storage.save_model_visibility({"WorkBuddy/wb-old": "show",
-                                            "WorkBuddy/wb-new": "hide"}))
+        _run(storage.save_model_visibility({"wbcn/wb-old": "show",
+                                            "wbcn/wb-new": "hide"}))
         ids = [m["id"] for m in client.get("/v1/models", headers=_auth()).json()["data"]]
-        assert ids == ["牛码/glm-5.3", "WorkBuddy/wb-old"]
+        assert ids == ["牛码/glm-5.3", "wbcn/wb-old"]
         full = client.get("/v1/models?all=1", headers=_auth()).json()["data"]
         vis = {m["id"]: m["visible"] for m in full}
-        assert vis["WorkBuddy/wb-old"] is True and vis["WorkBuddy/wb-new"] is False
+        assert vis["wbcn/wb-old"] is True and vis["wbcn/wb-new"] is False
     finally:
         _restore_wb()
 
@@ -182,7 +191,7 @@ def test_models_filter_keeps_whitelist_intersection(client):
     _run(storage.save_models(_NIUCODE_MODELS))
     _register_wb(_WB_MODELS)
     try:
-        _run(storage.set_model_whitelist(["牛码/glm-5.3", "WorkBuddy/wb-old"]))
+        _run(storage.set_model_whitelist(["牛码/glm-5.3", "wbcn/wb-old"]))
         ids = [m["id"] for m in client.get("/v1/models", headers=_auth()).json()["data"]]
         assert ids == ["牛码/glm-5.3"]  # wb-old 在白名单内但被可见性过滤
     finally:
@@ -193,8 +202,8 @@ def test_single_model_endpoint_not_visibility_filtered(client):
     """GET /v1/models/{id} 不过滤可见性（与现状不过滤白名单一致）。"""
     _register_wb(_WB_MODELS)
     try:
-        r = client.get("/v1/models/WorkBuddy/wb-old", headers=_auth())
-        assert r.status_code == 200 and r.json()["id"] == "WorkBuddy/wb-old"
+        r = client.get("/v1/models/wbcn/wb-old", headers=_auth())
+        assert r.status_code == 200 and r.json()["id"] == "wbcn/wb-old"
     finally:
         _restore_wb()
 
@@ -204,7 +213,7 @@ def test_catalog_refresh_keeps_overrides_and_defaults_new_entries(client):
     _run(storage.save_models(_NIUCODE_MODELS))
     _register_wb(_WB_MODELS)
     try:
-        _run(storage.save_model_visibility({"WorkBuddy/wb-old": "show"}))
+        _run(storage.save_model_visibility({"wbcn/wb-old": "show"}))
         # 目录刷新：wb-old 消失、新增无档位 wb-older 与有档位 wb-newer
         _register_wb([
             {"name": "wb-older", "context_window": 64000},
@@ -213,10 +222,10 @@ def test_catalog_refresh_keeps_overrides_and_defaults_new_entries(client):
         ])
         vis = {m["id"]: m["visible"]
                for m in client.get("/v1/models?all=1", headers=_auth()).json()["data"]}
-        assert vis == {"牛码/glm-5.3": True, "WorkBuddy/wb-older": False,
-                       "WorkBuddy/wb-newer": True}
+        assert vis == {"牛码/glm-5.3": True, "wbcn/wb-older": False,
+                       "wbcn/wb-newer": True}
         # 覆盖键持久保留：wb-old 重新上线时恢复用户意图（§5 已知边界）
-        assert _run(storage.get_model_visibility()) == {"WorkBuddy/wb-old": "show"}
+        assert _run(storage.get_model_visibility()) == {"wbcn/wb-old": "show"}
     finally:
         _restore_wb()
 
@@ -227,7 +236,7 @@ def test_chat_hidden_model_404(client):
     """隐藏模型直调 → 404「未知或未启用的模型」（联动停用，与白名单同点位同文案）。"""
     _register_wb(_WB_MODELS)
     try:
-        r = _post_chat(client, "WorkBuddy/wb-old")
+        r = _post_chat(client, "wbcn/wb-old")
         assert r.status_code == 404
         assert "未知或未启用" in r.json()["detail"]
     finally:
@@ -238,7 +247,7 @@ def test_chat_probe_exempt_from_visibility(client):
     """probe 豁免可见性（连通性测试需真到上游）：弹窗「先测后显示」不被门控锁死。"""
     _register_wb(_WB_MODELS)
     try:
-        r = _post_chat(client, "WorkBuddy/wb-old", probe=True)
+        r = _post_chat(client, "wbcn/wb-old", probe=True)
         assert r.status_code == 200
         assert r.json()["choices"][0]["message"]["content"] == "wb-ok"
     finally:
@@ -249,9 +258,9 @@ def test_chat_visible_enabled_ok_visible_disabled_404(client):
     """显示+启用 → 可调；显示但白名单单独关（可见但停用）→ 404（启用维度保留）。"""
     _register_wb(_WB_MODELS)
     try:
-        assert _post_chat(client, "WorkBuddy/wb-new").status_code == 200
+        assert _post_chat(client, "wbcn/wb-new").status_code == 200
         _run(storage.set_model_whitelist(["__none__"]))  # 全部禁用
-        r = _post_chat(client, "WorkBuddy/wb-new")
+        r = _post_chat(client, "wbcn/wb-new")
         assert r.status_code == 404 and "未知或未启用" in r.json()["detail"]
     finally:
         _restore_wb()

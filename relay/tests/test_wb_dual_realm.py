@@ -55,7 +55,7 @@ def test_realm_cn_profile_matches_legacy_literals():
     """CN profile 取值与现状字面量逐字一致（零回归锚点）。"""
     assert REALM_CN.platform_id == "workbuddy"
     assert REALM_CN.display_name == "WorkBuddy CN"
-    assert REALM_CN.model_prefix == "WorkBuddy"  # commit 3 改短为 wbcn（读兼容归一）
+    assert REALM_CN.model_prefix == "wbcn"  # 2026-10-14 改短（旧 WorkBuddy/ 读兼容归一）
     assert REALM_CN.origin == "https://www.codebuddy.cn"
     assert REALM_CN.accept_language == "zh-CN"
     assert REALM_CN.ua_platform == "WorkBuddy"
@@ -143,17 +143,19 @@ def test_platforms_dual_registration():
 
 
 def test_dual_prefix_routing(data_dir):
-    """`wbg/x` 构造国际版 adapter；`WorkBuddy/x` 构造 CN adapter（profile 正确）。"""
-    mock = httpx.MockTransport(lambda r: _sse_response(["data: [DONE]"]))
+    """`wbg/x` 构造国际版 adapter；`wbcn/x` 构造 CN adapter（profile 正确）；
+    legacy `WorkBuddy/x` 读归一为 `wbcn/x` 后同样构造 CN adapter。"""
     gl = adapter_registry.build_adapter({"name": "x"}, "wbg/x")
     assert isinstance(gl, wbchat.WorkBuddyChatAdapter)
     assert gl._profile is REALM_GLOBAL  # noqa: SLF001
-    cn = adapter_registry.build_adapter({"name": "x"}, "WorkBuddy/x")
+    cn = adapter_registry.build_adapter({"name": "x"}, "wbcn/x")
     assert isinstance(cn, wbchat.WorkBuddyChatAdapter)
     assert cn._profile is REALM_CN  # noqa: SLF001
+    legacy = adapter_registry.build_adapter({"name": "x"}, "WorkBuddy/x")
+    assert isinstance(legacy, wbchat.WorkBuddyChatAdapter)
+    assert legacy._profile is REALM_CN  # noqa: SLF001
     # 未知前缀 → None（调用方 404）
     assert adapter_registry.build_adapter({"name": "x"}, "wbg2/x") is None
-    _ = mock
 
 
 def test_unknown_model_404_semantics_preserved(data_dir):

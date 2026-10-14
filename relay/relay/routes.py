@@ -333,14 +333,14 @@ def _usage_log_fields(usage) -> dict:
 async def _model_visible(ref: model_ref.ModelRef, model: dict) -> bool:
     """模型可见性判定（模型列表过时治理 §4.2，relay 单点口径）。
 
-    用户覆盖（model_visibility show/hide）优先；默认规则：WorkBuddy 前缀 +
-    无思考档位（completion_options.thinkingLevels 空）→ 隐藏（无档位≈过时代）；
-    牛码 / 自定义供应商恒可见。
+    用户覆盖（model_visibility show/hide）优先；默认规则：WorkBuddy 前缀（`wbcn`
+    /`wbg`，双域同款）+ 无思考档位（completion_options.thinkingLevels 空）→ 隐藏
+    （无档位≈过时代）；牛码 / 自定义供应商恒可见。
     """
     ov = (await storage.get_model_visibility()).get(ref.canonical)
     if ov in storage.VISIBILITY_VALUES:
         return ov == "show"
-    if ref.prefix != model_ref.PREFIX_WORKBUDDY:
+    if ref.prefix not in (model_ref.PREFIX_WBCN, model_ref.PREFIX_WBG):
         return True
     levels = (model.get("completion_options") or {}).get("thinkingLevels") or []
     return bool(levels)
@@ -362,7 +362,7 @@ async def _chat_model_allowed(ref: model_ref.ModelRef, model: dict, probe: bool)
 async def _ensure_model(model_name: str, probe: bool = False) -> dict:
     """查模型条目；未找到时先同步（牛码）目录；白名单外模型视为不可用（M4）。
 
-    §4.1 前缀命名空间：`牛码/…` 或裸名 → 牛码目录（storage）；`WorkBuddy/…` 等
+    §4.1 前缀命名空间：`牛码/…` 或裸名 → 牛码目录（storage）；`wbcn/…`/`wbg/…` 等
     已注册前缀 → 注册表目录。前缀未知 → 404「未知供应商」。
 
     probe=True（GUI 连通性探测，请求 body 带 `probe: true`）：跳过白名单启用判定，
@@ -541,7 +541,7 @@ async def _chat_with_retry(model_name: str, chat_request: ChatRequest,
 async def list_models(all: bool = False):
     """模型目录（§4.1 前缀命名空间）。默认按「可见性 ∩ 白名单」过滤；all=1 完整目录（GUI 用）。
 
-    数据源 = 牛码目录（`牛码/…`；裸名条目加前缀）+ 已注册平台目录（`WorkBuddy/…` 等）
+    数据源 = 牛码目录（`牛码/…`；裸名条目加前缀）+ 已注册平台目录（`wbcn/…`、`wbg/…` 等）
     + 已启用自定义供应商（`<name>/…`，模型清单手填）。
     可见性（模型列表过时治理）：隐藏条目联动停用，agent 侧列表不出现（不变式：隐藏 ⇒ 已停用）。
     """
@@ -563,10 +563,11 @@ async def list_models(all: bool = False):
 def _visible_by_default(entry_id: str, efforts: list | None) -> bool:
     """默认可见性（无用户覆盖时；模型列表过时治理 §4.2）。
 
-    WorkBuddy 前缀 + 无思考档位 → 隐藏（无档位≈过时代，用户拍板默认隐藏）；
-    牛码 / 自定义供应商恒可见（本期不参与治理，机制按前缀可扩展）。
+    WorkBuddy 前缀（`wbcn` / `wbg`，双域同款规则）+ 无思考档位 → 隐藏
+    （无档位≈过时代，用户拍板默认隐藏）；牛码 / 自定义供应商恒可见
+    （本期不参与治理，机制按前缀可扩展）。
     """
-    if not entry_id.startswith(f"{model_ref.PREFIX_WORKBUDDY}/"):
+    if not entry_id.startswith((f"{model_ref.PREFIX_WBCN}/", f"{model_ref.PREFIX_WBG}/")):
         return True
     return bool(efforts)
 
@@ -1094,7 +1095,7 @@ def _validate_custom_provider(body: dict, *, partial: bool) -> dict:
                                 detail="名称不能包含 /（模型名前缀解析用）")
         if providers_custom.name_conflicts(name):
             raise HTTPException(status_code=400,
-                                detail="名称与内置供应商前缀冲突（牛码/WorkBuddy）")
+                                detail="名称与内置供应商前缀冲突（牛码/wbcn/wbg；WorkBuddy 为保留字）")
         entry["name"] = name.strip()
     if "base_url" in body or not partial:
         base_url = body.get("base_url")

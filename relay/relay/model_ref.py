@@ -1,14 +1,17 @@
-"""模型名命名空间解析（供应商前缀）——「WorkBuddy聊天反代与多平台聚合」§4.1 定稿。
+"""模型名命名空间解析（供应商前缀）——「WorkBuddy聊天反代与多平台聚合」§4.1 定稿 +
+「WorkBuddy双域账号支持」§5 前缀改短（2026-10-14）。
 
 对外模型名统一为 `<供应商名>/<上游模型名>`（2026-10-08 用户拍板）：
 
 - 牛码：`牛码/glm-5.3`；**裸名兼容**（无前缀的旧名按牛码处理，存量 agent 配置不改）；
-- WorkBuddy：`WorkBuddy/glm-5.3-flash`；
+- WorkBuddy CN：`wbcn/glm-5.3-flash`（2026-10-14 拍板改短；旧 `WorkBuddy/` 停止作
+  规范前缀、保留**读兼容归一**——存量 agent 请求/落盘键经本表自动等价命中）；
+- WorkBuddy 国际版：`wbg/glm-5.3-flash`（2026-10-14 拍板；二次拍板由 `wb` 改 `wbg`）；
 - 自定义供应商：`<供应商名>/<模型>`（名称来自供应商页 F5 的 name 字段）。
 
 解析规则：
-- 按**第一个** `/` 切分；前缀大小写不敏感匹配（`workbuddy/` 也接受），
-  但规范化输出固定为「牛码」/「WorkBuddy」/自定义名原文；
+- 按**第一个** `/` 切分；前缀大小写不敏感匹配（`wbcn/`、`WBCN/` 均接受），
+  但规范化输出固定为「牛码」/`wbcn`/`wbg`/自定义名原文；
 - 带 `/` 但前缀不在已知表内 → UnknownProviderError（调用方 404「未知供应商」）；
 - 无 `/`（或 `/` 前/后为空）→ 裸名，prefix=""，视作牛码。
 
@@ -20,14 +23,24 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 PREFIX_NIUCODE = "牛码"
-PREFIX_WORKBUDDY = "WorkBuddy"
+PREFIX_WBCN = "wbcn"   # WorkBuddy CN（规范前缀）
+PREFIX_WBG = "wbg"     # WorkBuddy 国际版（规范前缀）
+# 旧前缀：停止作规范输出，仅保留读兼容（存量请求/落盘键归一为 wbcn）
+PREFIX_WORKBUDDY_LEGACY = "WorkBuddy"
 
 
 def base_prefix_table() -> dict[str, str]:
-    """内置供应商前缀表：casefold 前缀 → 规范前缀。"""
+    """内置供应商前缀表：casefold 前缀 → 规范前缀。
+
+    含 legacy 别名 `workbuddy → wbcn`（大小写不敏感）：存量 agent 请求
+    `WorkBuddy/deepseek-flash` 解析归一为 `wbcn/deepseek-flash` 照常路由 CN 池；
+    `WorkBuddy` 同时因在表内被 `providers_custom.name_conflicts` 自动拒绝作自定义名。
+    """
     return {
         PREFIX_NIUCODE.casefold(): PREFIX_NIUCODE,
-        PREFIX_WORKBUDDY.casefold(): PREFIX_WORKBUDDY,
+        PREFIX_WBCN.casefold(): PREFIX_WBCN,
+        PREFIX_WBG.casefold(): PREFIX_WBG,
+        PREFIX_WORKBUDDY_LEGACY.casefold(): PREFIX_WBCN,
     }
 
 

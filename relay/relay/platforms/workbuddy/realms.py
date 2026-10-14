@@ -136,7 +136,7 @@ class WbRealm:
 REALM_CN = WbRealm(
     platform_id="workbuddy",
     display_name="WorkBuddy CN",
-    model_prefix="WorkBuddy",  # 现网形态；本批后续 commit 改短为 wbcn（读兼容归一）
+    model_prefix="wbcn",  # 2026-10-14 拍板改短（旧 WorkBuddy/ 读兼容归一，见 model_ref）
     is_global=False,
     ua_platform="WorkBuddy",
     supports_checkin=True,

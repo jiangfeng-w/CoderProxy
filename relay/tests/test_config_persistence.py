@@ -149,9 +149,11 @@ def test_thinking_defaults_roundtrip(tmp_path, monkeypatch):
     _run(storage.save_thinking_defaults({"glm-5.3": "high", "kimi-k3": "none"}))
     assert _run(storage.get_thinking_defaults()) == {
         "牛码/glm-5.3": "high", "牛码/kimi-k3": "none"}
-    # 规范性：全名写入原样读回；WorkBuddy 前缀大小写规范化
-    _run(storage.save_thinking_defaults({"WorkBuddy/glm-5.3-flash": "low"}))
-    assert _run(storage.get_thinking_defaults()) == {"WorkBuddy/glm-5.3-flash": "low"}
+    # 规范性：全名写入原样读回；双域前缀大小写规范化；legacy WorkBuddy/ 读归一 wbcn/
+    _run(storage.save_thinking_defaults({"wbcn/glm-5.3-flash": "low"}))
+    assert _run(storage.get_thinking_defaults()) == {"wbcn/glm-5.3-flash": "low"}
+    _run(storage.save_thinking_defaults({"WorkBuddy/glm-5.3-flash": "minimal"}))
+    assert _run(storage.get_thinking_defaults()) == {"wbcn/glm-5.3-flash": "minimal"}
 
 
 def test_thinking_defaults_dirty_values_filtered(tmp_path, monkeypatch):

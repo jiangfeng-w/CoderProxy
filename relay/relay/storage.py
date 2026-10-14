@@ -275,7 +275,7 @@ async def get_model_whitelist() -> list[str]:
 async def set_model_whitelist(names: list[str]) -> list[str]:
     """写入白名单（GUI 模型页勾选结果）。传 [] 表示全部启用；[DISABLE_ALL] 表示全部禁用。
 
-    写入前归一（§4.1）：键一律存规范全名（`牛码/…`、`WorkBuddy/…`、`<自定义名>/…`）。
+    写入前归一（§4.1）：键一律存规范全名（`牛码/…`、`wbcn/…`、`wbg/…`、`<自定义名>/…`）。
     """
     clean = model_ref.normalize_whitelist([str(n) for n in names if str(n).strip()])
     async with _asyncio_lock:
