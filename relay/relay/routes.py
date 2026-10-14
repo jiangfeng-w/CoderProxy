@@ -101,12 +101,13 @@ async def _serving() -> bool:
 
 
 async def _any_platform_available() -> bool:
-    """非牛码上游可用性：WorkBuddy 账号池非空 / 启用的自定义供应商非空。"""
+    """非牛码上游可用性：WorkBuddy 双池任一非空 / 启用的自定义供应商非空。"""
     try:
-        from relay.platforms import store
-        accounts = await store.load_accounts("workbuddy")
-        if any(str(a.get("status") or "normal") == "normal" for a in accounts):
-            return True
+        from relay.platforms import PLATFORMS, store
+        for platform_id in PLATFORMS:
+            accounts = await store.load_accounts(platform_id)
+            if any(str(a.get("status") or "normal") == "normal" for a in accounts):
+                return True
     except Exception as exc:  # noqa: BLE001（存储异常不阻断服务决策）
         logger.warning("[relay] 检查 WorkBuddy 账号池失败: %s", exc)
     try:

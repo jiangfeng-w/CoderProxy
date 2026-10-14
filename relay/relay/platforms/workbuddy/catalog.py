@@ -23,62 +23,84 @@ import time
 
 import httpx
 
-from relay.config import settings
 from relay.platforms import store
 from relay.platforms.workbuddy.adapter import WorkBuddyAdapter
-from relay.platforms.workbuddy.client import CN_ORIGIN, derive_stable_id
+from relay.platforms.workbuddy.client import derive_stable_id, user_agent_for
+from relay.platforms.workbuddy.realms import REALM_CN, WbRealm
 
 logger = logging.getLogger(__name__)
 
-PLATFORM_ID = "workbuddy"
+PLATFORM_ID = REALM_CN.platform_id
 
 V3_CONFIG_PATH = "/v3/config"
+# CN 现状单候选（兼容常量；双域候选序见 realms.WbRealm.enterprise_model_paths——
+# 国际版 /v2 家族优先 → /console 回退）
 ENTERPRISE_MODELS_PATH = "/console/enterprises/personal/models"
 
 CACHE_TTL_S = 3600  # 目录缓存 1h（对齐 2api 谱系；失败负缓存 5min）
 NEGATIVE_TTL_S = 300
 
-_cache: dict = {"at": 0.0, "models": [], "uid": ""}
-_negative_until = 0.0
+# 缓存按 platform_id 分桶（双域 spec §3：现全局单例 → dict[platform_id]；
+# 负缓存同理——两域模型目录天然独立，一域的失败不该拖累另一域）。
+_caches: dict[str, dict] = {}
+_negative_until: dict[str, float] = {}
 
-_platform_adapter = WorkBuddyAdapter()
+# 账号层 adapter 按 profile 惰性缓存（单例改造：原模块级单例写死 CN 会在
+# 国际版目录路径上拿错池实例；实例轻量无状态，按 platform_id 缓存即可）。
+_platform_adapters: dict[str, WorkBuddyAdapter] = {}
+
+
+def _adapter_for(profile: WbRealm) -> WorkBuddyAdapter:
+    adapter = _platform_adapters.get(profile.platform_id)
+    if adapter is None:
+        adapter = WorkBuddyAdapter(profile)
+        _platform_adapters[profile.platform_id] = adapter
+    return adapter
+
+
+def _cache_for(platform_id: str) -> dict:
+    cache = _caches.get(platform_id)
+    if cache is None:
+        cache = {"at": 0.0, "models": [], "uid": ""}
+        _caches[platform_id] = cache
+    return cache
 
 
 def reset_cache() -> None:
-    """测试复位。"""
-    global _negative_until
-    _cache.update({"at": 0.0, "models": [], "uid": ""})
-    _negative_until = 0.0
+    """测试复位（全桶清零）。"""
+    _caches.clear()
+    _negative_until.clear()
 
 
 async def load_models(*, force: bool = False,
-                      transport: httpx.AsyncBaseTransport | None = None) -> list[dict]:
+                      transport: httpx.AsyncBaseTransport | None = None,
+                      profile: WbRealm = REALM_CN) -> list[dict]:
     """取 WorkBuddy 模型目录（裸名条目列表；缓存 1h，失败负缓存 5min）。"""
-    global _negative_until
+    cache = _cache_for(profile.platform_id)
     now = time.time()
     if not force:
-        if _cache["models"] and now - _cache["at"] < CACHE_TTL_S:
-            return list(_cache["models"])
-        if now < _negative_until:
+        if cache["models"] and now - cache["at"] < CACHE_TTL_S:
+            return list(cache["models"])
+        if now < _negative_until.get(profile.platform_id, 0.0):
             return []
-    account = await _pick_account()
+    account = await _pick_account(profile)
     if account is None:
         return []
-    account = await _platform_adapter.ensure_token(account)
-    models = await _fetch_union(account, transport=transport)
+    account = await _adapter_for(profile).ensure_token(account)
+    models = await _fetch_union(account, transport=transport, profile=profile)
     if models:
-        _cache.update({"at": now, "models": models,
-                       "uid": str(account.get("uid") or "")})
+        cache.update({"at": now, "models": models,
+                      "uid": str(account.get("uid") or "")})
     else:
-        _negative_until = now + NEGATIVE_TTL_S
-        logger.warning("[wb-catalog] 目录拉取为空（账号 %s）",
+        _negative_until[profile.platform_id] = now + NEGATIVE_TTL_S
+        logger.warning("[wb-catalog] 目录拉取为空（%s，账号 %s）", profile.platform_id,
                        str(account.get("uid") or "")[:8])
     return models
 
 
-async def _pick_account() -> dict | None:
-    """目录拉取选号：首个 normal 号（uid 排序稳定）。"""
-    accounts = [a for a in await store.load_accounts(PLATFORM_ID)
+async def _pick_account(profile: WbRealm = REALM_CN) -> dict | None:
+    """目录拉取选号：本池首个 normal 号（uid 排序稳定）。"""
+    accounts = [a for a in await store.load_accounts(profile.platform_id)
                 if str(a.get("status") or "normal") == "normal"]
     if not accounts:
         return None
@@ -86,12 +108,13 @@ async def _pick_account() -> dict | None:
 
 
 async def _fetch_union(account: dict,
-                       transport: httpx.AsyncBaseTransport | None = None) -> list[dict]:
+                       transport: httpx.AsyncBaseTransport | None = None,
+                       profile: WbRealm = REALM_CN) -> list[dict]:
     """两路并发探测 → 并集（v3 优先；企业端点补缺；两路全败抛最后一个错误）。"""
     import asyncio
     results = await asyncio.gather(
-        _fetch_v3(account, transport=transport),
-        _fetch_enterprise(account, transport=transport),
+        _fetch_v3(account, transport=transport, profile=profile),
+        _fetch_enterprise(account, transport=transport, profile=profile),
         return_exceptions=True)
     v3_models = results[0] if isinstance(results[0], list) else []
     ent_models = results[1] if isinstance(results[1], list) else []
@@ -112,10 +135,11 @@ async def _fetch_union(account: dict,
 
 
 async def _fetch_v3(account: dict,
-                    transport: httpx.AsyncBaseTransport | None = None) -> list[dict]:
+                    transport: httpx.AsyncBaseTransport | None = None,
+                    profile: WbRealm = REALM_CN) -> list[dict]:
     """`GET /v3/config` → data.models[]（v3 主路径；桌面档 UA 门禁）。"""
-    url = f"{settings.wb_api_base}{V3_CONFIG_PATH}"
-    body = await _get_json(url, account, transport=transport)
+    url = f"{profile.catalog_base}{V3_CONFIG_PATH}"
+    body = await _get_json(url, account, transport=transport, profile=profile)
     data = body.get("data") or {}
     raw = data.get("models") if isinstance(data, dict) else None
     if not isinstance(raw, list):
@@ -129,10 +153,27 @@ async def _fetch_v3(account: dict,
 
 
 async def _fetch_enterprise(account: dict,
-                            transport: httpx.AsyncBaseTransport | None = None) -> list[dict]:
-    """`GET /console/enterprises/personal/models` → 按 agents[cli].models 过滤。"""
-    url = f"{settings.wb_api_base}{ENTERPRISE_MODELS_PATH}"
-    body = await _get_json(url, account, transport=transport)
+                            transport: httpx.AsyncBaseTransport | None = None,
+                            profile: WbRealm = REALM_CN) -> list[dict]:
+    """企业模型目录（按 agents[cli].models 过滤）：端点候选按 profile（双域 spec §2）。
+
+    CN：/console 单候选（现状）；国际版：/v2 家族优先 → /console 回退（探针实测）。
+    候选逐路尝试：全败抛最后一个错误（与 _fetch_union 的「全败才抛」口径一致）。
+    """
+    last_err: Exception | None = None
+    body: dict | None = None
+    for path in profile.enterprise_model_paths:
+        try:
+            body = await _get_json(f"{profile.catalog_base}{path}", account,
+                                   transport=transport, profile=profile)
+            break
+        except (RuntimeError, ValueError) as exc:
+            last_err = exc
+            continue
+    if body is None:
+        if last_err is not None:
+            raise last_err
+        return []
     data = body.get("data") or {}
     if not isinstance(data, dict):
         return []
@@ -153,9 +194,10 @@ async def _fetch_enterprise(account: dict,
 
 
 async def _get_json(url: str, account: dict,
-                    transport: httpx.AsyncBaseTransport | None) -> dict:
+                    transport: httpx.AsyncBaseTransport | None,
+                    profile: WbRealm = REALM_CN) -> dict:
     """带桌面档头族的 GET（缓存/注入点经 transport 参数）。"""
-    headers = _catalog_headers(account)
+    headers = _catalog_headers(account, profile=profile)
     async with httpx.AsyncClient(trust_env=False, timeout=30.0,
                                  transport=transport) as client:
         resp = await client.get(url, headers=headers)
@@ -167,23 +209,32 @@ async def _get_json(url: str, account: dict,
     return body
 
 
-def _catalog_headers(account: dict) -> dict[str, str]:
-    """目录端点头族（v3/config 桌面档；2api 实测 UA 门禁）。"""
+def _catalog_headers(account: dict, profile: WbRealm = REALM_CN) -> dict[str, str]:
+    """目录端点头族（v3/config 桌面档；2api 实测 UA 门禁）。
+
+    双域差异按 profile：Origin/Referer、Accept-Language、UA 平台段；域/企业头
+    分派同 chat（§2 表）：国际版恒 X-Domain: www.workbuddy.ai + X-No-Enterprise-Id。
+    """
     uid = str(account.get("uid") or "")
     headers = {
-        "User-Agent": settings.wb_user_agent,
+        "User-Agent": user_agent_for(profile),
         "Accept": "application/json, text/plain, */*",
         "X-Requested-With": "XMLHttpRequest",
-        "Origin": CN_ORIGIN,
-        "Referer": f"{CN_ORIGIN}/",
+        "Origin": profile.origin,
+        "Referer": f"{profile.origin}/",
         "X-CodeBuddy-Request": "1",
-        "Accept-Language": "zh-CN",
+        "Accept-Language": profile.accept_language,
         "Authorization": f"Bearer {account.get('access_token') or ''}",
     }
     if uid:
         headers["X-User-Id"] = uid
         headers["X-Machine-ID"] = derive_stable_id(uid, "machine")
         headers["X-Session-ID"] = derive_stable_id(uid, "session")
+    if profile.chat_domain:
+        # 国际版：恒声明域 + 无企业（panel injectGlobalChatHeaders 口径延伸至目录）
+        headers["X-Domain"] = profile.chat_domain
+        headers["X-No-Enterprise-Id"] = "1"
+        return headers
     domain = str(account.get("domain") or "")
     if domain:
         headers["X-Domain"] = domain

@@ -20,6 +20,7 @@ import httpx
 
 from relay.config import settings
 from relay.platforms.base import PlatformAuthError, PlatformUpstreamError
+from relay.platforms.workbuddy.realms import REALM_CN, WbRealm
 
 WB_API_PREFIX = "/v2/plugin"
 
@@ -30,6 +31,27 @@ DEFAULT_OK_CODES = (0, 200)
 CN_ORIGIN = "https://www.codebuddy.cn"
 
 
+def user_agent_for(profile: WbRealm = REALM_CN) -> str:
+    """出站 UA：显式覆盖优先（settings.wb_user_agent 非空，两域统一用该值——
+    保留用户自愈路径）；否则按 profile 拼三段式（CN 平台段 `WorkBuddy` /
+    国际版 `WorkBuddy AI`，panel defaultWorkBuddyUAFor）。"""
+    if settings.wb_user_agent:
+        return settings.wb_user_agent
+    v = settings.wb_client_version
+    return (f"WorkBuddy/{v} {profile.ua_platform}/{v} "
+            f"CLI/{settings.wb_cli_version}")
+
+
+def origin_for(profile: WbRealm = REALM_CN) -> str:
+    """域名来源（Origin/Referer 根）：CN codebuddy.cn / 国际版 workbuddy.ai。"""
+    return profile.origin
+
+
+def accept_language_for(profile: WbRealm = REALM_CN) -> str:
+    """Accept-Language 按域切（panel acceptLanguageFor）：CN zh-CN / 国际版 en-US。"""
+    return profile.accept_language
+
+
 def derive_stable_id(uid: str, purpose: str) -> str:
     """账号级稳定派生 36 hex：跨重启恒定、同号同用途同值、异号互异。"""
     digest = hashlib.sha256(f"wbcp:{purpose}:{uid}".encode()).hexdigest()
@@ -37,7 +59,11 @@ def derive_stable_id(uid: str, purpose: str) -> str:
 
 
 def plugin_headers(*, access_token: str = "", domain: str = "") -> dict[str, str]:
-    """plugin 域头：X-No-* 声明「本请求无这些标识」；带 token 后加 Bearer 与 X-Domain。"""
+    """plugin 域头：X-No-* 声明「本请求无这些标识」；带 token 后加 Bearer 与 X-Domain。
+
+    双域同构（plugin 幂等声明族两域都接受——2026-10-14 国际版小号探针实测
+    auth/state 与 plugin/accounts 均 200）。
+    """
     headers = {
         "X-No-Authorization": "true",
         "X-No-User-Id": "true",
@@ -54,14 +80,20 @@ def plugin_headers(*, access_token: str = "", domain: str = "") -> dict[str, str
 
 
 def billing_headers(*, access_token: str, uid: str, domain: str = "",
-                    enterprise_id: str = "") -> dict[str, str]:
-    """billing 域头：白名单类接口官方 UA 为单段 WorkBuddy/<ver>（无 CLI 段）。"""
+                    enterprise_id: str = "",
+                    profile: WbRealm = REALM_CN) -> dict[str, str]:
+    """billing 域头：白名单类接口官方 UA 为单段 WorkBuddy/<ver>（无 CLI 段，两域同款）。
+
+    双域差异（spec §2 表）：Origin/Referer、Accept-Language 按 profile；
+    X-Enterprise-Id / X-Tenant-Id 仅 CN 注入（国际版无企业概念）。
+    """
+    origin = origin_for(profile)
     headers = {
         "User-Agent": f"WorkBuddy/{settings.wb_client_version}",
-        "Origin": CN_ORIGIN,
-        "Referer": f"{CN_ORIGIN}/",
+        "Origin": origin,
+        "Referer": f"{origin}/",
         "X-CodeBuddy-Request": "1",
-        "Accept-Language": "zh-CN",
+        "Accept-Language": accept_language_for(profile),
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {access_token}",
@@ -72,16 +104,20 @@ def billing_headers(*, access_token: str, uid: str, domain: str = "",
         headers["X-Session-ID"] = derive_stable_id(uid, "session")
     if domain:
         headers["X-Domain"] = domain
-    if enterprise_id:
+    if enterprise_id and profile.inject_enterprise_headers:
         headers["X-Enterprise-Id"] = enterprise_id
         headers["X-Tenant-Id"] = enterprise_id
     return headers
 
 
-def refresh_headers(*, access_token: str, refresh_token: str, domain: str = "") -> dict[str, str]:
-    """refresh 域头：X-Refresh-Token 仅此处出现（spec 契约硬约束）。"""
+def refresh_headers(*, access_token: str, refresh_token: str, domain: str = "",
+                    profile: WbRealm = REALM_CN) -> dict[str, str]:
+    """refresh 域头：X-Refresh-Token 仅此处出现（spec 契约硬约束）。
+
+    UA 按 profile（国际版平台段 WorkBuddy AI；显式覆盖优先）。
+    """
     headers = {
-        "User-Agent": settings.wb_user_agent,
+        "User-Agent": user_agent_for(profile),
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Authorization": f"Bearer {access_token}",

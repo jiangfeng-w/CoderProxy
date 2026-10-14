@@ -51,11 +51,18 @@ class Settings:
     # cockpit-tools 实测全走 www.codebuddy.cn——两个配置项兜底，小号冒烟后定默认。
     wb_api_base: str = "https://copilot.tencent.com"
     wb_web_base: str = "https://www.codebuddy.cn"
+    # 国际版（workbuddy-global）base：panel 主档默认 —— 2026-10-14 小号只读探针实测
+    # /v3/config 200、/v2/enterprises/personal/models 200（/console 500）、
+    # /billing/meter/*（无 /v2）200。
+    wb_global_base: str = "https://www.workbuddy.ai"
     # 出站 UA：对齐官方桌面端 RestOperations 层三段式（workbuddy-cockpit headers.go：
-    # WorkBuddy/<clientVer> WorkBuddy/<clientVer> CLI/<cliVer>）；billing 白名单类
-    # 接口官方用单段 WorkBuddy/<clientVer>（client.py 按 domain 选择）
-    wb_user_agent: str = "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"
+    # WorkBuddy/<clientVer> <platform>/<clientVer> CLI/<cliVer>；platform 段按域切换——
+    # CN `WorkBuddy` / 国际版 `WorkBuddy AI`，panel defaultWorkBuddyUAFor）。
+    # 语义收紧（双域 spec §2）：**默认空 = 按 profile 拼装**；显式设置（env
+    # WB_USER_AGENT / GUI）时两域统一用该值（保留用户自愈路径）。
+    wb_user_agent: str = ""
     wb_client_version: str = "5.5.4"
+    wb_cli_version: str = "2.137.1"
     # 直连：M1 结论要求绕系统代理，trust_env=False 语义由 relay/__init__.py 设 NO_PROXY 实现；
     # TRUST_ENV_PROXY=true 时保留系统代理行为（调试用）
     trust_env_proxy: bool = False
@@ -82,8 +89,10 @@ class Settings:
         s.ta3_api_base = _env("TA3_API_BASE", s.ta3_api_base)
         s.wb_api_base = _env("WB_API_BASE", s.wb_api_base)
         s.wb_web_base = _env("WB_WEB_BASE", s.wb_web_base)
+        s.wb_global_base = _env("WB_GLOBAL_BASE", s.wb_global_base)
         s.wb_user_agent = _env("WB_USER_AGENT", s.wb_user_agent)
         s.wb_client_version = _env("WB_CLIENT_VERSION", s.wb_client_version)
+        s.wb_cli_version = _env("WB_CLI_VERSION", s.wb_cli_version)
         s.ta3_user_agent = _env("TA3_USER_AGENT", s.ta3_user_agent)
         s.trust_env_proxy = _env("TRUST_ENV_PROXY", "").lower() in ("1", "true", "yes")
         s.tool_mode = _env("TOOL_MODE", s.tool_mode)

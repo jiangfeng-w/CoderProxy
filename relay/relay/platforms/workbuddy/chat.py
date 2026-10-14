@@ -39,7 +39,8 @@ from relay.platforms import store
 from relay.platforms.base import PlatformUpstreamError
 from relay.platforms.workbuddy import oauth
 from relay.platforms.workbuddy.adapter import WorkBuddyAdapter
-from relay.platforms.workbuddy.client import CN_ORIGIN, derive_stable_id
+from relay.platforms.workbuddy.client import derive_stable_id, user_agent_for
+from relay.platforms.workbuddy.realms import REALM_CN, WbRealm
 from relay.tool_repair import repair_tool_pairing
 
 logger = logging.getLogger(__name__)
@@ -72,9 +73,12 @@ async def _enter_stream_with_connect_retry(stack: AsyncExitStack, client: httpx.
             await asyncio.sleep(_CONNECT_RETRY_BACKOFF_S)
     raise AssertionError("unreachable")  # pragma: no cover
 
-PLATFORM_ID = "workbuddy"
+PLATFORM_ID = REALM_CN.platform_id
 
 CHAT_PATH = "/v2/chat/completions"
+
+# 国际版 chat 首条 system 兜底句（panel ensureConsoleSystem 同款文本）
+CONSOLE_SYSTEM_PROMPT = "You are a helpful assistant."
 
 # ── B3：system 中性化（9router codebuddy-cn.js 同款口径） ──
 NEUTRAL_SYSTEM_PROMPT = ("You are a helpful AI assistant that helps with "
@@ -200,8 +204,6 @@ def _backfill_reasoning_content(messages: list[dict], model: str,
                 continue  # 已有非空 rc → 保留
             m["reasoning_content"] = " "  # 占位（9router PLACEHOLDER）
 
-_platform_adapter = WorkBuddyAdapter()  # 复用账号层 ensure_token（per-uid 刷新锁）
-
 
 class NoAvailableAccountError(RuntimeError):
     """账号池无可用账号（无 normal 账号 / 全部凭证被拒）。routes 映射 503。"""
@@ -216,20 +218,25 @@ class WorkBuddyChatAdapter:
 
     bare_model：上游真实模型名（无前缀）；model_entry：目录条目（可空）。
     transport：测试注入点（httpx.MockTransport）。
+    profile：域 profile（默认 CN——现网形态零回归）；选号/头族/base 全按它走。
     """
 
     def __init__(self, bare_model: str, *, ctx=None, model_entry: dict | None = None,
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+                 transport: httpx.AsyncBaseTransport | None = None,
+                 profile: WbRealm = REALM_CN) -> None:
         self._model = str(bare_model or "")
         self._ctx = ctx          # 工具伪装上下文（B5：WorkBuddy 原生支持 tools，不做伪装）
         self._entry = model_entry or {}  # 目录条目（工厂契约保留；形状归一后暂无消费点）
         self._transport = transport
+        self._profile = profile
         self._active_uid = ""
+        # 账号层实例随 profile（原模块级单例写死 CN——国际版会被拿去 CN 池刷新，串池）
+        self._account_adapter = WorkBuddyAdapter(profile)
 
     # ─────────────────────── 账号池选号（§4.3） ───────────────────────
 
     async def _normal_accounts(self) -> list[dict]:
-        accounts = [a for a in await store.load_accounts(PLATFORM_ID)
+        accounts = [a for a in await store.load_accounts(self._profile.platform_id)
                     if str(a.get("status") or "normal") == "normal"]
         # uid 排序 + 全局游标 → 跨请求轮转（同号不连续命中）
         return sorted(accounts, key=lambda a: str(a.get("uid") or ""))
@@ -238,7 +245,8 @@ class WorkBuddyChatAdapter:
         accounts = [a for a in await self._normal_accounts()
                     if str(a.get("uid") or "") not in tried]
         if not accounts:
-            raise NoAvailableAccountError("无可用 WorkBuddy 账号（请到供应商页添加/重登）")
+            raise NoAvailableAccountError(
+                f"无可用 {self._profile.display_name} 账号（请到供应商页添加/重登）")
         idx = _next_cursor() % len(accounts)
         return accounts[idx]
 
@@ -248,7 +256,7 @@ class WorkBuddyChatAdapter:
         有 active 号 → 刷新该号；否则刷新全部 normal 号。返回是否至少成功一次。
         """
         if self._active_uid:
-            accounts = [await store.find_account(PLATFORM_ID, self._active_uid)]
+            accounts = [await store.find_account(self._profile.platform_id, self._active_uid)]
         else:
             accounts = await self._normal_accounts()
         ok = False
@@ -256,7 +264,7 @@ class WorkBuddyChatAdapter:
             if not account:
                 continue
             try:
-                await oauth.refresh_token(account)
+                await oauth.refresh_token(account, profile=self._profile)
                 ok = True
             except Exception as exc:  # noqa: BLE001（单号失败不阻断其它号）
                 logger.warning("[wb-chat] 刷新账号 %s 失败: %s",
@@ -294,6 +302,8 @@ class WorkBuddyChatAdapter:
                             and str(thinking.get("type") or "").lower() == "enabled")
         _backfill_reasoning_content(body["messages"], self._model, thinking_enabled)
         _neutralize_system_messages(body["messages"])
+        if self._profile.ensure_system_first:
+            _ensure_system_first(body["messages"])
         return body
 
     def _apply_thinking(self, body: dict, request: ChatRequest) -> None:
@@ -368,17 +378,22 @@ class WorkBuddyChatAdapter:
     # ─────────────────────── 传输 ───────────────────────
 
     def _headers(self, account: dict) -> dict[str, str]:
-        """B1 实测（2026-10-08）桌面档头族（2api-panel 口径，与登录档位身份一致）。"""
+        """B1 实测（2026-10-08）桌面档头族（2api-panel 口径，与登录档位身份一致）。
+
+        双域差异按 profile（§2 表）：UA 平台段 / Origin / Accept-Language；
+        域与企业头分派——国际版恒 `X-Domain: www.workbuddy.ai` + `X-No-Enterprise-Id`
+        （panel injectGlobalChatHeaders）；CN 走账号域现状（零回归）。
+        """
         uid = str(account.get("uid") or "")
         headers = {
-            "User-Agent": settings.wb_user_agent,
+            "User-Agent": user_agent_for(self._profile),
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
             "X-Requested-With": "XMLHttpRequest",
-            "Origin": CN_ORIGIN,
-            "Referer": f"{CN_ORIGIN}/",
+            "Origin": self._profile.origin,
+            "Referer": f"{self._profile.origin}/",
             "X-CodeBuddy-Request": "1",
-            "Accept-Language": "zh-CN",
+            "Accept-Language": self._profile.accept_language,
             "X-Agent-Purpose": "conversation",
             "X-IDE-Name": "WorkBuddy",
             "X-IDE-Type": "WorkBuddy",
@@ -391,6 +406,10 @@ class WorkBuddyChatAdapter:
             # 每号稳定派生设备头（与账号层同式；防多号设备指纹关联，B8）
             headers["X-Machine-ID"] = derive_stable_id(uid, "machine")
             headers["X-Session-ID"] = derive_stable_id(uid, "session")
+        if self._profile.chat_domain:
+            headers["X-Domain"] = self._profile.chat_domain
+            headers["X-No-Enterprise-Id"] = "1"
+            return headers
         domain = str(account.get("domain") or "")
         if domain:
             headers["X-Domain"] = domain
@@ -416,7 +435,7 @@ class WorkBuddyChatAdapter:
         连接建立/请求发出前的瞬时失败（DNS 抖动等）先经一次退避重试（见
         `_enter_stream_with_connect_retry`），仍失败才按上述口径 502。
         """
-        url = f"{settings.wb_api_base}{CHAT_PATH}"
+        url = f"{self._profile.chat_base}{CHAT_PATH}"
         try:
             async with AsyncExitStack() as stack:
                 client = await stack.enter_async_context(self._new_client())
@@ -452,7 +471,7 @@ class WorkBuddyChatAdapter:
             account = await self._pick_account(tried)
             uid = str(account.get("uid") or "")
             self._active_uid = uid
-            account = await _platform_adapter.ensure_token(account)  # 复用账号层刷新
+            account = await self._account_adapter.ensure_token(account)  # 账号层刷新（profile 正确）
             try:
                 async for frame in self._stream_once(account, body):
                     yield frame
@@ -462,7 +481,8 @@ class WorkBuddyChatAdapter:
                 logger.warning("[wb-chat] 账号 %s 凭证被拒，换号重试", uid[:8])
                 if len(tried) >= total:
                     raise NoAvailableAccountError(
-                        "全部 WorkBuddy 账号凭证失效，请到供应商页重新登录") from None
+                        f"全部 {self._profile.display_name} 账号凭证失效，"
+                        "请到供应商页重新登录") from None
 
     # ─────────────────────── 出站事件契约 ───────────────────────
 
@@ -595,6 +615,22 @@ def _neutralize_system_messages(messages: list[dict]) -> None:
                 msg["content"] = [{"type": "text", "text": NEUTRAL_SYSTEM_PROMPT}]
 
 
+def _ensure_system_first(messages: list[dict]) -> None:
+    """首条 system 兜底（panel ensureConsoleSystem；国际版专属）。
+
+    2026-10-14 国际版小号探针实测：首条非 system → 400/11128
+    "first message is not system prompt"。首条已是 system 不注入；其余前置
+    `CONSOLE_SYSTEM_PROMPT`（面板同款文本）。就地改写，零返回值。
+    """
+    if not messages:
+        return
+    first = messages[0]
+    if isinstance(first, dict) and \
+            str(first.get("role") or "").strip().lower() == "system":
+        return
+    messages.insert(0, {"role": "system", "content": CONSOLE_SYSTEM_PROMPT})
+
+
 def _parse_frame(line: str) -> dict | None:
     """上游 SSE 行 → 精简帧；心跳/空帧/[DONE]/不可解析行 → None。
 
@@ -709,20 +745,46 @@ __all__ = ["WorkBuddyChatAdapter", "NoAvailableAccountError", "factory", "reset_
 
 def factory(bare_model: str, *, ctx=None, model_entry: dict | None = None,
             **_) -> WorkBuddyChatAdapter:
-    """adapter 注册表工厂（relay/adapter_registry.py 的 factory 契约）。"""
+    """adapter 注册表工厂（CN 形态——自定义供应商/测试沿用；零回归）。"""
     return WorkBuddyChatAdapter(bare_model, ctx=ctx, model_entry=model_entry)
 
 
-# 注册到出站 adapter 注册表（导入即生效）
+def factory_for(profile: WbRealm):
+    """按 profile 构造 factory（`register_provider` 双注册用）。"""
+    def _factory(bare_model: str, *, ctx=None, model_entry: dict | None = None,
+                 **_) -> WorkBuddyChatAdapter:
+        return WorkBuddyChatAdapter(bare_model, ctx=ctx, model_entry=model_entry,
+                                    profile=profile)
+    return _factory
+
+
+# 注册到出站 adapter 注册表（导入即生效；双域双前缀——CN `wbcn` / 国际版 `wbg`）
 from relay import adapter_registry  # noqa: E402
 from relay.platforms.workbuddy import catalog as _catalog  # noqa: E402
+from relay.platforms.workbuddy.realms import ALL_REALMS  # noqa: E402
 
 
-async def _available() -> bool:
-    """可用性探测：账号池是否有 normal 号（routes 区分 503/404 用）。"""
-    accounts = await store.load_accounts(PLATFORM_ID)
-    return any(str(a.get("status") or "normal") == "normal" for a in accounts)
+def _availability_for(profile: WbRealm):
+    async def _available() -> bool:
+        """可用性探测：本池是否有 normal 号（routes 区分 503/404 用）。"""
+        accounts = await store.load_accounts(profile.platform_id)
+        return any(str(a.get("status") or "normal") == "normal" for a in accounts)
+    return _available
 
 
-adapter_registry.register_provider("WorkBuddy", directory=_catalog.load_models,
-                                   factory=factory, availability=_available)
+def _directory_for(profile: WbRealm):
+    async def _load() -> list[dict]:
+        return await _catalog.load_models(profile=profile)
+    return _load
+
+
+for _realm in ALL_REALMS:
+    adapter_registry.register_provider(
+        _realm.model_prefix,
+        directory=_directory_for(_realm),
+        factory=factory_for(_realm),
+        availability=_availability_for(_realm),
+    )
+
+# 兼容符号（存量测试/脚本引用；CN 池探测——与 register_provider 处同一实现）
+_available = _availability_for(REALM_CN)

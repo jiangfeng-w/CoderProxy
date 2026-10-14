@@ -31,7 +31,6 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from relay.config import settings
 from relay.platforms import store
 from relay.platforms.base import PlatformUpstreamError
 from relay.platforms.workbuddy import ide_switch
@@ -41,7 +40,11 @@ from relay.platforms.workbuddy.client import (
     parse_envelope,
     plugin_headers,
 )
-from relay.platforms.workbuddy.oauth import PLATFORM_ID, prefetch_caches
+from relay.platforms.workbuddy.oauth import prefetch_caches
+from relay.platforms.workbuddy.realms import REALM_CN, WbRealm
+
+# 兼容常量（CN 默认；双域下实际落库 platform_id 一律经 profile 参数）
+PLATFORM_ID = REALM_CN.platform_id
 
 logger = logging.getLogger(__name__)
 
@@ -205,16 +208,18 @@ def decode_jwt_claims(token: str) -> dict:
 # ── 纯 token 联网补全（对齐 build_payload_from_token；失败报错不入库） ──
 
 
-async def complete_from_accounts_api(access_token: str) -> dict:
+async def complete_from_accounts_api(access_token: str,
+                                     profile: WbRealm = REALM_CN) -> dict:
     """GET /v2/plugin/accounts（本机实测契约：code=0 + data.accounts[]，lastLogin 标记）。
 
     JWT claims 兜底（accounts 端点不返回 expires_at/email；实测 sub=uid、exp=过期秒）。
+    base 按 profile（国际版补全走国际版域，2026-10-14 探针实测 200）。
     """
     claims = decode_jwt_claims(access_token)
     client = WbClient()
     try:
         body = await client.request_json(
-            "GET", f"{settings.wb_api_base}{WB_API_PREFIX}/accounts",
+            "GET", f"{profile.login_base}{WB_API_PREFIX}/accounts",
             headers=plugin_headers(access_token=access_token))
     finally:
         await client.close()
@@ -292,28 +297,44 @@ def _to_entry(payload: dict) -> dict:
     }
 
 
-async def import_text(text: str) -> list[dict]:
-    """粘贴/JSON 文件统一入口；返回入库后的账号行（含 token，路由层经 AccountView 出口）。"""
+async def import_text(text: str, profile: WbRealm = REALM_CN) -> list[dict]:
+    """粘贴/JSON 文件统一入口；返回入库后的账号行（含 token，路由层经 AccountView 出口）。
+
+    归属校验（§6）：JSON 里带域且域族不符（国际号进 CN / CN 号进国际版）→ 拒绝该条。
+    """
     payloads = parse_import_text(text)
     imported: list[dict] = []
     for payload in payloads:
         if payload.get("source") == "token":
-            payload = await complete_from_accounts_api(payload["access_token"])
+            payload = await complete_from_accounts_api(payload["access_token"],
+                                                       profile=profile)
+        raw_domain = str(payload.get("domain") or "")
+        if not profile.allows_domain(raw_domain):
+            if profile.is_global:
+                raise ImportParseError(
+                    f"账号域 {raw_domain} 属于国内版，请到「WorkBuddy CN」标签页添加")
+            raise ImportParseError(
+                f"账号域 {raw_domain} 属于国际版，请到「WorkBuddy」标签页添加")
         entry = _to_entry(payload)
-        account = await store.upsert_account(PLATFORM_ID, entry, preserve=True)
+        account = await store.upsert_account(profile.platform_id, entry, preserve=True)
         if payload.get("source") == "token":
-            await prefetch_caches(account)  # best-effort；JSON 源不联网（对齐 cockpit）
+            await prefetch_caches(account, profile=profile)  # best-effort；JSON 源不联网
         imported.append(account)
-        logger.info("[workbuddy] 导入账号 uid=%s source=%s", account.get("uid"),
-                    payload.get("source"))
+        logger.info("[workbuddy] 导入账号 uid=%s source=%s platform=%s",
+                    account.get("uid"), payload.get("source"), profile.platform_id)
     return imported
 
 
-async def import_local() -> dict:
-    """读本机官方客户端当前登录账号入库（解密成功即入库，配额预取 best-effort）。"""
+async def import_local(profile: WbRealm = REALM_CN) -> dict:
+    """读本机官方客户端当前登录账号入库（解密成功即入库，配额预取 best-effort）。
+
+    CN 生态专属（CN 客户端登录态 / cockpit·9router 格式）；国际版未挂载本端点
+    （routes 侧保持 CN 专用路径，前端不显示入口）。
+    """
     payload = await _local_payload()
     entry = _to_entry(payload)
-    account = await store.upsert_account(PLATFORM_ID, entry, preserve=True)
-    await prefetch_caches(account)
-    logger.info("[workbuddy] 本机导入账号 uid=%s", account.get("uid"))
+    account = await store.upsert_account(profile.platform_id, entry, preserve=True)
+    await prefetch_caches(account, profile=profile)
+    logger.info("[workbuddy] 本机导入账号 uid=%s platform=%s",
+                account.get("uid"), profile.platform_id)
     return account

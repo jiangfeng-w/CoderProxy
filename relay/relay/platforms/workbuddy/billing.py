@@ -16,22 +16,22 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from relay.config import settings
 from relay.platforms import store
 from relay.platforms.base import (
     CheckinResult,
     PlatformAuthError,
+    PlatformError,
     PlatformUpstreamError,
 )
 from relay.platforms.workbuddy.client import (
-    CN_ORIGIN,
     DEFAULT_OK_CODES,
     WbClient,
     billing_headers,
     parse_envelope,
 )
+from relay.platforms.workbuddy.realms import REALM_CN, WbRealm
 
-PLATFORM_ID = "workbuddy"
+PLATFORM_ID = REALM_CN.platform_id
 _client = WbClient()
 
 
@@ -54,15 +54,17 @@ _QUOTA_ITEMS_PATHS = (
 
 
 async def _billing_post(account: dict, path: str, json_body: dict,
-                        ok_codes: tuple[int, ...] = DEFAULT_OK_CODES) -> dict:
+                        ok_codes: tuple[int, ...] = DEFAULT_OK_CODES,
+                        profile: WbRealm = REALM_CN) -> dict:
     """billing 域 POST：指纹头组装 + 信封解析；401/403 → login_required。"""
     headers = billing_headers(
         access_token=account.get("access_token") or "",
         uid=account.get("uid") or "",
         domain=account.get("domain") or "",
         enterprise_id=account.get("enterprise_id") or "",
+        profile=profile,
     )
-    url = f"{settings.wb_api_base}{path}"
+    url = f"{profile.billing_base}{path}"
     try:
         body = await _client.request_json("POST", url, headers=headers,
                                                json_body=json_body)
@@ -108,13 +110,13 @@ def _parse_checkin_status(data: dict) -> dict:
     }
 
 
-async def checkin_status_payload(account: dict) -> dict:
+async def checkin_status_payload(account: dict, profile: WbRealm = REALM_CN) -> dict:
     """查上游签到状态：activity 优先，失败回退 legacy checkin-status。"""
     last_err: Exception | None = None
     for path in ("/v2/billing/meter/checkin-activity-status",
                  "/v2/billing/meter/checkin-status"):
         try:
-            data = await _billing_post(account, path, {}, ok_codes=(0,))
+            data = await _billing_post(account, path, {}, ok_codes=(0,), profile=profile)
             return _parse_checkin_status(data if isinstance(data, dict) else {})
         except (PlatformAuthError, PlatformUpstreamError) as exc:
             if isinstance(exc, PlatformAuthError) and exc.kind == "login_required":
@@ -123,9 +125,9 @@ async def checkin_status_payload(account: dict) -> dict:
     raise last_err if last_err else PlatformUpstreamError("签到状态查询失败")
 
 
-async def refresh_checkin_status(account: dict) -> dict:
+async def refresh_checkin_status(account: dict, profile: WbRealm = REALM_CN) -> dict:
     """拉上游签到状态并落库（today_checked_in=True 时 last_checkin_date 记今天）。"""
-    status = await checkin_status_payload(account)
+    status = await checkin_status_payload(account, profile=profile)
     old_checkin = account.get("checkin") or {}
     checkin = {
         "last_checkin_date": store.today_cn() if status["today_checked_in"]
@@ -133,19 +135,28 @@ async def refresh_checkin_status(account: dict) -> dict:
         "streak_days": status["streak_days"],
         "today_checked_in": status["today_checked_in"],
     }
-    return await store.update_account(PLATFORM_ID, account["uid"], {"checkin": checkin})
+    return await store.update_account(profile.platform_id, account["uid"],
+                                      {"checkin": checkin})
 
 
-async def perform_checkin(account: dict) -> tuple[CheckinResult, dict]:
-    """手动签到（幂等）：已签到按成功返回；成功后更新 checkin 缓存并回传最新账号。"""
-    raw = await _billing_raw_post(account, "/v2/billing/meter/daily-checkin", {})
+async def perform_checkin(account: dict, profile: WbRealm = REALM_CN) -> tuple[CheckinResult, dict]:
+    """手动签到（幂等）：已签到按成功返回；成功后更新 checkin 缓存并回传最新账号。
+
+    无签到体系域（国际版，定稿）：返回明确文案、**零上游调用**（§3 门控——
+    panel D4「realm=global 账号无签到体系，直接跳过，不发起任何上游调用，避免风控」）。
+    """
+    if not profile.supports_checkin:
+        return (CheckinResult(success=False, message="国际版无签到功能",
+                              today_checked_in=False), account)
+    raw = await _billing_raw_post(account, "/v2/billing/meter/daily-checkin", {},
+                                  profile=profile)
     code = raw.get("code")
     msg = str(raw.get("message") or raw.get("msg") or "")
 
     if code in CHECKED_IN_CODES or "已签到" in msg or "already" in msg.lower():
         # 幂等成功；best-effort 补拉权威状态（streak/active）
         try:
-            updated = await refresh_checkin_status(account)
+            updated = await refresh_checkin_status(account, profile=profile)
         except (PlatformAuthError, PlatformUpstreamError):
             updated = dict(account)
             updated.setdefault("checkin", {})["today_checked_in"] = True
@@ -162,7 +173,7 @@ async def perform_checkin(account: dict) -> tuple[CheckinResult, dict]:
                             _loose_num(data, "today_credit", "todayCredit", -1)))
     patch = {"checkin": {"last_checkin_date": store.today_cn(), "streak_days": streak,
                          "today_checked_in": True}}
-    updated = await store.update_account(PLATFORM_ID, account["uid"], patch)
+    updated = await store.update_account(profile.platform_id, account["uid"], patch)
     return (CheckinResult(success=True, message="签到成功", streak_days=streak,
                           credit=credit if credit >= 0 else None,
                           today_checked_in=True), updated)
@@ -179,7 +190,7 @@ def _quota_body() -> dict:
     return {}
 
 
-def _web_summary_headers(account: dict) -> dict[str, str]:
+def _web_summary_headers(account: dict, profile: WbRealm = REALM_CN) -> dict[str, str]:
     """① 主路径头：官网套餐页形态（对齐 workbuddy-switch credits.rs resource_auth_headers）。
 
     与登录 platform=workbuddy（桌面端）身份配对一致：桌面端 billing 指纹 +
@@ -192,10 +203,43 @@ def _web_summary_headers(account: dict) -> dict[str, str]:
         uid=account.get("uid") or "",
         domain=account.get("domain") or "",
         enterprise_id=account.get("enterprise_id") or "",
+        profile=profile,
     )
     headers["X-Client-Platform"] = "web"
-    headers["Referer"] = f"{CN_ORIGIN}/profile/plans-usage"
+    headers["Referer"] = f"{profile.origin}/profile/plans-usage"
     return headers
+
+
+def _desktop_quota_headers(account: dict, profile: WbRealm) -> dict[str, str]:
+    """国际版配额头（profile 版）：桌面档 billing 指纹 + 归属头（探针 P3 实测形态）。
+
+    2026-10-14 小号探针实测：/billing/meter/get-user-resource（无 /v2）200 且带回
+    资源包 Accounts；头部含桌面 UA/归属头 + X-Domain=www.workbuddy.ai + 设备头。
+    国际版 chat_domain 恒注入（panel injectGlobalChatHeaders 口径延伸至 billing）。
+    """
+    headers = billing_headers(
+        access_token=account.get("access_token") or "",
+        uid=account.get("uid") or "",
+        domain=profile.chat_domain or account.get("domain") or "",
+        enterprise_id="",  # 国际版无企业概念
+        profile=profile,
+    )
+    headers["X-No-Enterprise-Id"] = "1"
+    headers["X-Agent-Purpose"] = "conversation"
+    headers["X-IDE-Name"] = "WorkBuddy"
+    headers["X-IDE-Type"] = "WorkBuddy"
+    headers["X-IDE-Version"] = "5.5.4"
+    headers["X-Product"] = "WorkBuddy"
+    return headers
+
+
+def _quota_headers_for(account: dict, style: str, profile: WbRealm) -> dict[str, str]:
+    """配额候选头风格分发：web_summary（CN 主路径）/ saas（CN 回退）/ desktop（国际版）。"""
+    if style == "web_summary":
+        return _web_summary_headers(account, profile=profile)
+    if style == "desktop":
+        return _desktop_quota_headers(account, profile)
+    return _saas_headers(account)
 
 
 def _saas_headers(account: dict) -> dict[str, str]:
@@ -235,26 +279,26 @@ def _quota_items(body: dict) -> list:
     return []
 
 
-async def fetch_quota(account: dict) -> dict:
+async def fetch_quota(account: dict, profile: WbRealm = REALM_CN) -> dict:
     """拉取配额并聚合落库（多形态响应 → QuotaSnapshot 口径）。
 
-    两级编排（身份一致性优先）：
-    ① 主路径 POST /v2/billing/meter/get-user-resource-summary，空 body + 桌面端
-       billing 指纹 + X-Client-Platform: web（workbuddy-switch 配对形态：
-       platform=workbuddy 登录的官方套餐页端点，免费/付费包都回）；
-    ② 回退 POST /v2/billing/meter/get-user-resource，空 body + SaaS/CLI 头
-       （9router 实测组合，免费号可用；与登录身份不一致仅作兜底）。
+    候选序按 profile（§2/§3）：
+    CN（现状逐字）：① 主路径 POST /v2/billing/meter/get-user-resource-summary，空 body
+      + 桌面端 billing 指纹 + X-Client-Platform: web（workbuddy-switch 配对形态）；
+      ② 回退 POST /v2/billing/meter/get-user-resource + SaaS/CLI 头（9router 组合）。
+    国际版（panel billingMeterPaths + 2026-10-14 探针实测）：① 无 /v2
+      /billing/meter/get-user-resource + 桌面头（实测 200 带回 Accounts）；
+      ② /v2 回退（summary 在国际版 base 404，不进候选）。
 
     两路径响应共用同一套解析（summary 的数据在 data.resources 等形态，
     嵌套腾讯信封 data.Response.Data.Accounts 亦兼容）。
     """
     last_err: Exception | None = None
-    for path, headers in (
-        ("/v2/billing/meter/get-user-resource-summary", _web_summary_headers(account)),
-        ("/v2/billing/meter/get-user-resource", _saas_headers(account)),
-    ):
+    for path, style in profile.quota_candidates:
+        headers = _quota_headers_for(account, style, profile)
         try:
-            raw = await _billing_raw_post(account, path, {}, headers=headers)
+            raw = await _billing_raw_post(account, path, {}, headers=headers,
+                                          profile=profile)
         except PlatformAuthError:
             raise  # 登录态失效：两路径都不用试了
         except PlatformUpstreamError as exc:
@@ -262,14 +306,14 @@ async def fetch_quota(account: dict) -> dict:
             continue
         items = _quota_items(raw)
         if items:
-            return await _save_quota(account, items)
+            return await _save_quota(account, items, profile=profile)
         # 空结果也继续试下一路径（summary 空 → 旧接口可能有）
     if last_err is not None:
         raise last_err
-    return await _save_quota(account, [])
+    return await _save_quota(account, [], profile=profile)
 
 
-async def _save_quota(account: dict, items: list) -> dict:
+async def _save_quota(account: dict, items: list, profile: WbRealm = REALM_CN) -> dict:
     """逐包归一 + 聚合落库。
 
     每包归一为 {name, total, used, remaining, expire_at, cycle}（e2e 用户拍板
@@ -327,7 +371,7 @@ async def _save_quota(account: dict, items: list) -> dict:
         "packages": packages,
         "fetched_at": datetime.now(store.CN_TZ).isoformat(timespec="seconds"),
     }
-    return await store.update_account(PLATFORM_ID, account["uid"], {"quota": quota})
+    return await store.update_account(profile.platform_id, account["uid"], {"quota": quota})
 
 
 def _norm_expire(raw) -> str:
@@ -374,7 +418,8 @@ def _is_far_future(date_text: str) -> bool:
 
 
 async def _billing_raw_post(account: dict, path: str, json_body: dict,
-                            headers: dict[str, str] | None = None) -> dict:
+                            headers: dict[str, str] | None = None,
+                            profile: WbRealm = REALM_CN) -> dict:
     """返回原始信封（不 parse_envelope）：调用方自行判 code 或挖数组。
 
     headers 缺省走桌面端 billing 指纹；配额回退路径传 _saas_headers 覆盖。
@@ -385,8 +430,9 @@ async def _billing_raw_post(account: dict, path: str, json_body: dict,
             uid=account.get("uid") or "",
             domain=account.get("domain") or "",
             enterprise_id=account.get("enterprise_id") or "",
+            profile=profile,
         )
-    url = f"{settings.wb_api_base}{path}"
+    url = f"{profile.billing_base}{path}"
     try:
         return await _client.request_json("POST", url, headers=headers,
                                                json_body=json_body)

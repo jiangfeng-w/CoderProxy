@@ -454,7 +454,9 @@ def test_headers_desktop_tier(data_dir):
     a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
     account = _run(store.find_account("workbuddy", "u_wb1"))
     h = a._headers(account)
-    assert h["User-Agent"] == settings.wb_user_agent  # 三段式桌面档
+    # 双域 spec §2：wb_user_agent 语义收紧为显式覆盖（默认空 → 按 profile 拼装）；
+    # 拼装产物与变更前字面量逐字一致（零回归）。
+    assert h["User-Agent"] == "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"
     assert h["X-Agent-Purpose"] == "conversation"
     assert h["X-IDE-Name"] == "WorkBuddy" and h["X-IDE-Type"] == "WorkBuddy"
     assert h["X-Product"] == "WorkBuddy"
@@ -627,7 +629,7 @@ def test_refresh_credentials_refreshes_active(data_dir, monkeypatch):
     a._active_uid = "u_a"
     refreshed: list[str] = []
 
-    async def _fake_refresh(account):
+    async def _fake_refresh(account, profile=None):
         refreshed.append(str(account.get("uid")))
         return {**account, "access_token": "new"}
 

@@ -137,7 +137,16 @@ async def test_request_json_maps_network_error():
 
 
 def test_wb_config_defaults():
-    """wb_* 配置项默认值（双口径兜底，小号冒烟后定默认）。"""
+    """wb_* 配置项默认值（双口径兜底，小号冒烟后定默认）。
+
+    双域 spec §2：wb_user_agent 语义收紧为**显式覆盖**（默认空 → 按 profile 拼装，
+    见 client.user_agent_for）；拼装产物与变更前字面量逐字一致（零回归）。
+    """
     assert settings.wb_api_base.startswith("https://")
     assert settings.wb_web_base == "https://www.codebuddy.cn"
-    assert settings.wb_user_agent.startswith("WorkBuddy/")
+    assert settings.wb_global_base == "https://www.workbuddy.ai"
+    assert settings.wb_user_agent == ""  # 默认空 = 按 profile 拼装
+    from relay.platforms.workbuddy.client import user_agent_for
+    from relay.platforms.workbuddy.realms import REALM_CN, REALM_GLOBAL
+    assert user_agent_for(REALM_CN) == "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"
+    assert user_agent_for(REALM_GLOBAL) == "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1"

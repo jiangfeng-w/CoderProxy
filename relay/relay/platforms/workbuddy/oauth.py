@@ -19,7 +19,6 @@ import secrets
 import time
 from dataclasses import dataclass, field
 
-from relay.config import settings
 from relay.platforms import store
 from relay.platforms.base import PlatformAuthError, PlatformUpstreamError
 from relay.platforms.workbuddy.client import (
@@ -29,15 +28,18 @@ from relay.platforms.workbuddy.client import (
     plugin_headers,
     refresh_headers,
 )
+from relay.platforms.workbuddy.realms import REALM_CN, WbRealm
 
 logger = logging.getLogger(__name__)
 
-PLATFORM_ID = "workbuddy"
+PLATFORM_ID = REALM_CN.platform_id
 
 # OAuth platform 档位：官方 WorkBuddy 桌面客户端身份（cockpit-tools 18.7k★ 的
 # workbuddy_oauth.rs:9 与 workbuddy-switch 1.0k★ 的 variant.rs 同用此值；2api 谱系
 # 的 workbuddy-cockpit/workbuddy2api-panel 用 CLI——授权域语义不同，不采）。
-# 提为常量：上游若调整档位命名，改此处即可（后续可升级为 env 可覆盖配置项）。
+# 提为常量：上游若调整档位命名，改此处即可。
+# 双域校准（2026-10-14 国际版小号探针）：workbuddy 与 CLI 在国际版 base
+# 均返回 code=0 + state 有效 → 沿用 workbuddy（profile.oauth_platform 可覆盖）。
 OAUTH_PLATFORM = "workbuddy"
 
 LOGIN_TIMEOUT_S = 600  # spec：轮询 600s 强制超时
@@ -53,6 +55,7 @@ class _LoginSlot:
     login_id: str
     state: str
     authorize_url: str
+    profile: WbRealm = REALM_CN
     expires_at: float = 0.0
     status: str = "pending"  # pending | success | failed
     error: str = ""
@@ -85,19 +88,22 @@ def _will_expire_soon(account: dict, margin_ms: int = 60_000) -> bool:
     return expires_at <= (time.time() * 1000 + margin_ms)
 
 
-async def start_login() -> dict:
+async def start_login(profile: WbRealm = REALM_CN) -> dict:
     """发起设备授权：返回 {login_id, authorize_url, expires_in}，前端开浏览器授权。"""
-    url = f"{settings.wb_api_base}{WB_API_PREFIX}/auth/state?platform={OAUTH_PLATFORM}"
+    platform = profile.oauth_platform or OAUTH_PLATFORM
+    url = (f"{profile.login_base}{WB_API_PREFIX}"
+           f"/auth/state?platform={platform}")
     body = await _client.request_json("POST", url, headers=plugin_headers(), json_body={})
     data = parse_envelope(body, context="auth/state")
     state = data.get("state")
     if not state:
         raise PlatformUpstreamError("auth/state 响应缺少 state", status=502)
     auth_url = (data.get("authUrl") or data.get("auth_url") or data.get("url")
-                or f"{settings.wb_api_base}/login?state={state}")
+                or f"{profile.login_base}/login?state={state}")
 
     login_id = f"wb_{secrets.token_hex(8)}"
     slot = _LoginSlot(login_id=login_id, state=str(state), authorize_url=auth_url,
+                      profile=profile,
                       expires_at=time.monotonic() + LOGIN_TIMEOUT_S)
     slot.task = asyncio.create_task(_poll_token(slot))
     _slots[login_id] = slot
@@ -106,7 +112,8 @@ async def start_login() -> dict:
 
 async def _poll_token(slot: _LoginSlot) -> None:
     """后台轮询 auth/token；超时/取消置 failed；成功归档账号置 success。"""
-    token_url = f"{settings.wb_api_base}{WB_API_PREFIX}/auth/token?state={slot.state}"
+    token_url = (f"{slot.profile.login_base}{WB_API_PREFIX}"
+                 f"/auth/token?state={slot.state}")
     try:
         while time.monotonic() < slot.expires_at:
             await asyncio.sleep(POLL_INTERVAL_S)
@@ -119,7 +126,7 @@ async def _poll_token(slot: _LoginSlot) -> None:
             data = body.get("data") if isinstance(body.get("data"), dict) else {}
             access = str(data.get("accessToken") or data.get("access_token") or "")
             if code in (0, 200) and access:
-                account = await _archive_account(slot.state, access, data)
+                account = await _archive_account(slot.profile, slot.state, access, data)
                 slot.account_uid = account["uid"]
                 slot.status = "success"
                 return
@@ -135,9 +142,10 @@ async def _poll_token(slot: _LoginSlot) -> None:
         logger.warning("[workbuddy] 登录轮询异常: %s", exc)
 
 
-async def _archive_account(state: str, access_token: str, token_data: dict) -> dict:
-    """拉取账号信息并入库（uid 是后续所有操作的键）。"""
-    account_url = f"{settings.wb_api_base}{WB_API_PREFIX}/login/account?state={state}"
+async def _archive_account(profile: WbRealm, state: str, access_token: str,
+                           token_data: dict) -> dict:
+    """拉取账号信息并入库（uid 是后续所有操作的键）；归属校验失败拒绝入库（§6）。"""
+    account_url = f"{profile.login_base}{WB_API_PREFIX}/login/account?state={state}"
     domain = str(token_data.get("domain") or "")
     info: dict = {}
     try:
@@ -148,37 +156,46 @@ async def _archive_account(state: str, access_token: str, token_data: dict) -> d
     except (PlatformAuthError, PlatformUpstreamError) as exc:
         logger.warning("[workbuddy] 拉取账号信息失败（降级用 token 载荷）: %s", exc)
 
+    # 归属校验（§6）：登录归档前判定域族——国际号进 CN 池拒绝并引导。
+    account_domain = str(info.get("domain") or domain or "")
+    if not profile.allows_domain(account_domain):
+        raise PlatformUpstreamError(
+            "该账号属于国际版（workbuddy.ai/codebuddy.ai），请到「WorkBuddy」标签页添加",
+            status=400)
+
     uid = str(info.get("uid") or f"wb_{state[:12]}")
     entry = {
         "uid": uid,
         "nickname": str(info.get("nickname") or ""),
         "email": str(info.get("email") or ""),
         "enterprise_id": str(info.get("enterpriseId") or ""),
-        "domain": domain,
+        "domain": account_domain,
         "access_token": access_token,
         "refresh_token": str(token_data.get("refreshToken")
                              or token_data.get("refresh_token") or ""),
         "expires_at": _expiry_ms(token_data),
         "status": "normal",
     }
-    account = await store.upsert_account(PLATFORM_ID, entry, preserve=True)
-    await prefetch_caches(account)
+    account = await store.upsert_account(profile.platform_id, entry, preserve=True)
+    await prefetch_caches(account, profile=profile)
     return account
 
 
-async def prefetch_caches(account: dict) -> None:
+async def prefetch_caches(account: dict, profile: WbRealm = REALM_CN) -> None:
     """登录归档后 best-effort 预拉签到状态与配额（弹窗承诺「授权完成后自动刷新
     资源包配额数据」；不做的话已签到账号首屏会误显「今日未签」，需手动刷新状态）。
 
     预取失败只告警不回滚登录：账号已入库，卡片上的「刷新状态/刷新配额」可手动补。
+    profile 分支（§3）：CN = 签到状态 + 配额；国际版 = 仅配额（无签到体系）。
     """
     from relay.platforms.workbuddy import billing
+    if profile.supports_checkin:
+        try:
+            await billing.refresh_checkin_status(account, profile=profile)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[workbuddy] 预拉签到状态失败 uid=%s: %s", account.get("uid"), exc)
     try:
-        await billing.refresh_checkin_status(account)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[workbuddy] 预拉签到状态失败 uid=%s: %s", account.get("uid"), exc)
-    try:
-        await billing.fetch_quota(account)
+        await billing.fetch_quota(account, profile=profile)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[workbuddy] 预拉配额失败 uid=%s: %s", account.get("uid"), exc)
 
@@ -222,15 +239,16 @@ async def cancel_login(login_id: str) -> None:
         slot.task.cancel()
 
 
-async def refresh_token(account: dict) -> dict:
+async def refresh_token(account: dict, profile: WbRealm = REALM_CN) -> dict:
     """刷新 token 并回写存储；拒绝（401/业务失败）→ login_required 引导重登。"""
     refresh_tok = account.get("refresh_token") or ""
     if not refresh_tok:
         raise PlatformAuthError("缺少 refresh_token，请重新登录")
-    url = f"{settings.wb_web_base}{WB_API_PREFIX}/auth/token/refresh"
+    url = f"{profile.refresh_base}{WB_API_PREFIX}/auth/token/refresh"
     headers = refresh_headers(access_token=account.get("access_token") or "",
                               refresh_token=refresh_tok,
-                              domain=account.get("domain") or "")
+                              domain=account.get("domain") or "",
+                              profile=profile)
     try:
         body = await _client.request_json("POST", url, headers=headers, json_body={})
     except PlatformAuthError:
@@ -246,4 +264,4 @@ async def refresh_token(account: dict) -> dict:
     new_refresh = data.get("refreshToken") or data.get("refresh_token")
     if new_refresh:
         patch["refresh_token"] = str(new_refresh)
-    return await store.update_account(PLATFORM_ID, account["uid"], patch)
+    return await store.update_account(profile.platform_id, account["uid"], patch)
