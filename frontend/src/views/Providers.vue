@@ -12,13 +12,15 @@ import CustomProvidersTab from './providers/CustomProvidersTab.vue'
 
 <template>
   <div class="providers-page">
-    <!-- show:lazy：首次激活挂载后常驻（切换不重建、数据保留）；
-         不加 animated：pane wrapper 的 max-height 0.2s 过渡在高度不等的 tab 间切换
-         时表现为「先矮后拉长」的闪烁（实测定位 2026-10-08），去掉后高度瞬时切换 -->
-    <NTabs
-      type="line"
-      display-directive="show:lazy"
-    >
+    <!-- 注意（2026-10-14 实测修正）：
+         · display-directive 是 NTabPane 的 prop（写在 NTabs 上不生效、被当普通 attr 忽略）；
+           本页保持 pane 默认语义：非活动 pane 卸载、切回重挂载（数据刷新）。
+         · 两个 WorkBuddyTab 同型组件**必须各带显式 key**：否则切 tab 时 Vue 就地复用实例，
+           props 更新但 setup 不重跑，useWorkbuddyStoreFor(platform) 仍绑旧池 →
+           国际版 tab 会画出 CN 池数据（2026-10-14 实测 bug）。
+         · 不做 animated：pane wrapper 的 max-height 0.2s 过渡在高度不等的 tab 间切换
+           时表现为「先矮后拉长」的闪烁（实测定位 2026-10-08），去掉后高度瞬时切换 -->
+    <NTabs type="line">
       <NTabPane
         name="niucode"
         tab="牛码"
@@ -32,13 +34,19 @@ import CustomProvidersTab from './providers/CustomProvidersTab.vue'
         name="workbuddy-cn"
         tab="WorkBuddy CN"
       >
-        <WorkBuddyTab platform="workbuddy" />
+        <WorkBuddyTab
+          key="wb-cn"
+          platform="workbuddy"
+        />
       </NTabPane>
       <NTabPane
         name="workbuddy-global"
         tab="WorkBuddy"
       >
-        <WorkBuddyTab platform="workbuddy-global" />
+        <WorkBuddyTab
+          key="wb-global"
+          platform="workbuddy-global"
+        />
       </NTabPane>
       <NTabPane
         name="custom"

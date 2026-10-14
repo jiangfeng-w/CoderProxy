@@ -25,6 +25,10 @@ const cnOnly = computed(() => !isGlobal.value)
 const supportsCheckin = computed(() => !isGlobal.value)
 
 const message = useMessage()
+// ⚠ 不变量（2026-10-14 串台 bug 教训）：store 绑定发生在 setup 期，本组件**必须带显式 key**
+// 使用（见 Providers.vue 两个 tab 的 key="wb-cn"/"wb-global"）。两个 WorkBuddyTab 同型
+// 不同平台，若不换实例，pane 切换时 Vue 就地复用组件、props.platform 更新但 setup 不重跑，
+// 会把旧池 store 画到新平台 tab（实测：国际版 tab 显示 CN 账号 + wbcn/ 模型）。
 const wb = useWorkbuddyStoreFor(props.platform)
 const config = useConfigStore()
 const DISABLE_ALL = '__none__'
