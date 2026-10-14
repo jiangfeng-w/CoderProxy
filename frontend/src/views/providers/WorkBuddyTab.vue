@@ -7,13 +7,25 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NButton, NCard, NCheckbox, NEmpty, NInput, NModal, NPagination, NPopconfirm, NRadio, NRadioGroup, NSwitch, NTabPane, NTabs, NTag, useMessage } from 'naive-ui'
 import { getModels, openAuthorizeUrl, saveTextFile, type OaiModel, type WbAccount } from '../../api'
-import { workbuddyStore } from '../../stores/workbuddy'
+import { useWorkbuddyStoreFor, WB_CN_PLATFORM } from '../../stores/workbuddy'
 import { store, useConfigStore } from '../../store'
 import { testModel } from '../../modelCheck'
 import ModelEffortSelect from '../../components/ModelEffortSelect.vue'
 
+// 双域（WorkBuddy双域账号支持 §7）：platform prop 参数化——
+// CN `workbuddy`（wbcn/ 前缀；签到/IDE 切号/导出/本机导入全保留）
+// 国际版 `workbuddy-global`（wbg/ 前缀；无签到、无 IDE 切号/导出/本机导入——按能力位隐藏）。
+const props = withDefaults(defineProps<{ platform?: string }>(), {
+  platform: WB_CN_PLATFORM
+})
+const isGlobal = computed(() => props.platform === 'workbuddy-global')
+/** 能力位：CN 生态专属（IDE 切号 / 导出 / 本机导入）仅 CN 显示。 */
+const cnOnly = computed(() => !isGlobal.value)
+/** 签到能力（国际版无签到，定稿）。 */
+const supportsCheckin = computed(() => !isGlobal.value)
+
 const message = useMessage()
-const wb = workbuddyStore
+const wb = useWorkbuddyStoreFor(props.platform)
 const config = useConfigStore()
 const DISABLE_ALL = '__none__'
 
@@ -21,7 +33,9 @@ const DISABLE_ALL = '__none__'
 const wbModels = ref<OaiModel[]>([])
 const modelSearch = ref('')
 const testingModel = ref<string | null>(null)
-const WB_PREFIX = 'WorkBuddy/'
+const WB_PREFIX = computed(() => (isGlobal.value ? 'wbg/' : 'wbcn/'))
+/** 显示名（tab / 弹窗标题 / 空态文案用；对齐后端 PlatformInfo.display_name）。 */
+const displayName = computed(() => (isGlobal.value ? 'WorkBuddy' : 'WorkBuddy CN'))
 
 const filteredModels = computed(() => {
   const q = modelSearch.value.trim().toLowerCase()
@@ -129,7 +143,7 @@ function effortText(m: OaiModel): string {
 async function loadWbModels() {
   try {
     const all = (await getModels(true)).data
-    wbModels.value = all.filter(m => m.id.startsWith(WB_PREFIX))
+    wbModels.value = all.filter(m => m.id.startsWith(WB_PREFIX.value))
   } catch (e) {
     message.error(String(e))
   }
@@ -292,7 +306,7 @@ function startPolling() {
       if (phase === 'success') {
         stopPolling()
         showLoginDlg.value = false
-        message.success('WorkBuddy 账号添加成功')
+        message.success(`${displayName.value} 账号添加成功`)
       } else if (phase === 'failed') {
         stopPolling()
       }
@@ -543,7 +557,16 @@ onUnmounted(stopPolling)
     <div class="card">
       <div class="head">
         <span class="zone-title">账号</span>
-        <span class="note">设备授权登录加入账号池；「切到此号」把该账号写入本机官方客户端并自动重启</span>
+        <span
+          v-if="cnOnly"
+          class="note"
+          >设备授权登录加入账号池；「切到此号」把该账号写入本机官方客户端并自动重启</span
+        >
+        <span
+          v-else
+          class="note"
+          >设备授权登录或粘贴 Token/JSON 加入账号池（国际版账号）</span
+        >
         <div class="spacer" />
         <NButton
           size="small"
@@ -553,6 +576,7 @@ onUnmounted(stopPolling)
           添加账号
         </NButton>
         <NButton
+          v-if="cnOnly"
           size="small"
           :disabled="wb.accounts.length === 0"
           @click="openExportDlg"
@@ -588,6 +612,7 @@ onUnmounted(stopPolling)
               >{{ a.nickname || a.uid }}</span
             >
             <NTag
+              v-if="supportsCheckin"
               size="small"
               :type="a.checkin.today_checked_in ? 'success' : 'warning'"
               :bordered="false"
@@ -595,7 +620,7 @@ onUnmounted(stopPolling)
               {{ a.checkin.today_checked_in ? '今日已签' : '今日未签' }}
             </NTag>
             <NTag
-              v-if="ideUid === a.uid"
+              v-if="cnOnly && ideUid === a.uid"
               size="small"
               type="info"
               :bordered="false"
@@ -604,7 +629,10 @@ onUnmounted(stopPolling)
             </NTag>
             <span class="spacer" />
             <div class="acct-ops">
-              <NPopconfirm @positive-click="onSwitchIde(a)">
+              <NPopconfirm
+                v-if="cnOnly"
+                @positive-click="onSwitchIde(a)"
+              >
                 <template #trigger>
                   <NButton
                     size="tiny"
@@ -619,6 +647,7 @@ onUnmounted(stopPolling)
                 将关闭并重启本机 WorkBuddy 客户端，登录切换为「{{ a.nickname || a.uid }}」。确定切换？
               </NPopconfirm>
               <NButton
+                v-if="supportsCheckin"
                 size="tiny"
                 type="primary"
                 ghost
@@ -637,6 +666,7 @@ onUnmounted(stopPolling)
                 刷新配额
               </NButton>
               <NButton
+                v-if="supportsCheckin"
                 size="tiny"
                 :disabled="wb.busyUid !== ''"
                 @click="onRefreshStatus(a)"
@@ -658,7 +688,7 @@ onUnmounted(stopPolling)
             </div>
           </div>
           <div class="acct-meta">
-            <span>连签 {{ a.checkin.streak_days ?? 0 }} 天</span>
+            <span v-if="supportsCheckin">连签 {{ a.checkin.streak_days ?? 0 }} 天</span>
             <span
               v-if="a.quota.total"
               class="mono quota-link"
@@ -694,7 +724,7 @@ onUnmounted(stopPolling)
       <template #header>
         <div class="head">
           <span class="zone-title">模型</span>
-          <span class="note">无思考档位的模型默认隐藏，可在账号区「模型显示」中恢复</span>
+          <span class="note">{{ displayName }} 目录 · 无思考档位的模型默认隐藏，可在账号区「模型显示」中恢复</span>
           <div class="spacer" />
           <input
             v-model="modelSearch"
@@ -719,7 +749,7 @@ onUnmounted(stopPolling)
       </template>
       <NEmpty
         v-if="wbModels.length === 0"
-        description="暂无 WorkBuddy 模型目录（请先添加账号；relay 会从上游拉取目录）"
+        :description="`暂无 ${displayName} 模型目录（请先添加账号；relay 会从上游拉取目录）`"
         size="small"
       />
       <NEmpty
@@ -787,7 +817,7 @@ onUnmounted(stopPolling)
     <NModal
       v-model:show="showLoginDlg"
       preset="card"
-      title="添加 WorkBuddy 账号"
+      :title="`添加 ${displayName} 账号`"
       :style="{ width: '480px' }"
       :mask-closable="false"
     >
@@ -802,11 +832,12 @@ onUnmounted(stopPolling)
           tab="OAuth 授权"
         >
           <template v-if="wb.loginPhase === 'pending'">
-            <p class="dlg-text">点击下方按钮将在浏览器中打开 WorkBuddy（CodeBuddy CN）授权页面。</p>
+            <p class="dlg-text">点击下方按钮将在浏览器中打开 {{ displayName }} 授权页面。</p>
             <div class="auth-box">
               <p class="auth-box-title">授权 IDE 登录信息</p>
               <ul class="auth-box-list">
-                <li>在浏览器完成 OAuth 后即可添加账号并用于 IDE 切换。</li>
+                <li v-if="cnOnly">在浏览器完成 OAuth 后即可添加账号并用于 IDE 切换。</li>
+                <li v-else>在浏览器完成 OAuth 后即可添加账号。</li>
                 <li>授权完成后会自动刷新资源包配额数据。</li>
                 <li>账号卡片将按资源包展示额度、进度和刷新/到期时间。</li>
               </ul>
@@ -868,7 +899,7 @@ onUnmounted(stopPolling)
           name="token"
           tab="Token / JSON"
         >
-          <p class="dlg-text imp-hint">粘贴 WorkBuddy 的 access token：</p>
+          <p class="dlg-text imp-hint">粘贴 {{ displayName }} 的 access token：</p>
           <NInput
             v-model:value="importText"
             type="textarea"
@@ -889,8 +920,9 @@ onUnmounted(stopPolling)
           <p class="dlg-expire">JSON 支持单对象 / 数组 / accounts 包裹；纯 token 将联网校验并补全资料</p>
         </NTabPane>
 
-        <!-- Tab 3：本地导入（本机客户端登录态 / JSON 文件） -->
+        <!-- Tab 3：本地导入（CN 专属：本机客户端登录态 / JSON 文件） -->
         <NTabPane
+          v-if="cnOnly"
           name="local"
           tab="本地导入"
         >

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // 供应商页（2026-10-07 定稿）：横向标签页分平台，每 tab 统一「账号区（上）+ 模型区（下）」。
-// 原模型页（Models.vue）移除，功能整合进牛码 tab；WorkBuddy tab 本期占位；
-// 自定义供应商 tab 本期仅配置管理（转发待聚合需求 adapter 层）。
+// 原模型页（Models.vue）移除，功能整合进牛码 tab；自定义供应商 tab 仅配置管理。
+// 双域（2026-10-14 定稿）：WorkBuddy 拆双 tab——`WorkBuddy CN`（workbuddy）与
+// `WorkBuddy`（workbuddy-global 国际版）；两 tab 复用 WorkBuddyTab，传 platform prop。
 import { NTabPane, NTabs } from 'naive-ui'
 import NiucodeAccount from './providers/NiucodeAccount.vue'
 import NiucodeModels from './providers/NiucodeModels.vue'
@@ -28,10 +29,16 @@ import CustomProvidersTab from './providers/CustomProvidersTab.vue'
         </div>
       </NTabPane>
       <NTabPane
-        name="workbuddy"
+        name="workbuddy-cn"
+        tab="WorkBuddy CN"
+      >
+        <WorkBuddyTab platform="workbuddy" />
+      </NTabPane>
+      <NTabPane
+        name="workbuddy-global"
         tab="WorkBuddy"
       >
-        <WorkBuddyTab />
+        <WorkBuddyTab platform="workbuddy-global" />
       </NTabPane>
       <NTabPane
         name="custom"
