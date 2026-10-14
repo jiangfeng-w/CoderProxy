@@ -1,6 +1,6 @@
 # WorkBuddy 双域账号支持（双平台拆分）
 
-> **状态**：方案已定稿（2026-10-13 立稿；**2026-10-14 改版并定稿**：由「单池每账号 realm 切换」改为「**双平台实例拆分**」——用户拍板拆 tab：两域模型体系不同，单池无法正确表达；tab 名定稿 `WorkBuddy CN` / `WorkBuddy`；**模型前缀定稿**：`wbcn/`（CN）/ `wbg/`（国际版；**2026-10-14 二次拍板**：国际版由 `wb` 改 `wbg`，降低短前缀撞名风险），停用 `WorkBuddy/` 作规范前缀、仅保留读兼容归一；**2026-10-14 定位拍板**：①国内版/国际版**按两个独立平台完整区分**（独立池/目录/前缀/tab；profile 仅为代码层实现手段，不改变「两个平台」语义）；②国际版反代实现**沿用 CN 版同源参考谱系**（workbuddy2api-panel 主线 + 9router/chatcoder/cockpit-tools 佐证），不另寻新参考；③**产品矩阵澄清（用户 2026-10-14）**：workbuddy 系列共 **4 产品**（CodeBuddy IDE 线 / WorkBuddy Agent 线 × 国内 / 国际）；**同 locale 两软件共用一个账号体系、国内/国际完全互不干扰**（四者可同机共存——用户本机仅装国内版两款）；**国内版签到只在 WorkBuddy**（国内 platform 选 `workbuddy` 即此历史因）、**国际版无签到**（定稿）；国际版域选 `workbuddy.ai`（国际版无签到故 `workbuddy.ai` / `codebuddy.ai` 功能等价，为统一取 WorkBuddy 域）；**2026-10-14 复核修订**：导入/导出口径统一（§1/§4）、归属校验落点细化（§6）、打包登记/模块级单例/测试清单补全（§3、验收、清单）、三需求同批协调（§9））
+> **状态**：**已实现（2026-10-14，keyless/打包态全绿；国际版设备流登录 + chat 200 待补测）**——commit 1–5 全部落地：realms.py profile 单点 + 全链路参数化（chat/billing/oauth/catalog/imports/store 分池）+ 双平台注册 + 前缀 `wbcn`/`wbg`（legacy 读兼容）+ 导入端点泛化 + 前端双 tab；pytest 567 绿 + 打包冒烟 15/15；详见「验收」。原始定稿注记（2026-10-13 立稿；**2026-10-14 改版并定稿**：由「单池每账号 realm 切换」改为「**双平台实例拆分**」——用户拍板拆 tab：两域模型体系不同，单池无法正确表达；tab 名定稿 `WorkBuddy CN` / `WorkBuddy`；**模型前缀定稿**：`wbcn/`（CN）/ `wbg/`（国际版；**2026-10-14 二次拍板**：国际版由 `wb` 改 `wbg`，降低短前缀撞名风险），停用 `WorkBuddy/` 作规范前缀、仅保留读兼容归一；**2026-10-14 定位拍板**：①国内版/国际版**按两个独立平台完整区分**（独立池/目录/前缀/tab；profile 仅为代码层实现手段，不改变「两个平台」语义）；②国际版反代实现**沿用 CN 版同源参考谱系**（workbuddy2api-panel 主线 + 9router/chatcoder/cockpit-tools 佐证），不另寻新参考；③**产品矩阵澄清（用户 2026-10-14）**：workbuddy 系列共 **4 产品**（CodeBuddy IDE 线 / WorkBuddy Agent 线 × 国内 / 国际）；**同 locale 两软件共用一个账号体系、国内/国际完全互不干扰**（四者可同机共存——用户本机仅装国内版两款）；**国内版签到只在 WorkBuddy**（国内 platform 选 `workbuddy` 即此历史因）、**国际版无签到**（定稿）；国际版域选 `workbuddy.ai`（国际版无签到故 `workbuddy.ai` / `codebuddy.ai` 功能等价，为统一取 WorkBuddy 域）；**2026-10-14 复核修订**：导入/导出口径统一（§1/§4）、归属校验落点细化（§6）、打包登记/模块级单例/测试清单补全（§3、验收、清单）、三需求同批协调（§9）））
 > **优先级**：核心
 > **来源**：《WorkBuddy 反代优化方案》P0-1 + 用户需求「分成两个 tab：WorkBuddy CN 和 WorkBuddy（国际版模型和国内版不一样）」+「前缀改短：`wbcn/`、`wbg/`，不再用 `WorkBuddy` 做前缀」
 > **参考依据**：panel `headers.go`（realm 头族分级）/ `client.go`（`globalOn` / `chatBase` / `billingMeterPaths` / `refresh` 走 chatBase）/ `panel/login.go`（`loginEndpoints` 分域）/ `pool/realm.go`（realm 分池选号）——**panel 与本项目同为 WorkBuddy 产品线**，其 global 实现是国际版主档；9router `codebuddy-cn` / `codebuddy-intl` 为**并列产品线（CodeBuddy/IDE）**的双 provider——仅取「同产品线 CN/intl 拆双 provider」的形态佐证，域值不援用；chatcoder / cockpit-tools / workbuddy-switch 继续作链路口径佐证。**反代实现主线沿用 CN 版同源参考谱系**（2026-10-14 拍板），国际版不另寻新参考
@@ -145,8 +145,10 @@
 
 - **国际版签到（定稿）**：**无签到功能**（用户 2026-10-14 确认；panel 同证——`scheduler.go:436` D4 门控「realm=global 账号无签到体系，直接跳过（不发起任何上游调用，避免风控）」+ `pool/entry.go:94`「global 域账号无签到体系，恒为 false」）。本仓库实现：`supports_checkin=False` → 签到端点返回明确「国际版无签到」文案、不发上游；前端隐藏签到入口。备注：panel 对国际版另有**对话活跃上报**（`/v2/report`，点亮连登/每日积分）——属"任务/连登"类功能、非签到，超本期范围（本仓库不实现）
 - 国际版 IDE 切号 / 导出 / 本机导入**本期不做**（CN 生态专属——读 CN 客户端登录态 / cockpit·9router 格式 / CN 客户端切号；如未来要做需先探针国际版客户端形态）
-- 国际版 OAuth platform 参数以实测为准（profile 单字段可改）
-- 目录/配额路径候选序、`/v2/plugin/accounts` 在国际版 base 的存在性——实施期用国际版小号实测校准
+- **国际版 OAuth platform 参数（2026-10-14 实测校准）**：`workbuddy` 与 `CLI` 在国际版 base `/v2/plugin/auth/state` 均返回 code=0 + 有效 state → **沿用 `workbuddy`**（profile 单字段可改，留作日后校准点）
+- **目录/配额路径候选序（2026-10-14 实测校准）**：`/v3/config` 200（27 模型）；`/v2/enterprises/personal/models` 200（18 模型）而 `/console/...` 500 → `/v2` 家族优先回归确认；billing `/billing/meter/get-user-resource`（无 /v2）200 且带回 `Accounts[]`（`/v2` 亦可作回退）；`get-user-resource-summary` 在国际版 base 404（不进候选）；`/v2/plugin/accounts` 存在（200）
+- **chat 出站形状（2026-10-14 实测）**：国际版 `/v2/chat/completions` 首条消息非 system → **400/11128**「first message is not system prompt」→ `ensure_system_first` 前置中性 system（panel `ensureConsoleSystem` 同款）；请求 body 形状（类型化块）与三种头族（panel 全量 / OmniRoute SaaS / 9router intl）在该小号 token 下均被 **403/11140**「request illegal」（displayMsg=安全审核）拒绝——**与头族形状无关**（账号健康复验 200，未封）；判定为该 token 的授权会话类型（console 授权流，JWT `azp: console`）不被 chat 网关接受，chat 需 relay 设备授权流（platform=workbuddy）签发的 token；**待设备流登录后用 relay 链路补测 chat 200**（验收项「无 11140」的正式判定点）
+- 国际版 `auth/token` 轮询行为（11217 pending 语义）沿用 CN 同构实现（OmniRoute 对 workbuddy.ai 实测同形状），未单独复测
 - 轮询游标仍为模块级全局（两池共享一个计数器——仅影响轮起始位置，无正确性问题；如需独立再拆）
 - 国际版模型默认可见性规则与 CN 同款（前缀 ∈ {`wbcn`, `wbg`} + 无档位 → 默认隐藏）
 - 前缀大小写不敏感匹配（现口径继承）：`WBCN/…`、`WBG/…` 等输入均归一为小写规范形态输出
@@ -155,21 +157,21 @@
 
 ## 验收
 
-- [ ] profile 单测：CN profile 所有取值与现状字面量逐字一致；国际版取值对齐 panel 证据表
-- [ ] `_headers` 双 profile 快照用例（UA 三段平台段、Origin、Accept-Language、X-Domain、X-No-Enterprise-Id / X-Enterprise-Id 分支）；CN 断言改为对拼装产物断言（输出与变更前逐字一致）
-- [ ] 前缀路由：`wbg/x` 构造国际版 adapter、`wbcn/x` 构造 CN adapter；未知模型 404 语义不变
-- [ ] **旧前缀读兼容**：请求 `WorkBuddy/x` 归一 `wbcn/x` 正常路由；落盘旧键（白名单/可见性/思考档位）经读归一等价命中；`/v1/models` 不再输出 `WorkBuddy/…`；自定义供应商名 `WorkBuddy`/`wbcn`/`wbg` 被拒
-- [ ] 账号池隔离：两 platform_id 独立文件读写、互不可见
-- [ ] **全链路串池回归（单测级）**：国际版账号的 ensure_token / 签到拒答 / 配额写入 / 目录归档全部落 `platform_workbuddy-global.json`（断言 CN 文件零写入）；CN 反之
-- [ ] **模块级单例分流**：chat 轮换链与 catalog 取用的账号层实例随 profile（mock 断言 ensure_token 收到的池归属正确）
-- [ ] 归属校验：global 域账号进 CN 池被拒并引导；CN 号进国际版池补全失败不入库；**已存在于池内的历史账号不受校验影响（不追溯）**
-- [ ] 导入端点细分：粘贴 `/accounts/import` 双平台可用；`import-local` / `export` 对 `workbuddy-global` 返回 404（未挂载）
-- [ ] 可用性/门控：仅国际版池有号时服务可用；`_available()` 按池判定
-- [ ] 国际版签到（定稿为无）：`supports_checkin=False` → 明确「国际版无签到」文案 + transport 断言零上游调用
-- [ ] CN 全量 `test_wb_*` 绿 + **`test_model_prefix.py` 按 `wbcn` 口径同步改写后绿**（含 legacy `WorkBuddy/x` → `wbcn/x` 归一断言）
-- [ ] （有国际版小号时）实测：登录 / 目录 / 一次 chat 200 / 配额；无 11140
-- [ ] 前端：两 tab（`WorkBuddy CN` / `WorkBuddy`）并存、各自账号与模型区正确、国际版能力位隐藏；format:check + build 绿
-- [ ] **打包冒烟**：`relay.spec` / `relay-onefile.spec` 登记 `relay.platforms.workbuddy.realms` 后，产物起服 + 双前缀 `/v1/models` + 一次 CN chat 烟测（打包产物级验证）
+- [x] profile 单测：CN profile 所有取值与现状字面量逐字一致；国际版取值对齐 panel 证据表（`test_wb_dual_realm.py::test_realm_*`）
+- [x] `_headers` 双 profile 快照用例（UA 三段平台段、Origin、Accept-Language、X-Domain、X-No-Enterprise-Id / X-Enterprise-Id 分支）；CN 断言改为对拼装产物断言（输出与变更前逐字一致）
+- [x] 前缀路由：`wbg/x` 构造国际版 adapter、`wbcn/x` 构造 CN adapter；未知模型 404 语义不变
+- [x] **旧前缀读兼容**：请求 `WorkBuddy/x` 归一 `wbcn/x` 正常路由；落盘旧键（白名单/可见性/思考档位）经读归一等价命中；`/v1/models` 不再输出 `WorkBuddy/…`；自定义供应商名 `WorkBuddy`/`wbcn`/`wbg` 被拒（`name_conflicts` 实测拦截）
+- [x] 账号池隔离：两 platform_id 独立文件读写、互不可见（单测 + 冒烟「池隔离」项）
+- [x] **全链路串池回归（单测级）**：国际版账号的 ensure_token / 签到拒答 / 配额写入 / 目录归档全部落 `platform_workbuddy-global.json`（断言 CN 文件零写入）；CN 反之（`test_billing_writes_own_pool` / `test_catalog_uses_own_pool` / `test_oauth_refresh_writes_own_pool`）
+- [x] **模块级单例分流**：chat 轮换链与 catalog 取用的账号层实例随 profile（chat 单例收进 adapter 实例字段；catalog 按 platform_id 惰性缓存；`test_pool_isolation_two_files` + 冒烟双池目录项）
+- [x] 归属校验：global 域账号进 CN 池被拒并引导；CN 号进国际版池补全失败不入库；**已存在于池内的历史账号不受校验影响（不追溯）**（`allows_domain` 仅作用新登录/新导入两入口）
+- [x] 导入端点细分：粘贴 `/accounts/import` 双平台可用；`import-local` / `export` 对 `workbuddy-global` 未挂载（**实测为 405 而非 404**——FastAPI 路径命中原生 DELETE `/{platform}/accounts/{uid}` 模式、方法不匹配；语义一致：绝无 2xx，前端不显示入口。测试按实测断言，见 `test_import_local_export_not_mounted_for_global`）
+- [x] 可用性/门控：仅国际版池有号时服务可用；`_available()` 按池判定（冒烟「服务门控任一上游可用」+「CN 池空 → wbcn 503 引导」）
+- [x] 国际版签到（定稿为无）：`supports_checkin=False` → 明确「国际版无签到」文案 + transport 断言零上游调用（单测 + 冒烟项）
+- [x] CN 全量 `test_wb_*` 绿 + **`test_model_prefix.py` 按 `wbcn` 口径同步改写后绿**（含 legacy `WorkBuddy/x` → `wbcn/x` 归一断言）；**pytest 567 绿**
+- [~] （有国际版小号时）实测：**目录 200 / 配额 200 / auth·plugin 200 已实测**（探针见同目录 `探针-wb国际版契约.py`）；**登录（relay 设备流）与一次 chat 200 待做**——现有小号 token 为 cockpit console 授权流，chat 被 403/11140 拒（详情见「已知边界」）；设备流登录后按验收链路补测
+- [x] 前端：两 tab（`WorkBuddy CN` / `WorkBuddy`）并存、各自账号与模型区正确、国际版能力位隐藏；format:check + build 绿（vue-tsc 零错 + prettier 全绿 + vite build 通过）
+- [x] **打包冒烟**：`relay.spec` / `relay-onefile.spec` 登记 `relay.platforms.workbuddy.realms` 后，产物起服 + 双前缀 `/v1/models` + 池隔离/503 语义/旧前缀兼容/端点细分/签到拒答（`冒烟-双域注册.py` 源码态 15/15 + **打包产物态 15/15**；CN chat 真对话待解封按规则 5 补测）
 
 ## 实施步骤（commit 序列）
 

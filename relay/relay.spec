@@ -52,6 +52,8 @@ hiddenimports = [
     "relay.custom_openai",
     "relay.platforms.workbuddy.chat",
     "relay.platforms.workbuddy.catalog",
+    # WorkBuddy 双域账号支持（双平台拆分）：realm profile 单点，双保险登记
+    "relay.platforms.workbuddy.realms",
     # WorkBuddy IDE 账号切换（$wbEncrypted 加解密 + Electron 密钥派生）：routes 静态导入，双保险
     "relay.platforms.workbuddy.ide_switch",
     # WorkBuddy 账号多方式导入（粘贴 Token/JSON + 本机登录态）：routes 静态导入，双保险
