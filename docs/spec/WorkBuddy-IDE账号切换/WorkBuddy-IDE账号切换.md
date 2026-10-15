@@ -1,6 +1,6 @@
 # WorkBuddy IDE 账号切换
 
-> **状态**：已实现（2026-10-11；真机只读探针 4 项 PASS——密钥派生/keyId 一致/解密/round-trip；用户验收通过：真机切号正常）
+> **状态**：已实现（2026-10-11；真机只读探针 4 项 PASS——密钥派生/keyId 一致/解密/round-trip；用户验收通过：真机切号正常）；**2026-10-15 二期扩国际版**（见文末「二期增补」）
 > **优先级**：核心
 > **来源**：用户需求「像 cockpit tools 一样切换 WorkBuddy 登录的账号」；承接「WorkBuddy多账号登录与签到」的账号池（该需求 UI 文案「添加账号并用于 IDE 切换」的预留意图落地）
 > **隐私声明**：本文档不含任何真实账号、凭证、token；keyId 为密钥指纹（sha256 前 16 hex），非密钥本身。
@@ -155,3 +155,26 @@ docs/spec/WorkBuddy-IDE账号切换/探针-IDE切换只读校验.py   # 真机�
 - [x] 只读探针 4 项 PASS（`探针-IDE切换只读校验.py`）：密钥派生 → keyId 一致 → 白名单字段解密（JWT 非空）→ encode/decode round-trip 全等
 - [x] 打包冒烟：`py -3.13 build_sidecar.py` onefile 产物 ide-state 200（cryptography 随包跟进，hiddenimports 双保险登记生效）
 - [x] 手动验收（2026-10-11 用户确认）：真机「切到此号」→ 客户端自动关闭/重启并登录目标账号正常
+
+
+## 二期增补：国际版客户端切号（2026-10-15，承接「WorkBuddy双域账号支持」）
+
+**背景**：双域一期把国际版（`workbuddy-global`）定为「CN 生态专属三能力不做」；二期用户拍板补齐——本机实测国际版客户端（WorkBuddy AI 5.7.6，`D:\Programs\WorkBuddyAI\WorkBuddyAI.exe`）满足全部移植前提。
+
+**实测事实（只读）**：
+- 登录态文件 `%LOCALAPPDATA%\CodeBuddyExtension\Data\Publicuth\workbuddy-desktop-ai.info`——与 CN `workbuddy-desktop.info` **同目录并列**；结构同构（`account`/`auth`/`accounts`/`allAccounts` 四根 + 同字段级 `$wbEncrypted` envelope，键名逐一对上）
+- exe 内含同名 Electron binding `electron_browser_workbuddy_storage` → 密钥派生脚本（`_KEY_SCRIPT`）原样可用
+- exe 装 D 盘（非默认候选）：候选路径补 `D:\Programs\WorkBuddyAI` + **winreg 注册表兜底发现**（HKCU/HKLM Uninstall 按 DisplayName 区分 CN「WorkBuddy」/ 国际「WorkBuddy AI」，防误命中）
+
+**实现（`realms.py` 字段 + `ide_switch.py` profile 化）**：
+- `WbRealm` 新字段：`auth_file_name` / `client_image_name`（`WorkBuddyAI.exe`）/ `exe_env_override`（`RELAY_WB_AI_IDE_EXE`）/ `exe_candidates`
+- 全公开函数加 `profile` 参数（默认 `REALM_CN` 零回归）：`resolve_client_exe` / `auth_file_path` / `read_ide_state_sync` / `is_client_running` / `close_client` / `start_client` / `switch_account` / `ide_state`；新增 `_registry_discovered_exe` 注册表兜底
+- **密钥缓存按 platform_id 分桶**（两客户端各自派生、keyId 不同，绝不跨域复用）；`invalidate_key(platform_id)` 支持单域失效
+- 端点泛化：`GET/POST /{platform}/ide-state`、`/{platform}/accounts/{uid}/ide-switch`（`realm_for` 判 404）；CN 旧路径保留别名
+
+**验证**：
+- keyless 单测：profile 字段 / 双域路径 / 国际版 state 读取 / 密钥分桶隔离 / env 覆盖分派（`test_wb_ide_switch.py` 新增 6 例）
+- 打包产物冒烟实证：`ide-state`（global）200；`import-local`（global）**真读到本机国际账号**（uid=`34b20749…`、domain=`www.workbuddy.ai`）→ 密钥派生 + 解密链路端到端打通
+- 切号真机验收待用户执行（与 CN 同流程：关闭→写入→重启）
+
+**边界**：国际版客户端多开按 `WorkBuddyAI.exe` 映像名一并关闭（同 CN 语义）；两客户端登录态互不干扰（不同文件）

@@ -265,14 +265,29 @@ def main() -> int:
         ok = code == 200 and json.loads(body).get("result", {}).get("success") is False
         check("国际版签到拒答", ok and "国际版无签到" in body, f"code={code}")
 
-        # 8) 端点细分：国际版 import-local/export 未挂载（4xx）；粘贴 import 双平台
-        c1, _ = _req(port, key,
-                     "/v1/platforms/workbuddy-global/accounts/import-local", {})
-        c2, _ = _req(port, key,
-                     "/v1/platforms/workbuddy-global/accounts/export",
-                     {"uids": [], "format": "cockpit"})
-        check("国际版 CN 专用端点未挂载", c1 in (404, 405) and c2 in (404, 405),
-              f"{c1}/{c2}")
+        # 8) 客户端集成端点泛化（二期 2026-10-15）：import-local / export / ide-state
+        #    对国际版已挂载（本环境无国际版登录态/账号 → 业务错误映射 409/400，非 404/405）
+        c1, b1 = _req(port, key,
+                      "/v1/platforms/workbuddy-global/accounts/import-local", {})
+        c2, b2 = _req(port, key,
+                      "/v1/platforms/workbuddy-global/accounts/export",
+                      {"uids": [], "format": "cockpit"})
+        c3, b3i = _req(port, key, "/v1/platforms/workbuddy-global/ide-state")
+        # import-local：200 = 本机真有国际版登录态（本机 WorkBuddyAI 已装时，含
+        # 密钥派生+解密端到端）；409 = 无登录态机器。两者都是正确业务语义。
+        # export：200 = 池非空；400 = 空池。均合法。断言重点：绝不 404/405（已挂载）。
+        check("国际版客户端集成端点已挂载（import-local 200/409 · export 200/400 · ide-state 200）",
+              c1 in (200, 409) and c2 in (200, 400) and c3 == 200,
+              f"import-local={c1} export={c2} ide-state={c3}"
+              + ("（本机读到国际版登录态，密钥派生+解密链通）" if c1 == 200 else ""))
+        if c1 == 200:
+            # import-local 读到的应是国际版域账号（归属校验 + 真实客户端链路实证）
+            import json as _json
+            acc = (_json.loads(b1).get("accounts") or [{}])[0]
+            dom = str(acc.get("domain") or "")
+            check("国际版本机导入读到的域为国际族",
+                  dom.endswith(("workbuddy.ai", "codebuddy.ai")) or dom == "",
+                  f"domain={dom} uid={str(acc.get('uid'))[:8]}…")
         c3, b3 = _req(port, key, "/v1/platforms/workbuddy-global/accounts/import",
                       {"text": '[{"access_token": "t", "uid": "u_g2", '
                                '"domain": "www.workbuddy.ai"}]'})

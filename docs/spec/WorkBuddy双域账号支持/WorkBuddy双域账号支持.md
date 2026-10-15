@@ -32,7 +32,7 @@
 | 账号池文件 | `platform_workbuddy.json`（不动） | `platform_workbuddy-global.json`（store 按 platform_id 自动隔离） |
 | 签到 | 有 | **无**（定稿：用户 2026-10-14 确认国际版无签到功能；panel D4 门控同证） |
 | OAuth 登录 / 粘贴 Token·JSON 导入 / 配额 / 删除 | 有 | 有（粘贴导入走泛化端点） |
-| 本机导入 / 导出 / IDE 切号 | 有 | **无**（CN 生态专属：读 CN 客户端登录态 / cockpit·9router 格式 / CN 客户端切号；端点路径保持 CN 专用，前端不显示入口） |
+| 本机导入 / 导出 / IDE 切号 | 有 | **有**（2026-10-15 二期补齐：本机实测 WorkBuddyAI 客户端登录态 `workbuddy-desktop-ai.info` 与 CN 同构同族、exe 同名 binding 派生密钥可用；导出 id 前缀 `codebuddy_`、9router provider `codebuddy-intl`；端点泛化 `/{platform}/...`） |
 
 ### 2. realm profile（数据化单点）
 
@@ -117,7 +117,7 @@
 ### 7. 前端
 
 - `Providers.vue`：现有 tab 文案改 `WorkBuddy CN`，新增第二个 tab `WorkBuddy`（复用 `WorkBuddyTab`，传 `platform` prop）；后端 `PlatformInfo.display_name` 同步（CN `WorkBuddy CN` / 国际版 `WorkBuddy`；现 `WorkBuddy (CodeBuddy CN)` 退役）
-- `WorkBuddyTab.vue`：所有 API 调用带 platform；**模型区前缀过滤按 platform**（CN `wbcn/` / 国际版 `wbg/`；现 `WB_PREFIX = 'WorkBuddy/'` 硬编码参数化）；按能力位隐藏——国际版隐藏：签到/连签（`supports_checkin=False`）、IDE 切号、导出、本机导入（CN 生态专属）；保留：账号卡片（昵称/邮箱/配额）、添加账号（OAuth + Token/JSON 粘贴）、删除、配额刷新、模型区
+- `WorkBuddyTab.vue`：所有 API 调用带 platform；**模型区前缀过滤按 platform**（CN `wbcn/` / 国际版 `wbg/`）；能力位隐藏——国际版仅隐藏签到/连签（`supports_checkin=False`）；**二期（2026-10-15）**：IDE 切号 / 导出 / 本机导入对国际版放开（`cnOnly` 已移除，文案按 displayName 动态）
 - `stores/workbuddy.ts`：**方案落死为「按 platform 工厂化」**（`useWorkbuddyStoreFor(platform)`：内部 `defineStore('wb-'+platform)` 惰性注册 + 模块级 Map 缓存实例保证幂等——Pinia 同 id 重复 `defineStore` 本身安全，缓存的目的是避免每次调用新建 Map 查找开销）；不采用「单 store 加 platform 维度」（两池状态天然独立，工厂化后组件各自持有，逻辑更直白）
 - `api.ts`：`wb*` 函数加 `platform` 参数（默认 `workbuddy`——现有调用点零改动）；`import-local` / `export` / `ide-*` 函数**不加 platform 参数**（CN 专用路径）
 
@@ -127,7 +127,7 @@
 - **国际版复制一套模块**：否决——双域差异全部集中在 profile（约一屏数据），复制代码违反单点原则
 - **单 tab 内分节展示**：否决——用户拍板拆 tab；两域账号池/模型前缀本就该是独立命名空间
 - **把 codebuddy 域（codebuddy.cn / codebuddy.ai）纳入本需求**：否决——codebuddy 是并列产品线（IDE），若反代属**第三、四个平台**、另立项（前缀 `cbcn/`+`cbai/` 可参考 9router 双 provider 形态）；本方案只做 WorkBuddy 产品线（`workbuddy` + `workbuddy-global`）
-- **国际版后台挂载 import-local/export 端点 + handler 404 兜底**：否决——路径保持 CN 专用（现硬编码形态），国际版天然无此端点；比「泛化后逐 handler 判断」少一层防御代码
+- ~~**国际版后台挂载 import-local/export 端点 + handler 404 兜底**：否决——路径保持 CN 专用（现硬编码形态），国际版天然无此端点~~ **（2026-10-15 二期推翻）**：国际版客户端（WorkBuddyAI 5.7.6）本机实测已安装，登录态文件/加密族/exe binding 与 CN 同构 → 客户端集成端点全部泛化 `/{platform}/...`（realm_for 判 404），CN 旧路径保留别名；「CN 生态专属」前提不再成立
 
 ### 9. 三需求同批协调（2026-10-14 追加）
 
@@ -144,7 +144,7 @@
 ## 已知边界
 
 - **国际版签到（定稿）**：**无签到功能**（用户 2026-10-14 确认；panel 同证——`scheduler.go:436` D4 门控「realm=global 账号无签到体系，直接跳过（不发起任何上游调用，避免风控）」+ `pool/entry.go:94`「global 域账号无签到体系，恒为 false」）。本仓库实现：`supports_checkin=False` → 签到端点返回明确「国际版无签到」文案、不发上游；前端隐藏签到入口。备注：panel 对国际版另有**对话活跃上报**（`/v2/report`，点亮连登/每日积分）——属"任务/连登"类功能、非签到，超本期范围（本仓库不实现）
-- 国际版 IDE 切号 / 导出 / 本机导入**本期不做**（CN 生态专属——读 CN 客户端登录态 / cockpit·9router 格式 / CN 客户端切号；如未来要做需先探针国际版客户端形态）
+- ~~国际版 IDE 切号 / 导出 / 本机导入本期不做~~ **（2026-10-15 二期补齐）**：本机实测 WorkBuddyAI 5.7.6——① 登录态 `workbuddy-desktop-ai.info` 与 CN `workbuddy-desktop.info` 同目录并列、`$wbEncrypted` 结构同构（account/auth/accounts/allAccounts 四根 + 字段级 envelope）；② exe 含同名 `electron_browser_workbuddy_storage` binding，密钥派生脚本原样可用（打包产物冒烟实证：import-local 真读到国际账号 uid/domain）；③ exe 装 D 盘（`D:\Programs\WorkBuddyAI`），候选路径 + winreg 注册表兜底发现；④ 导出对齐 cockpit CodeBuddy 模块格式（id=`codebuddy_`+md5(小写 uid)，用户实物 `codebuddy_461e541f…` 逐字吻合）、9router provider `codebuddy-intl`
 - **国际版 OAuth platform 参数（2026-10-14 实测校准）**：`workbuddy` 与 `CLI` 在国际版 base `/v2/plugin/auth/state` 均返回 code=0 + 有效 state → **沿用 `workbuddy`**（profile 单字段可改，留作日后校准点）
 - **目录/配额路径候选序（2026-10-14 实测校准）**：`/v3/config` 200（27 模型）；`/v2/enterprises/personal/models` 200（18 模型）而 `/console/...` 500 → `/v2` 家族优先回归确认；billing `/billing/meter/get-user-resource`（无 /v2）200 且带回 `Accounts[]`（`/v2` 亦可作回退）；`get-user-resource-summary` 在国际版 base 404（不进候选）；`/v2/plugin/accounts` 存在（200）
 - **chat 出站形状（2026-10-14 实测）**：国际版 `/v2/chat/completions` 首条消息非 system → **400/11128**「first message is not system prompt」→ `ensure_system_first` 前置中性 system（panel `ensureConsoleSystem` 同款）；请求 body 形状（类型化块）与三种头族（panel 全量 / OmniRoute SaaS / 9router intl）在该小号 token 下均被 **403/11140**「request illegal」（displayMsg=安全审核）拒绝——**与头族形状无关**（账号健康复验 200，未封）；判定为该 token 的授权会话类型（console 授权流，JWT `azp: console`）不被 chat 网关接受，chat 需 relay 设备授权流（platform=workbuddy）签发的 token；**待设备流登录后用 relay 链路补测 chat 200**（验收项「无 11140」的正式判定点）

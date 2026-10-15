@@ -1,6 +1,6 @@
 # WorkBuddy 账号导出
 
-> **状态**：已实现（2026-10-12；真机只读重建与 9router 官方导出 10 段逐字节对拍一致；用户验收通过：导出功能正常）
+> **状态**：已实现（2026-10-12；真机只读重建与 9router 官方导出 10 段逐字节对拍一致；用户验收通过：导出功能正常）；**2026-10-15 二期扩国际版**（见文末「二期增补」）
 > **优先级**：核心
 > **来源**：用户需求「有了导入，是不是也应该有导出功能」；由 [WorkBuddy账号多方式导入](../WorkBuddy账号多方式导入/) 自然延伸（导入/导出一对）
 > **隐私声明**：本文档不含任何真实账号、凭证、token。
@@ -133,3 +133,26 @@ docs/spec/WorkBuddy账号导出/探针-9router只读读取.py  # 真机只读探
 - [x] 打包登记：两个 spec hiddenimports 加 `relay.platforms.workbuddy.exports`；onefile 产物冒烟
 - [x] 手动验收（2026-10-12 用户确认）：导出功能正常（弹窗勾选 + 系统另存为；cockpit 兼容格式与 9router 完整备份导出）
 - [ ] 手动验收（可选，待用户）：备份文件在 cockpit-tools / 本应用回导、9router 恢复的成功落地（恢复为 9router 整库覆盖语义，用户按需自行执行）
+
+
+## 二期增补：国际版导出（2026-10-15，承接「WorkBuddy双域账号支持」）
+
+**背景**：双域一期导出为 CN 专属；二期补齐国际版（`workbuddy-global`），格式对齐 cockpit-tools 的 **CodeBuddy 模块**（其国际版账号归此模块存储与互导）。
+
+**实测/考证事实**：
+- cockpit 国际版导出 `codebuddy_accounts_<日期>.json`（纯数组）；id 规则 `= "codebuddy_" + md5(小写 uid)`——与用户实物逐字吻合（`34b20749-f116-… → codebuddy_461e541fd6e85cd9bad8987f4f100cb7`）
+- cockpit `import_from_json` 三级降级：完整 `CodebuddyAccount` 形状走 serde 直存（保真）；宽松路径只认 `access_token`（单对象/数组/accounts 包裹都吃）——我们的导出字段为账号池可承载子集，兼容
+- 9router 侧对应 provider 名 `codebuddy-intl`（其 registry 与 chat 执行器均有该 provider；CN 为 `codebuddy-cn`）
+
+**实现（`exports.py` profile 化）**：
+- `build_cockpit_export(profile=)`：id 前缀（`workbuddy_` / `codebuddy_`）、文件名基（`workbuddy_accounts_` / `codebuddy_accounts_`）
+- `merge_selected` / `build_nine_router_fragment` / `_new_connection`：provider 名按 profile（`codebuddy-cn` / `codebuddy-intl`）
+- `export_selected(profile=)`：账号池寻址 `profile.platform_id`
+- 端点泛化：`POST /{platform}/accounts/export`（CN 旧路径保留别名）；前端导出按钮对国际版放开
+
+**验证**：
+- keyless 单测：国际版 id 实物向量（`codebuddy_461e541f…`）/ 文件名 / provider 名 / 双池隔离（`test_wb_exports.py` 新增 4 例）
+- 打包产物冒烟：国际版 export 200（空池前为 400 业务映射）
+- 手动验收待用户：导出文件 → cockpit-tools（CodeBuddy 模块）导入成功
+
+**边界**：两域导出文件互不混用（id 前缀/文件名/provider 名三重区分）；9router 合并只动对应 provider 的连接，另一域连接原样保留
