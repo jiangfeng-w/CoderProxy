@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""glm-5.3-flash「关思考」有效性判别实验（直连 WB 上游，小号只读，固定 4 请求）。
+"""【已封存·禁止运行 2026-10-16】glm-5.3-flash「关思考」有效性判别实验（直连 WB 上游，小号只读，固定 4 请求）。
 
 背景（2026-10-11 用户实测）：软件里选「关」→ 出站 reasoning_effort:"none"
 （非 deepseek 的 B4 关形状），客户端仍看到思考输出。已有线索：
@@ -25,6 +25,14 @@ reasoning_tokens 常缺省，见 探针-wb-thinking-enabled-无档位.py P0）�
 用法：py -3.13 "docs/spec/思考强度透传档位/探针-wb-glm53flash-关思考.py"
 """
 from __future__ import annotations
+
+# ── 【封存护栏 2026-10-16】禁止运行：本脚本绕过伪装层直连上游（违反 AGENTS.md 硬性规则 6）──
+raise SystemExit(
+    "[封存禁用 2026-10-16] 本脚本直连上游，已被禁止运行（AGENTS.md 硬性规则 6）。\n"
+    "需要上游证据：改用「经本地 relay 回放」或复用伪装层出站"
+    "（范式见 docs/spec/WorkBuddy账号多方式导入/探针-账号端点契约.py）。\n"
+    "事故与封存说明：docs/上游风控与客户端兼容.md §5。"
+)
 
 import asyncio
 import hashlib

@@ -19,8 +19,8 @@ CoderProxy 的开发文档**全部在 `docs/`**。新会话 / 新接手者的入
   `python -m pip install --target <本地目录> 依赖名`（或自建 venv），跑脚本时把该目录加进 `sys.path`。
 - **直连**：本机 httpx 默认会读系统代理，把 `lc.yinhaiyun.com` 走隧道 → **连不上**。所有请求必须 **`trust_env=False`**（详见总计划 §3.4 #3）。
 - **打包 sidecar**：本机 `py` 是 Python 3.13（带 pip、会读 PYTHONPATH），`python` 是 3.12 Codex shim（无 pip / 无 PyInstaller / 不读 PYTHONPATH）。**打 sidecar 必须 `py -3.13` + `PYTHONPATH=relay/_deps` 跑 `build_sidecar.py`**，不要用 `python` 那个 shim（详见 `开发规则.md`「构建与打包」）。
-- **登录**：本机有银海通 IM 时走 `:13631/getuid` 静默秒登；否则浏览器 PKCE-SM3。聊天用**模型自带 `llm-` key**（非 oauth token）；目录端点为 `POST /ai/continue/ide/list-assistants?appId=personal`（细节见总计划 §3.4，可跑脚本见 `spec/M1-登录与网关探针/探针-登录与伪装冒烟.md`）。
-- **验证用小号**：避免触发牛码风控封号（总计划 §10 / AGENTS 硬性规则 5）。
+- **登录**：本机有银海通 IM 时走 `:13631/getuid` 静默秒登；否则浏览器 PKCE-SM3。聊天用**模型自带 `llm-` key**（非 oauth token）；目录端点为 `POST /ai/continue/ide/list-assistants?appId=personal`（细节见总计划 §3.4；M1 复现脚本为直连上游、**已封存**——见 `上游风控与客户端兼容.md` §5）。
+- **验证用小号 + 上游请求必须经伪装层**：避免触发风控封号（总计划 §10 / AGENTS 硬性规则 5、6）；**严禁绕过伪装层直连上游（含探针/复现/临时脚本）**——2026-10-16 已有封号事故，见 `上游风控与客户端兼容.md` §5。
 - **写盘限制**：目标 `D:\Code\own-project\CoderProxy` 常不在 IDE 工作区，改文件经工作区暂存再 copy（见 `开发规则.md`）。
 
 ## 下一步

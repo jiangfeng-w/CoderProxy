@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""bug4 实证：responses 并行工具调用 → 出站消息顺序断裂 → 上游 11148（只读小号，默认 2 请求）。
+"""【已封存·禁止运行 2026-10-16】bug4 实证：responses 并行工具调用 → 出站消息顺序断裂 → 上游 11148（只读小号，默认 2 请求）。
 
 用法：py -3.13 "docs/spec/WorkBuddy聊天反代与多平台聚合/复现-wb工具配对断裂.py" [--case-c]
 
@@ -17,6 +17,14 @@
 安全：只读小号账号池；不打印 token；默认 2 请求，`--case-c` 时 3 请求。
 """
 from __future__ import annotations
+
+# ── 【封存护栏 2026-10-16】禁止运行：本脚本绕过伪装层直连上游（违反 AGENTS.md 硬性规则 6）──
+raise SystemExit(
+    "[封存禁用 2026-10-16] 本脚本直连上游，已被禁止运行（AGENTS.md 硬性规则 6）。\n"
+    "需要上游证据：改用「经本地 relay 回放」或复用伪装层出站"
+    "（范式见 docs/spec/WorkBuddy账号多方式导入/探针-账号端点契约.py）。\n"
+    "事故与封存说明：docs/上游风控与客户端兼容.md §5。"
+)
 
 import asyncio
 import hashlib

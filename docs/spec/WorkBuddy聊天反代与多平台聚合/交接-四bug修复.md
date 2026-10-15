@@ -236,7 +236,7 @@ disabled 删档 / 非 deepseek 零改动」。
 ## 6. 本会话新增、待提交的文件
 
 - `docs/spec/WorkBuddy聊天反代与多平台聚合/交接-四bug修复.md`（本文件）
-- `docs/spec/WorkBuddy聊天反代与多平台聚合/探针-wb思考形状.py`（BUG-3 探针，`--direct` / `--via-relay`）
+- `docs/spec/WorkBuddy聊天反代与多平台聚合/探针-wb思考形状.py`（BUG-3 探针，`--direct` **已封存禁用 2026-10-16** / `--via-relay` 可用）
 - `docs/spec/WorkBuddy聊天反代与多平台聚合/复现-wb工具配对断裂.py`（BUG-4 A/B 复现，2 请求）
 - 另有临时脚本（不在仓库）：`%TEMP%\cp-echo-capture.py`、`%TEMP%\cp-think-matrix.py`（可删）。
 

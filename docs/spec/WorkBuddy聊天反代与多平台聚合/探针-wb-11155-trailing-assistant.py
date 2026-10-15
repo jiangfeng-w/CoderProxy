@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""WorkBuddy 11155 触发条件判别实验（直连上游，小号只读，固定 6 请求）。
+"""【已封存·禁止运行 2026-10-16】WorkBuddy 11155 触发条件判别实验（直连上游，小号只读，固定 6 请求）。
 
 判定问题（2026-10-11 P2 挂起项）：上游 11155「reasoning content from the previous
 turn must be passed back in thinking mode」的真实触发条件是什么——两个候选口径：
@@ -28,6 +28,14 @@ turn must be passed back in thinking mode」的真实触发条件是什么——
 用法：py -3.13 "docs/spec/WorkBuddy聊天反代与多平台聚合/探针-wb-11155-trailing-assistant.py"
 """
 from __future__ import annotations
+
+# ── 【封存护栏 2026-10-16】禁止运行：本脚本绕过伪装层直连上游（违反 AGENTS.md 硬性规则 6）──
+raise SystemExit(
+    "[封存禁用 2026-10-16] 本脚本直连上游，已被禁止运行（AGENTS.md 硬性规则 6）。\n"
+    "需要上游证据：改用「经本地 relay 回放」或复用伪装层出站"
+    "（范式见 docs/spec/WorkBuddy账号多方式导入/探针-账号端点契约.py）。\n"
+    "事故与封存说明：docs/上游风控与客户端兼容.md §5。"
+)
 
 import asyncio
 import hashlib

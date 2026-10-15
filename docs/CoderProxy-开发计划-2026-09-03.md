@@ -72,7 +72,7 @@
 **M2 落地必须先搞定的三个现实坑（探针踩到）：**
 1. **目录端点**：真正的可用端点是 `POST /ai/continue/ide/list-assistants?appId=personal`（返回**裸数组**）；`/ide/list-organizations`、`/ide/list-assistants`、`/ai/continue/ide/list-assistants(GET)` 实测 404/418。catalog.py 的候选顺序需上调 POST appId 端点。
 2. **chat 鉴权**：走**模型自带 `apiKey`（`llm-…`）**，不是 oauth 会话 token；`Authorization: Bearer <llm-…>` + `api-key: <llm-…>`。
-3. **直连**：本机 httpx 默认读系统代理会把 `lc.yinhaiyun.com` 走隧道失败 → **必须 `trust_env=False`**。
+3. **直连**：本机 httpx 默认读系统代理会把 `lc.yinhaiyun.com` 走隧道失败 → **必须 `trust_env=False`**。⚠ 2026-10-16 起配套**硬性规则 6**：一切上游请求必须经伪装层、严禁直连（含探针/临时脚本）——见 `上游风控与客户端兼容.md` §5。
 
 ## 4. 总体架构
 

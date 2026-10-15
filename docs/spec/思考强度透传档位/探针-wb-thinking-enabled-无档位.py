@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""思考强度透传档位 §5-6 探针：deepseek 系「enabled 无档位」上游行为观察（固定 2 请求）。
+"""【已封存·禁止运行 2026-10-16】思考强度透传档位 §5-6 探针：deepseek 系「enabled 无档位」上游行为观察（固定 2 请求）。
 
 背景（spec 思考强度透传档位 §2.2）：形状归一透传后，agent「只表态开、未给档」
 （如 claude 入站 thinking=true 不带 budget / messages 入站仅 thinking 开关）→
@@ -21,6 +21,14 @@ reasoning_effort**（缺档不兜底，设计如此）。旧版此处会补目�
 用法：py -3.13 "docs/spec/思考强度透传档位/探针-wb-thinking-enabled-无档位.py"
 """
 from __future__ import annotations
+
+# ── 【封存护栏 2026-10-16】禁止运行：本脚本绕过伪装层直连上游（违反 AGENTS.md 硬性规则 6）──
+raise SystemExit(
+    "[封存禁用 2026-10-16] 本脚本直连上游，已被禁止运行（AGENTS.md 硬性规则 6）。\n"
+    "需要上游证据：改用「经本地 relay 回放」或复用伪装层出站"
+    "（范式见 docs/spec/WorkBuddy账号多方式导入/探针-账号端点契约.py）。\n"
+    "事故与封存说明：docs/上游风控与客户端兼容.md §5。"
+)
 
 import asyncio
 import hashlib

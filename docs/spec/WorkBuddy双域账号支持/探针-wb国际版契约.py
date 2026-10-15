@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""WorkBuddy 国际版契约只读探针（双域账号支持 profile 取值实测校准；小号只读）。
+"""【已封存·禁止运行 2026-10-16】WorkBuddy 国际版契约只读探针（双域账号支持 profile 取值实测校准；小号只读）。
 
 用途：用国际版小号（cockpit-tools 导出 JSON）实测校准 `realms.py` 的 profile 取值：
 - P1  base 探测：www.workbuddy.ai 的 /v3/config 与 /v2/plugin/accounts 可达性
@@ -13,6 +13,14 @@
 运行：py -3.13 "docs/spec/WorkBuddy双域账号支持/探针-wb国际版契约.py" [导出JSON路径]
 """
 from __future__ import annotations
+
+# ── 【封存护栏 2026-10-16】禁止运行：本脚本绕过伪装层直连上游（违反 AGENTS.md 硬性规则 6）──
+raise SystemExit(
+    "[封存禁用 2026-10-16] 本脚本直连上游，已被禁止运行（AGENTS.md 硬性规则 6）。\n"
+    "需要上游证据：改用「经本地 relay 回放」或复用伪装层出站"
+    "（范式见 docs/spec/WorkBuddy账号多方式导入/探针-账号端点契约.py）。\n"
+    "事故与封存说明：docs/上游风控与客户端兼容.md §5。"
+)
 
 import asyncio
 import hashlib

@@ -171,6 +171,7 @@
 - [x] 国际版签到（定稿为无）：`supports_checkin=False` → 明确「国际版无签到」文案 + transport 断言零上游调用（单测 + 冒烟项）
 - [x] CN 全量 `test_wb_*` 绿 + **`test_model_prefix.py` 按 `wbcn` 口径同步改写后绿**（含 legacy `WorkBuddy/x` → `wbcn/x` 归一断言）；**pytest 567 绿**
 - [x] （有国际版小号时）实测（2026-10-15 全部闭环）：目录 200 / 配额 200 / auth·plugin 200（探针）；**登录（本机客户端导入 + 设备流）与 chat 已实测**——用户真实对话 **46+ 轮成功**（含 35 工具 / thinking max / 三协议 / Claude Code·ZCode 等真 agent），零功能性 error；此前 403/11140 系 console 授权流 token 限制，非链路问题
+  - ⚠ **2026-10-16 修正注记**：上述「探针」中的 `探针-wb国际版契约.py` / `探针-wb国际版chat形状.py` 系**绕过 relay 直连上游**（含 UA/头族 A/B 风控对照），**两个脚本已封存禁用**（违反 AGENTS.md 硬性规则 6）；同期另一国际版账号被封（疑与此相关），本 spec 结论保留、复测方法改经 relay/伪装层——见 [`docs/上游风控与客户端兼容.md`](../../上游风控与客户端兼容.md) §5
 - [x] **二期验收（2026-10-15，用户实测）**：A 切号正常 / B cockpit-tools 导入成功 / C 9router 导入成功 / D 真 agent（ZCode）跨轮多工具对话正常 / E 官方客户端内对话正常；F 限额边界知情不测；脚本层四项全过（思考档位 none=0·low=37·max=43 / 工具跨轮 3 轮 / 双池并发隔离（附 CN 6004 限流透传实录）/ 协议三连）
 - [x] 前端：两 tab（`WorkBuddy CN` / `WorkBuddy`）并存、各自账号与模型区正确、国际版能力位隐藏；format:check + build 绿（vue-tsc 零错 + prettier 全绿 + vite build 通过）
 - [x] **打包冒烟**：`relay.spec` / `relay-onefile.spec` 登记 `relay.platforms.workbuddy.realms` 后，产物起服 + 双前缀 `/v1/models` + 池隔离/503 语义/旧前缀兼容/端点细分/签到拒答（`冒烟-双域注册.py` 源码态 15/15 + **打包产物态 15/15**；CN chat 真对话待解封按规则 5 补测）

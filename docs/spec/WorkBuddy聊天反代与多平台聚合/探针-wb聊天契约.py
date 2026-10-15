@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""WorkBuddy 聊天契约探针（③期细化定稿用；小号只读，不刷账号、不改 relay 代码）。
+"""【已封存·禁止运行 2026-10-16】WorkBuddy 聊天契约探针（③期细化定稿用；小号只读，不刷账号、不改 relay 代码）。
 
 用途：实测 chat 出站契约，回填「WorkBuddy聊天反代与多平台聚合」§5 待定项：
 - P0/P0b  模型目录端点（/v3/config 与 /console/enterprises/personal/models）可用性
@@ -14,6 +14,14 @@
 运行：py -3.13 "docs/spec/WorkBuddy聊天反代与多平台聚合/探针-wb聊天契约.py"
 """
 from __future__ import annotations
+
+# ── 【封存护栏 2026-10-16】禁止运行：本脚本绕过伪装层直连上游（违反 AGENTS.md 硬性规则 6）──
+raise SystemExit(
+    "[封存禁用 2026-10-16] 本脚本直连上游，已被禁止运行（AGENTS.md 硬性规则 6）。\n"
+    "需要上游证据：改用「经本地 relay 回放」或复用伪装层出站"
+    "（范式见 docs/spec/WorkBuddy账号多方式导入/探针-账号端点契约.py）。\n"
+    "事故与封存说明：docs/上游风控与客户端兼容.md §5。"
+)
 
 import asyncio
 import hashlib

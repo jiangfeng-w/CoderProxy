@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """WorkBuddy 思考字段形状探针（三协议入站 → relay → 真上游，小号只读，最小请求数）。
 
+⚠ 2026-10-16：`--direct` 直连分支**已封存禁用**（违反 AGENTS.md 硬性规则 6）；`--via-relay` 保留可用。
+
 用途：定位「agent 设置的思考强度只有 /v1/responses 生效」类问题（2026-10-09 用户实测），
 并作为修复后的回归证据。对每个形状记录：HTTP 状态 / usage.reasoning_tokens /
 响应里 reasoning_content 字符数。
@@ -216,7 +218,11 @@ def _absorb(obj: dict, out: dict) -> None:
 
 async def run_direct() -> int:
     acct = load_account()
-    print(f"[direct] uid={str(acct.get('uid'))[:8]}… model={MODEL_BARE}")
+    # ── 【封存护栏 2026-10-16】--direct 绕过伪装层直连上游（违反 AGENTS.md 硬性规则 6）──
+    # 以下直连逻辑保留仅作历史记录，永不执行（护栏先行 raise）。
+    raise SystemExit(
+        "[封存禁用 2026-10-16] --direct 直连分支已禁用（AGENTS.md 硬性规则 6）。\n"
+        "请使用 --via-relay（经本地 relay 回放）；事故说明见 docs/上游风控与客户端兼容.md §5。")
     results = []
     async with httpx.AsyncClient(trust_env=False) as client:
         for name, _proto, extra in SHAPES:
@@ -317,11 +323,16 @@ async def run_via_relay() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--direct", action="store_true", help="直连上游形状对照")
+    ap.add_argument("--direct", action="store_true",
+                    help="【已封存禁用 2026-10-16】直连上游形状对照（违反硬性规则 6，禁止使用）")
     ap.add_argument("--via-relay", action="store_true", help="经 relay 三协议对照（默认）")
     args = ap.parse_args()
     if args.direct:
-        return asyncio.run(run_direct())
+        # ── 【封存护栏 2026-10-16】--direct 绕过伪装层直连上游（违反 AGENTS.md 硬性规则 6）──
+        print("[封存禁用 2026-10-16] --direct 直连分支已禁用（AGENTS.md 硬性规则 6）。\n"
+              "请使用 --via-relay（经本地 relay 回放）；事故说明见 "
+              "docs/上游风控与客户端兼容.md §5。")
+        return 2
     return asyncio.run(run_via_relay())
 
 
