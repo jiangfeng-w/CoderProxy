@@ -44,11 +44,12 @@ from pathlib import Path
 
 from relay.platforms import store
 from relay.platforms.workbuddy.imports import decode_jwt_claims
+from relay.platforms.workbuddy.realms import REALM_CN, WbRealm
 
 logger = logging.getLogger(__name__)
 
-PLATFORM_ID = "workbuddy"
-NINE_ROUTER_PROVIDER = "codebuddy-cn"
+PLATFORM_ID = REALM_CN.platform_id
+NINE_ROUTER_PROVIDER = REALM_CN.nine_router_provider
 
 # 9router 导出的十个段（exportDb 同构；usage/requestDetails 不在其导出口径内）
 _SECTION_TABLES = ("providerConnections", "providerNodes", "proxyPools", "combos")
@@ -69,20 +70,26 @@ class ExportAccountNotFound(LookupError):
 # ── cockpit 兼容格式 ──
 
 
-def build_cockpit_export(accounts: list[dict], now_s: int | None = None) -> list[dict]:
+def build_cockpit_export(accounts: list[dict], now_s: int | None = None,
+                         profile: WbRealm = REALM_CN) -> list[dict]:
     """账号池行 → cockpit-tools 导出形态（纯数组；缺失字段不输出）。
 
     字段口径对齐用户实物（`workbuddy_accounts_2026-10-11.json`，19 字段）中账号池
     可承载的部分：id/email/uid/nickname/access_token/refresh_token/token_type/
     expires_at/domain/status/created_at/last_used/usage_updated_at（+enterprise_id
     非空时带上）。quota_raw/auth_raw 等快照段账号池没有，不输出（cockpit 导入容忍）。
+
+    双域（2026-10-15 二期）：id 前缀按 profile（CN `workbuddy_` / 国际版 `codebuddy_`，
+    后者对齐用户实物 `codebuddy_461e541f…` = codebuddy_+md5(小写 uid)，cockpit-tools
+    国际号归其 CodeBuddy 模块，导入走 serde 直存路径；其宽松路径只认 access_token，
+    单对象/数组/accounts 包裹都能吃）。
     """
     ts = int(time.time()) if now_s is None else now_s
     out: list[dict] = []
     for a in accounts:
         uid = str(a.get("uid") or "")
         item = {
-            "id": f"workbuddy_{hashlib.md5(uid.encode()).hexdigest()}",
+            "id": f"{profile.cockpit_id_prefix}_{hashlib.md5(uid.encode()).hexdigest()}",
             # cockpit 的 email 字段在其实物里是昵称兜底值（其本机导入的降级口径）
             "email": str(a.get("email") or a.get("nickname") or uid),
             "uid": uid,
@@ -261,15 +268,19 @@ def _credential_fields(account: dict) -> dict:
     return fields
 
 
-def _new_connection(account: dict, priority: int) -> dict:
-    """新连接条目（对齐用户实物 9router 备份的 codebuddy-cn 条目形态）。"""
+def _new_connection(account: dict, priority: int,
+                    profile: WbRealm = REALM_CN) -> dict:
+    """新连接条目（对齐用户实物 9router 备份的对应 provider 条目形态）。
+
+    双域 provider 名按 profile（CN `codebuddy-cn` / 国际版 `codebuddy-intl`）。
+    """
     conn = {
         **_credential_fields(account),
         "testStatus": "active",
         "errorCode": None,
         "backoffLevel": 0,
         "id": str(uuid.uuid4()),
-        "provider": NINE_ROUTER_PROVIDER,
+        "provider": profile.nine_router_provider,
         "authType": "oauth",
         "name": str(account.get("nickname") or account.get("uid") or "WorkBuddy"),
         "email": str(account.get("email") or "") or None,
@@ -281,7 +292,8 @@ def _new_connection(account: dict, priority: int) -> dict:
     return conn
 
 
-def merge_selected(backup: dict, accounts: list[dict]) -> dict:
+def merge_selected(backup: dict, accounts: list[dict],
+                   profile: WbRealm = REALM_CN) -> dict:
     """把选中账号合并进备份的 providerConnections（拍板①：其余连接与配置段原样）。"""
     merged = json.loads(json.dumps(backup))  # 深拷贝（JSON 安全），未触碰项保持不变
     conns = merged.get("providerConnections")
@@ -295,7 +307,7 @@ def merge_selected(backup: dict, accounts: list[dict]) -> dict:
             continue
         if isinstance(conn.get("priority"), int):
             max_priority = max(max_priority, conn["priority"])
-        if conn.get("provider") == NINE_ROUTER_PROVIDER:
+        if conn.get("provider") == profile.nine_router_provider:
             sub = _token_sub(str(conn.get("accessToken") or ""))
             if sub:
                 by_sub[sub] = idx
@@ -315,7 +327,7 @@ def merge_selected(backup: dict, accounts: list[dict]) -> dict:
                 if key.startswith("modelLock_"):
                     conn[key] = None
         else:
-            conn = _new_connection(account, next_priority)
+            conn = _new_connection(account, next_priority, profile)
             conns.append(conn)
             next_priority += 1
             for k in _account_keys(account):
@@ -323,29 +335,36 @@ def merge_selected(backup: dict, accounts: list[dict]) -> dict:
     return merged
 
 
-def build_nine_router_fragment(accounts: list[dict]) -> list[dict]:
+def build_nine_router_fragment(accounts: list[dict],
+                               profile: WbRealm = REALM_CN) -> list[dict]:
     """降级片段：仅选中账号的候选连接条目（用户手动合并进备份数组）。"""
-    return [_new_connection(a, idx + 1) for idx, a in enumerate(accounts)]
+    return [_new_connection(a, idx + 1, profile)
+            for idx, a in enumerate(accounts)]
 
 
 # ── 编排（路由层入口） ──
 
 
-def _export_filename(fmt: str, mode: str) -> str:
+def _export_filename(fmt: str, mode: str, profile: WbRealm = REALM_CN) -> str:
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if fmt == "cockpit":
-        return f"workbuddy_accounts_{day}.json"
+        return f"{profile.export_filename_base}_{day}.json"
     if mode == "full_backup":
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
         return f"9router-backup-merged-{stamp}.json"
-    return f"workbuddy-9router-fragment-{day}.json"
+    return f"{profile.export_filename_base}-9router-fragment-{day}.json"
 
 
-async def export_selected(uids: list[str], fmt: str) -> dict:
-    """路由层入口：返回 {format, mode, filename, content, note}。"""
+async def export_selected(uids: list[str], fmt: str,
+                          profile: WbRealm = REALM_CN) -> dict:
+    """路由层入口：返回 {format, mode, filename, content, note}。
+
+    双域（2026-10-15 二期）：账号池 / cockpit id 前缀 / 文件名 / 9router provider 名
+    全部按 profile 分派。
+    """
     if fmt not in ("cockpit", "9router"):
         raise ExportRequestError(f"不支持的导出格式: {fmt}")
-    accounts = await store.load_accounts(PLATFORM_ID)
+    accounts = await store.load_accounts(profile.platform_id)
     if uids:
         wanted = {str(u).strip() for u in uids if str(u).strip()}
         selected = [a for a in accounts if a.get("uid") in wanted]
@@ -357,11 +376,11 @@ async def export_selected(uids: list[str], fmt: str) -> dict:
     if not selected:
         raise ExportRequestError("没有可导出的账号")
     if fmt == "cockpit":
-        payload = build_cockpit_export(selected)
+        payload = build_cockpit_export(selected, profile=profile)
         return {
             "format": "cockpit",
             "mode": "cockpit",
-            "filename": _export_filename("cockpit", "cockpit"),
+            "filename": _export_filename("cockpit", "cockpit", profile),
             "content": json.dumps(payload, ensure_ascii=False, indent=2),
             "note": "cockpit-tools 兼容格式：可直接在 cockpit-tools 导入（同 uid 覆盖），"
                     "或用本应用「Token / JSON」导入回导（用于备份/迁移）。",
@@ -369,21 +388,21 @@ async def export_selected(uids: list[str], fmt: str) -> dict:
     try:
         backup = await asyncio.to_thread(load_nine_router_backup)
     except NineRouterUnavailable as exc:
-        fragment = build_nine_router_fragment(selected)
+        fragment = build_nine_router_fragment(selected, profile)
         return {
             "format": "9router",
             "mode": "fragment",
-            "filename": _export_filename("9router", "fragment"),
+            "filename": _export_filename("9router", "fragment", profile),
             "content": json.dumps(fragment, ensure_ascii=False, indent=2),
             "note": f"{exc}。已按「条目片段」导出：请把数组内容合并进你的 9router 备份文件的 "
                     "providerConnections 数组（9router 导入是整库覆盖语义，瘦文件会清空其配置），"
                     "再在 9router 设置里恢复。",
         }
-    merged = merge_selected(backup, selected)
+    merged = merge_selected(backup, selected, profile)
     return {
         "format": "9router",
         "mode": "full_backup",
-        "filename": _export_filename("9router", "full_backup"),
+        "filename": _export_filename("9router", "full_backup", profile),
         "content": json.dumps(merged, ensure_ascii=False, indent=2),
         "note": "已读取本机 9router 配置并合并选中账号（其余连接与配置原样保留）："
                 "完整备份文件，直接在 9router 设置里恢复即可。注意 9router 恢复是整库覆盖语义。",

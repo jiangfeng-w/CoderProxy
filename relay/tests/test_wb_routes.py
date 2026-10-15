@@ -201,7 +201,7 @@ def test_ide_endpoints_require_api_key(client):
 def test_ide_state_via_routes(client, monkeypatch):
     from relay.platforms.workbuddy import ide_switch
 
-    async def fake_ide_state():
+    async def fake_ide_state(profile=None):
         return {"installed": True, "exe_path": "X:/wb/WorkBuddy.exe", "auth_exists": True,
                 "logged_out": False, "current_uid": "u_live", "running": False}
 
@@ -219,8 +219,9 @@ async def test_ide_switch_via_routes(client, monkeypatch):
     await store.upsert_account("workbuddy", {"uid": "u_sw", "access_token": "at-sw"})
     calls: dict = {}
 
-    async def fake_switch(account):
+    async def fake_switch(account, profile=None):
         calls["account"] = account
+        calls["profile"] = profile
         return {"status": "ok", "current_uid": account["uid"]}
 
     monkeypatch.setattr(ide_switch, "switch_account", fake_switch)
@@ -241,7 +242,7 @@ async def test_ide_switch_error_maps_409(client, monkeypatch):
 
     await store.upsert_account("workbuddy", {"uid": "u_err", "access_token": "at"})
 
-    async def failing(account):
+    async def failing(account, profile=None):
         raise ide_switch.IdeSwitchError("WorkBuddy 官方加密格式不受支持，已停止覆盖")
 
     monkeypatch.setattr(ide_switch, "switch_account", failing)
@@ -352,24 +353,48 @@ def test_platform_import_ownership_rejected(client):
     assert "国际版" in r.json()["detail"]
 
 
-def test_import_local_export_not_mounted_for_global(client):
-    """import-local / export 对 workbuddy-global 不可用（CN 生态专属）。
+def test_import_local_export_mounted_for_global(client, monkeypatch):
+    """import-local / export / ide-state / ide-switch 对 workbuddy-global 已挂载（二期）。
 
-    实现事实（2026-10-14 实测）：FastAPI 里这两个路径会命中原生 DELETE
-    `/{platform}/accounts/{uid}` 的路径模式（用 `import-local`/`export` 当 uid），
-    方法不匹配 → **405**（而非 spec 预估的「天然 404」）；ide-switch 无路径重合 → 404。
-    对外语义一致：国际版无此能力、前端不显示入口、绝不 2xx。
+    2026-10-15 二期：国际版客户端集成端点全部泛化为 /{platform}/...——
+    本机无国际版登录态/账号时业务错误映射照旧（409/404），未知平台仍 404。
     """
+    from relay.platforms.workbuddy import ide_switch, imports as wb_imports, exports
+
+    # ide-state：国际版 profile 分派到 orchestration（mock 掉，验路由通）
+    async def fake_ide_state(profile=None):
+        return {"installed": True, "exe_path": "", "auth_exists": False,
+                "logged_out": False, "current_uid": "", "running": False,
+                "platform": profile.platform_id if profile else ""}
+
+    monkeypatch.setattr(ide_switch, "ide_state", fake_ide_state)
+    r0 = client.get("/v1/platforms/workbuddy-global/ide-state", headers=_auth())
+    assert r0.status_code == 200
+    assert r0.json()["platform"] == "workbuddy-global"
+
+    # import-local：无登录态 → 409（业务映射，非 404/405）
+    async def fake_import_local(profile=None):
+        raise wb_imports.ImportParseError("未在本机 WorkBuddy 客户端中找到登录信息")
+
+    monkeypatch.setattr(wb_imports, "import_local", fake_import_local)
     r1 = client.post("/v1/platforms/workbuddy-global/accounts/import-local",
                      headers=_auth())
-    assert r1.status_code in (404, 405)
+    assert r1.status_code == 409
+
+    # export：空池 → 400（业务映射，非 404/405）；格式错误 → 400
     r2 = client.post("/v1/platforms/workbuddy-global/accounts/export",
                      json={"uids": [], "format": "cockpit"}, headers=_auth())
-    assert r2.status_code in (404, 405)
-    # ide-switch（无路径重合 → 404）
+    assert r2.status_code == 400
+    assert "没有可导出" in r2.json()["detail"]
+
+    # ide-switch：未知账号 → 404
     r3 = client.post("/v1/platforms/workbuddy-global/accounts/u_x/ide-switch",
                      headers=_auth())
     assert r3.status_code == 404
+
+    # 未知平台：仍 404
+    r4 = client.get("/v1/platforms/nope/ide-state", headers=_auth())
+    assert r4.status_code == 404
 
 
 # ─────────────────────────── 账号导出（cockpit / 9router） ───────────────────────────

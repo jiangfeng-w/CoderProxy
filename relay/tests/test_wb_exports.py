@@ -365,3 +365,52 @@ async def test_export_selected_errors():
 async def test_export_selected_empty_pool():
     with pytest.raises(ExportRequestError, match="没有可导出"):
         await exports.export_selected([], "cockpit")
+
+
+# ── 双域（2026-10-15 二期）：cockpit id 前缀 / 文件名 / 9router provider 分派 ──
+
+def test_cockpit_export_global_intl_id_prefix():
+    """国际版：id=codebuddy_+md5(小写 uid)（对齐用户实物 codebuddy_461e541f…）。"""
+    from relay.platforms.workbuddy.realms import REALM_GLOBAL
+
+    uid = "34b20749-f116-4ef1-a8cd-8a72c63848dd"
+    [item] = exports.build_cockpit_export([_account(uid=uid)], profile=REALM_GLOBAL)
+    assert item["id"] == "codebuddy_461e541fd6e85cd9bad8987f4f100cb7"
+    # CN 默认前缀不变（零回归）
+    [cn_item] = exports.build_cockpit_export([_account(uid=uid)])
+    assert cn_item["id"].startswith("workbuddy_")
+
+
+async def test_export_selected_global_uses_intl_pool_and_filename():
+    """国际版导出：读国际池、文件名 codebuddy_accounts_、9router provider codebuddy-intl。"""
+    from relay.platforms.workbuddy.realms import REALM_GLOBAL
+
+    await store.upsert_account("workbuddy-global",
+                               _account(uid="u_gl", domain="www.workbuddy.ai"))
+    res = await exports.export_selected([], "cockpit", profile=REALM_GLOBAL)
+    assert res["filename"].startswith("codebuddy_accounts_")
+    assert json.loads(res["content"])[0]["uid"] == "u_gl"
+
+
+async def test_export_selected_global_9router_provider(tmp_path, monkeypatch):
+    """国际版 9router 片段：provider=codebuddy-intl。"""
+    from relay.platforms.workbuddy.realms import REALM_GLOBAL
+
+    monkeypatch.setenv("RELAY_9ROUTER_DB", str(tmp_path / "nope.sqlite"))
+    await store.upsert_account("workbuddy-global", _account(uid="u_gl2"))
+    res = await exports.export_selected([], "9router", profile=REALM_GLOBAL)
+    assert res["mode"] == "fragment"
+    [conn] = json.loads(res["content"])
+    assert conn["provider"] == "codebuddy-intl"
+
+
+async def test_export_selected_dual_pool_isolation():
+    """CN 导出只读 CN 池；国际版导出只读国际池（互不可见）。"""
+    from relay.platforms.workbuddy.realms import REALM_GLOBAL
+
+    await store.upsert_account("workbuddy", _account(uid="u_cn_x"))
+    await store.upsert_account("workbuddy-global", _account(uid="u_gl_x"))
+    cn = json.loads((await exports.export_selected([], "cockpit"))["content"])
+    gl = json.loads((await exports.export_selected([], "cockpit", profile=REALM_GLOBAL))["content"])
+    assert [i["uid"] for i in cn] == ["u_cn_x"]
+    assert [i["uid"] for i in gl] == ["u_gl_x"]

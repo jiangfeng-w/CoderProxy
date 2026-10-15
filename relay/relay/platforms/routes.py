@@ -117,30 +117,104 @@ async def refresh_quota(platform: str, uid: str):
 #    不进通用 {platform} 抽象；spec「WorkBuddy-IDE账号切换」） ──
 
 
-@router.get("/workbuddy/ide-state")
-async def wb_ide_state():
+# ── WorkBuddy 客户端集成端点（IDE 账号切换 / 本机导入 / 导出；双域泛化） ──
+# 双域（2026-10-15 二期）：四端点泛化为 /{platform}/...（realm_for 判 404），CN 旧
+# 硬编码 /workbuddy/... 路径保留兼容存量前端调用。
+
+
+def _profile_or_404(platform: str):
+    from relay.platforms.workbuddy.realms import realm_for
+
+    profile = realm_for(platform)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"未知平台: {platform}")
+    return profile
+
+
+@router.get("/{platform}/ide-state")
+async def platform_ide_state(platform: str):
     """本机官方客户端概览：安装/运行/登录态（current_uid 明文读取，无需密钥）。"""
     from relay.platforms.workbuddy import ide_switch
 
+    profile = _profile_or_404(platform)
     try:
-        return await ide_switch.ide_state()
+        return await ide_switch.ide_state(profile)
     except IdeSwitchError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/workbuddy/accounts/{uid}/ide-switch")
-async def wb_ide_switch(uid: str):
+@router.post("/{platform}/accounts/{uid}/ide-switch")
+async def platform_ide_switch(platform: str, uid: str):
     """把账号池该账号的凭证写入官方客户端登录态文件并重启客户端。"""
     from relay.platforms import store
     from relay.platforms.workbuddy import ide_switch
 
-    account = await store.find_account("workbuddy", uid)
+    profile = _profile_or_404(platform)
+    account = await store.find_account(profile.platform_id, uid)
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在")
     try:
-        return await ide_switch.switch_account(account)
+        return await ide_switch.switch_account(account, profile)
     except IdeSwitchError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{platform}/accounts/import-local")
+async def platform_import_local(platform: str):
+    """读本机官方客户端当前登录账号入库（按 platform 读对应客户端登录态）；无登录态 → 409。"""
+    from relay.platforms.base import AccountView
+    from relay.platforms.workbuddy import imports
+
+    profile = _profile_or_404(platform)
+    try:
+        row = await imports.import_local(profile=profile)
+    except imports.ImportParseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"imported": 1, "accounts": [AccountView.from_dict(row).to_dict()]}
+
+
+@router.post("/{platform}/accounts/export")
+async def platform_export(platform: str, body: dict):
+    """账号导出（cockpit 兼容数组 / 9router 读取合并流备份；按 platform 分派格式细节）。
+
+    响应含明文 token（导出语义；本地文件与剪贴板，不进日志）——**不经 AccountView**。
+    uids 空 = 全部；未知 uid → 404；格式非法 → 400。
+    """
+    from relay.platforms.workbuddy import exports
+
+    profile = _profile_or_404(platform)
+    data = body or {}
+    uids = data.get("uids") if isinstance(data.get("uids"), list) else []
+    fmt = str(data.get("format") or "")
+    try:
+        return await exports.export_selected([str(u) for u in uids], fmt, profile)
+    except exports.ExportAccountNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except exports.ExportRequestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ── CN 旧路径别名（兼容存量前端/脚本；委托泛化实现） ──
+
+
+@router.get("/workbuddy/ide-state", include_in_schema=False)
+async def wb_ide_state():
+    return await platform_ide_state("workbuddy")
+
+
+@router.post("/workbuddy/accounts/{uid}/ide-switch", include_in_schema=False)
+async def wb_ide_switch(uid: str):
+    return await platform_ide_switch("workbuddy", uid)
+
+
+@router.post("/workbuddy/accounts/import-local", include_in_schema=False)
+async def wb_import_local():
+    return await platform_import_local("workbuddy")
+
+
+@router.post("/workbuddy/accounts/export", include_in_schema=False)
+async def wb_export(body: dict):
+    return await platform_export("workbuddy", body)
 
 
 @router.post("/workbuddy/accounts/import")
