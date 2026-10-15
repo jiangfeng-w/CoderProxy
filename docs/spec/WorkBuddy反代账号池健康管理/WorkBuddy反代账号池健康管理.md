@@ -1,6 +1,6 @@
 # WorkBuddy 反代账号池健康管理
 
-> **状态**：方案已定稿（2026-10-13 立稿、2026-10-14 定稿；设计已按参考实现逐条核对并修正原方案 4 处事实错误）
+> **状态**：方案已定稿（2026-10-13 立稿、2026-10-14 定稿；设计已按参考实现逐条核对并修正原方案 4 处事实错误）；**2026-10-15 复核增补**：逐条对照 panel/9router 两参考后补 3 处缺口（11140 双语义、12153 会话失效、内容类零惩罚完整性）+ 1 处数值取向（6004 封顶改「尊重上游时间」——用户拍板）+ 1 处可选增补（前端限流倒计时）；见 §7
 > **优先级**：核心
 > **来源**：《WorkBuddy 反代优化方案》P0-2（软降级）+ P0-3（软冷却）+ P2-6（负缓存）合并立项——三者共享同一批改动点（store 字段/preserve、chat 轮换链、选号过滤链、routes 映射），拆开会导致同一段代码反复改两次
 > **依据**：workbuddy2api-panel `internal/pool/degrade.go`（连败降权）、`state.go`（`NoteSuccess` / 13 号误杀教训）、`cooldown.go`（`CooldownSoftForModel` 模型级 / `BlockModelBackoff` 负缓存 6h→24h）、`transition.go`（签到只解冻硬冷却）、`internal/server/handler.go`（喂入口纪律）；9router `executors/codebuddy-cn.js`（6004 恢复时间解析）、`services/accountFallback.js`（退避数值 base 2s / max 5min）
@@ -60,6 +60,9 @@ note_success(uid)：fail_count=0、degraded_until=0
 | 业务码错误（11148/11128/11101 等） | 不喂（请求问题不是账号问题） |
 | 6004 / 429 | 不喂连败（另走 §3 模型冷却） |
 | 11102 | 不喂连败（另走 §3 负缓存） |
+| **11140（`request illegal`，账号级授权）** | 换号重试、**不喂**（凭证/授权问题，由换号/重登处理）；全池皆如此 → 503 引导重登（同 401 全池语义） |
+| **11140（`rate-limiting requests` 等限流文案）** | 按 §3 模型级冷却处理（**11140 不可按 code 一刀切**——panel 警示：同 code 承载授权与限流双语义，按 msg 关键词分流） |
+| **12153（`Offline user session not found`，会话失效）** | 换号重试、不喂；全池 12153 → 503 引导重登；**不做连续计数禁用**（不杀号沿用 401 哲学） |
 
 - 实现落点：`chat.py` `_frames_with_rotation` 加 `yielded` 标志；`_stream_once` 抛出的错误按上表分流
 - `note_success` 时机：`_stream_once` 正常收流结束（含 0 帧的干净结束；空流由 routes 层独立重试预算处理）
@@ -71,7 +74,7 @@ note_success(uid)：fail_count=0、degraded_until=0
 
 - 识别：账号 + 模型已知时（`_frames_with_rotation` 持有 `account` 与 `self._model`）
 - 恢复时间解析（对齐 panel `ParseRateReset` + 9router 正则）：CN `将在 YYYY-MM-DD HH:MM:SS 重置` / EN `will reset at ... UTC+8`，两种形态同一时区（UTC+8）解析
-  - 解析成功 → `model_cooldowns[model].until = 恢复墙钟`（封顶 2h，对齐 panel `softRateMax`）
+  - 解析成功 → `model_cooldowns[model].until = 恢复墙钟`（**尊重上游时间**，宽松封顶 12h 仅防脏数据——2026-10-15 用户拍板修订：原「封顶 2h」为 panel 多连接兜底口径，桌面单池号少、撞墙成本高（直接 429 给 agent），且上游给的是权威时间；今天实测撞出 8h14m 重置时间，截 2h 会每 2h 重复撞墙）
   - 解析失败 → 有界退避：`60s × 2^(hits-1)`，封顶 15min（**自有取值**——9router 为 2s 起 / 5min，panel 为 600s 起 / 2h；原方案「9router 口径」表述有误）
   - 冷却期内再次触发不翻倍/不延长（对齐 panel「兜底探测不再把冷却越堆越厚」）
 - 注：6004 只在「模型已知」时写模型级冷却；模型未知的兜底按账号级处理（本期聊天链路模型恒已知，兜底可不实现）
@@ -104,6 +107,25 @@ note_success(uid)：fail_count=0、degraded_until=0
 - **12153 连续计数 / 禁用**：不做——本项目对 401 仅换号不杀号，无 13 号误杀风险，`NoteSessionDead` 机制无对应物
 - **签到解冻清冷却**（原方案口径）：否决——见背景 panel 实测教训；本项目签到与冷却无联动
 
+### 7. 复核增补（2026-10-15，对照 panel/9router 逐条复核后）
+
+**A. 11140 双语义分流**（§2 喂入口表已并入）：`msg` 关键词判分流——
+`request illegal`（含）→ 账号级授权类（换号、不喂、全池 503 引导重登）；限流文案（`rate-limiting requests` 等）→ §3 模型级冷却。
+依据：panel `handler.go:1148-1153`（request illegal → 账号授权故障）+ `client.go:129-134`（警示：11140 不能按 code 判定，同 code 承载模型级限流文案）。
+
+**B. 12153 会话失效处置**（§2 喂入口表已并入）：换号重试、不喂连败、全池 503；不做连续计数禁用（panel 的 `NoteSessionDead` 阈值机制可省——本项目无「一次失败杀号」路径，无需防误杀计数）。
+依据：panel `state.go` NoteSessionDead/ClearSessionDead 设计；9router 无特判（其错误表把相关文案归瞬态冷却）。
+
+**C. 内容/授权类「零惩罚」的完整性**：不喂连败的判定按 **msg 关键词匹配（中英双形态）**，不按 code 死判——对齐 panel `contentBlockedMarkers`（`blocked by security policy` / `unapproved channel` / `illegal api invocation`）。上游换文案时最差退化为「未知错误进连败」，不会漏罚到异常路径。
+
+**D. 6004 封顶改「尊重上游时间」**（§3 已修订）：解析成功锁满上游墙钟（宽松封顶 12h 防脏数据）；解析失败才走 15min 有界退避。用户 2026-10-15 拍板。
+
+**E. 可选增补（待用户排期）：前端限流倒计时展示**——账号卡片 meta 行显示「限流中 · HH:MM 恢复」（`degraded_until` 与 `model_cooldowns` 最近到期），对齐 9router `CooldownTimer` 形态；后端 `AccountView` 透出（§5 已计划）。
+
+**复核已对齐项（无需改动）**：连败降级语义（不延长/成功清零/refresh 不清）、模型级 6004 豁免、11102 负缓存与成功只清 11102、请求级 4xx 不罚（9router 同哲学）、落盘/preserve/priority 协调。
+
+**明确不抄项（维持原判）**：熔断器（5xx 并连败）、积分保底/成本分层/探索权重/在途限流（panel 多租户优化，桌面不适用）、12153 连续禁用计数。
+
 ## 已知边界
 
 - 降权/冷却字段落盘在账号行（`platform_workbuddy.json`），用户可在文件里手改——不做防护（桌面单用户场景，与现口径一致）
@@ -121,6 +143,9 @@ note_success(uid)：fail_count=0、degraded_until=0
 - [ ] preserve：重登录不重置降权/冷却/priority
 - [ ] 现有 `test_wb_chat.py` / `test_platform_store.py` 零回归
 - [ ] （与 priority 同批时）默认全 1 分组时选号序列与现状逐请求等价
+- [ ] **11140 双语义**：`request illegal` → 换号+全池 503；限流文案 → 模型冷却（两形态各一用例）
+- [ ] **12153**：换号重试 + 全池 503（不喂连败断言）
+- [ ] **6004 尊重上游时间**：解析出远未来重置时间（如 8h）→ 冷却锁满（宽松封顶 12h 断言）
 
 ## 实施步骤（commit 序列）
 
