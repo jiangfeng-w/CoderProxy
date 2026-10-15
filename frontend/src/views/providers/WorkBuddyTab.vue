@@ -19,9 +19,7 @@ const props = withDefaults(defineProps<{ platform?: string }>(), {
   platform: WB_CN_PLATFORM
 })
 const isGlobal = computed(() => props.platform === 'workbuddy-global')
-/** 能力位：CN 生态专属（IDE 切号 / 导出 / 本机导入）仅 CN 显示。 */
-const cnOnly = computed(() => !isGlobal.value)
-/** 签到能力（国际版无签到，定稿）。 */
+/** 签到能力（国际版无签到，定稿）——双域唯一能力位残差（2026-10-15 二期）。 */
 const supportsCheckin = computed(() => !isGlobal.value)
 
 const message = useMessage()
@@ -561,16 +559,7 @@ onUnmounted(stopPolling)
     <div class="card">
       <div class="head">
         <span class="zone-title">账号</span>
-        <span
-          v-if="cnOnly"
-          class="note"
-          >设备授权登录加入账号池；「切到此号」把该账号写入本机官方客户端并自动重启</span
-        >
-        <span
-          v-else
-          class="note"
-          >设备授权登录或粘贴 Token/JSON 加入账号池（国际版账号）</span
-        >
+        <span class="note">设备授权登录加入账号池；「切到此号」把该账号写入本机官方客户端并自动重启</span>
         <div class="spacer" />
         <NButton
           size="small"
@@ -580,7 +569,6 @@ onUnmounted(stopPolling)
           添加账号
         </NButton>
         <NButton
-          v-if="cnOnly"
           size="small"
           :disabled="wb.accounts.length === 0"
           @click="openExportDlg"
@@ -624,7 +612,7 @@ onUnmounted(stopPolling)
               {{ a.checkin.today_checked_in ? '今日已签' : '今日未签' }}
             </NTag>
             <NTag
-              v-if="cnOnly && ideUid === a.uid"
+              v-if="ideUid === a.uid"
               size="small"
               type="info"
               :bordered="false"
@@ -633,10 +621,7 @@ onUnmounted(stopPolling)
             </NTag>
             <span class="spacer" />
             <div class="acct-ops">
-              <NPopconfirm
-                v-if="cnOnly"
-                @positive-click="onSwitchIde(a)"
-              >
+              <NPopconfirm @positive-click="onSwitchIde(a)">
                 <template #trigger>
                   <NButton
                     size="tiny"
@@ -648,7 +633,7 @@ onUnmounted(stopPolling)
                     {{ ideUid === a.uid ? 'IDE 登录中' : '切到此号' }}
                   </NButton>
                 </template>
-                将关闭并重启本机 WorkBuddy 客户端，登录切换为「{{ a.nickname || a.uid }}」。确定切换？
+                将关闭并重启本机 {{ displayName }} 客户端，登录切换为「{{ a.nickname || a.uid }}」。确定切换？
               </NPopconfirm>
               <NButton
                 v-if="supportsCheckin"
@@ -840,8 +825,7 @@ onUnmounted(stopPolling)
             <div class="auth-box">
               <p class="auth-box-title">授权 IDE 登录信息</p>
               <ul class="auth-box-list">
-                <li v-if="cnOnly">在浏览器完成 OAuth 后即可添加账号并用于 IDE 切换。</li>
-                <li v-else>在浏览器完成 OAuth 后即可添加账号。</li>
+                <li>在浏览器完成 OAuth 后即可添加账号并用于 IDE 切换。</li>
                 <li>授权完成后会自动刷新资源包配额数据。</li>
                 <li>账号卡片将按资源包展示额度、进度和刷新/到期时间。</li>
               </ul>
@@ -924,20 +908,19 @@ onUnmounted(stopPolling)
           <p class="dlg-expire">JSON 支持单对象 / 数组 / accounts 包裹；纯 token 将联网校验并补全资料</p>
         </NTabPane>
 
-        <!-- Tab 3：本地导入（CN 专属：本机客户端登录态 / JSON 文件） -->
+        <!-- Tab 3：本地导入（本机客户端登录态 / JSON 文件；双域） -->
         <NTabPane
-          v-if="cnOnly"
           name="local"
           tab="本地导入"
         >
-          <p class="dlg-text imp-hint">支持从本机 WorkBuddy 客户端或 JSON 文件导入账号数据。</p>
+          <p class="dlg-text imp-hint">支持从本机 {{ displayName }} 客户端或 JSON 文件导入账号数据。</p>
           <NButton
             size="large"
             block
             :loading="importing"
             @click="onImportLocal"
           >
-            从本机 WorkBuddy 导入
+            从本机 {{ displayName }} 导入
           </NButton>
           <p class="dlg-or">或从 JSON 文件导入</p>
           <NButton

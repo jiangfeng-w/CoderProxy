@@ -274,7 +274,7 @@ export interface WbIdeState {
 
 export const listPlatforms = (): Promise<{ platforms: PlatformInfo[] }> => relay('GET', '/v1/platforms')
 // 双域（WorkBuddy双域账号支持）：wb* 函数带 platform 参数（默认 workbuddy——存量调用点零改动）；
-// import-local / export / ide-* 不加 platform（CN 生态专属路径，国际版不显示入口）。
+// 二期（2026-10-15）：import-local / export / ide-* 同带 platform（国际版客户端集成已落地）。
 export const listWbAccounts = (platform = 'workbuddy'): Promise<{ accounts: WbAccount[] }> => relay('GET', `/v1/platforms/${platform}/accounts`)
 export const wbLoginStart = (platform = 'workbuddy'): Promise<WbLoginStart> => relay('POST', `/v1/platforms/${platform}/login/start`)
 export const wbLoginStatus = (loginId: string, platform = 'workbuddy'): Promise<WbLoginStatus> => relay('GET', `/v1/platforms/${platform}/login/status?login_id=${encodeURIComponent(loginId)}`)
@@ -283,10 +283,10 @@ export const wbDeleteAccount = (uid: string, platform = 'workbuddy'): Promise<{ 
 export const wbCheckin = (uid: string, platform = 'workbuddy'): Promise<{ result: WbCheckinResult; account: WbAccount }> => relay('POST', `/v1/platforms/${platform}/accounts/${uid}/checkin`)
 export const wbCheckinStatus = (uid: string, platform = 'workbuddy'): Promise<WbAccount> => relay('GET', `/v1/platforms/${platform}/accounts/${uid}/checkin-status`)
 export const wbRefreshQuota = (uid: string, platform = 'workbuddy'): Promise<WbAccount> => relay('POST', `/v1/platforms/${platform}/accounts/${uid}/quota`)
-export const wbIdeState = (): Promise<WbIdeState> => relay('GET', '/v1/platforms/workbuddy/ide-state')
-export const wbIdeSwitch = (uid: string): Promise<{ status: string; current_uid: string }> => relay('POST', `/v1/platforms/workbuddy/accounts/${uid}/ide-switch`)
+export const wbIdeState = (platform = 'workbuddy'): Promise<WbIdeState> => relay('GET', `/v1/platforms/${platform}/ide-state`)
+export const wbIdeSwitch = (uid: string, platform = 'workbuddy'): Promise<{ status: string; current_uid: string }> => relay('POST', `/v1/platforms/${platform}/accounts/${uid}/ide-switch`)
 export const wbImportText = (text: string, platform = 'workbuddy'): Promise<{ imported: number; accounts: WbAccount[] }> => relay('POST', `/v1/platforms/${platform}/accounts/import`, { text })
-export const wbImportLocal = (): Promise<{ imported: number; accounts: WbAccount[] }> => relay('POST', '/v1/platforms/workbuddy/accounts/import-local')
+export const wbImportLocal = (platform = 'workbuddy'): Promise<{ imported: number; accounts: WbAccount[] }> => relay('POST', `/v1/platforms/${platform}/accounts/import-local`)
 /** 导出兼容格式（WorkBuddy账号导出）：cockpit 兼容数组 / 9router 读取合并流备份。 */
 export interface WbExportResult {
   format: 'cockpit' | '9router'
@@ -295,7 +295,7 @@ export interface WbExportResult {
   content: string
   note: string
 }
-export const wbExport = (uids: string[], format: 'cockpit' | '9router'): Promise<WbExportResult> => relay('POST', '/v1/platforms/workbuddy/accounts/export', { uids, format })
+export const wbExport = (uids: string[], format: 'cockpit' | '9router', platform = 'workbuddy'): Promise<WbExportResult> => relay('POST', `/v1/platforms/${platform}/accounts/export`, { uids, format })
 
 // ─────────────────────────── /v1/stats（M8：Token 统计页）───────────────────────────
 

@@ -30,7 +30,7 @@ function defineWorkbuddyStore(platform: string) {
       loginError: '',
       /** 操作中的账号（签到/配额/切号按钮 loading 定向到对应卡片）。 */
       busyUid: '' as string,
-      /** 本机官方客户端概览（IDE 切号；CN 专属）；null = 尚未拉取/不可用。 */
+      /** 本机官方客户端概览（IDE 切号；按 platform）；null = 尚未拉取/不可用。 */
       ideState: null as WbIdeState | null
     }),
     actions: {
@@ -40,10 +40,10 @@ function defineWorkbuddyStore(platform: string) {
         this.accounts = res.accounts
         this.loaded = true
       },
-      /** 拉取本机官方客户端概览（CN 专属；失败静默——概览缺失不阻塞账号区）。 */
+      /** 拉取本机官方客户端概览（按 platform；失败静默——概览缺失不阻塞账号区）。 */
       async loadIdeState(): Promise<void> {
         try {
-          this.ideState = await wbIdeState()
+          this.ideState = await wbIdeState(this.platform)
         } catch {
           this.ideState = null
         }
@@ -116,11 +116,11 @@ function defineWorkbuddyStore(platform: string) {
           this.busyUid = ''
         }
       },
-      /** IDE 切号（CN 专属）：凭证写入本机官方客户端并重启（成功后刷新概览）。 */
+      /** IDE 切号（按 platform）：凭证写入对应官方客户端并重启（成功后刷新概览）。 */
       async switchIde(uid: string): Promise<{ current_uid: string }> {
         this.busyUid = uid
         try {
-          const res = await wbIdeSwitch(uid)
+          const res = await wbIdeSwitch(uid, this.platform)
           await this.loadIdeState()
           return res
         } finally {
@@ -133,16 +133,16 @@ function defineWorkbuddyStore(platform: string) {
         await this.load()
         return res.imported
       },
-      /** 从本机官方客户端登录态导入（CN 专属；可能正是 IDE 当前号，顺带刷新概览）。 */
+      /** 从本机官方客户端登录态导入（按 platform；可能正是 IDE 当前号，顺带刷新概览）。 */
       async importLocal(): Promise<number> {
-        const res = await wbImportLocal()
+        const res = await wbImportLocal(this.platform)
         await this.load()
         await this.loadIdeState()
         return res.imported
       },
-      /** 导出（CN 专属；cockpit 兼容 / 9router 读取合并流）；内容由组件负责下载或复制。 */
+      /** 导出（按 platform；cockpit 兼容 / 9router 读取合并流）；内容由组件负责下载或复制。 */
       async exportAccounts(uids: string[], format: 'cockpit' | '9router'): Promise<WbExportResult> {
-        return wbExport(uids, format)
+        return wbExport(uids, format, this.platform)
       }
     }
   })
