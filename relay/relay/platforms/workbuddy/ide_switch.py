@@ -1,4 +1,4 @@
-"""WorkBuddy 官方客户端登录态读写与 IDE 账号切换。
+"""WorkBuddy 官方客户端登录态读写与 IDE 账号切换（双域：CN / 国际版）。
 
 本地修订：逻辑移植自 cockpit-tools（src-tauri/src/modules/workbuddy_auth_crypto.rs 与
 workbuddy_account.rs，MIT），与原实现的差异：
@@ -8,9 +8,13 @@ workbuddy_account.rs，MIT），与原实现的差异：
   最近写入的字段，信息比旧快照新鲜），无同 uid 项才走最小构造。
 - 进程管理用 taskkill/Popen（原实现走实例管理 close_pid），按映像名全关（切号本就要求全关）。
 - 仅支持 Windows（打包目标 triple x86_64-pc-windows-msvc）；非 win32 直接报错。
+- **双域（2026-10-15 二期）**：登录态文件/进程名/exe 候选全部按 `WbRealm` profile 参数化
+  （CN：workbuddy-desktop.info + WorkBuddy.exe；国际版：workbuddy-desktop-ai.info +
+  WorkBuddyAI.exe，本机实测两文件同目录并列、$wbEncrypted 结构同构、exe 同名 binding）。
+  密钥缓存按 platform_id 分桶（两客户端各自派生、keyId 不同）。
 
 加密契约（WorkBuddy 5.6 字段加密，装机实测 2026-10-11，见 spec 文档「本机实测证据」）：
-- 登录态文件 %LOCALAPPDATA%/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info
+- 登录态文件 %LOCALAPPDATA%/CodeBuddyExtension/Data/Public/auth/<profile.auth_file_name>
 - 字段级 AES-256-GCM：{"$wbEncrypted":1,"envelope":"<b64(Envelope JSON)>"}，
   Envelope={suite,keyId=sha256(key)[:16hex],nonce(12B),authTag(16B),ciphertext}
 - key = sha256(atRestSecretKey utf8)；AAD 框架见 _aad；密钥经官方 exe 的
@@ -32,26 +36,21 @@ from pathlib import Path
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from relay.platforms.workbuddy.realms import REALM_CN, WbRealm
+
 logger = logging.getLogger(__name__)
 
-AUTH_FILE_NAME = "workbuddy-desktop.info"
+# 兼容常量（CN 形态；存量测试/脚本引用面）
+AUTH_FILE_NAME = REALM_CN.auth_file_name
 LOGOUT_MARKER_SUFFIX = ".logged-out"
 KEY_TIMEOUT_S = 5.0
 KEY_TTL_S = 60.0
 TASKKILL_TIMEOUT_S = 20.0
 
-# 官方客户端安装路径候选（对齐 cockpit-tools process_core_discovery 的候选序；
-# 本机实测命中第一个）。env RELAY_WB_IDE_EXE 优先。
-_EXE_CANDIDATES = (
-    r"%LOCALAPPDATA%\Programs\WorkBuddy\WorkBuddy.exe",
-    r"%PROGRAMFILES%\WorkBuddy\WorkBuddy.exe",
-    r"%PROGRAMFILES(X86)%\WorkBuddy\WorkBuddy.exe",
-)
-
 _CREATE_NO_WINDOW = 0x08000000
 
-# 官方客户端进程映像名（taskkill 按名关闭；/T 覆盖 crashpad/helper 子进程树）
-CLIENT_IMAGE_NAME = "WorkBuddy.exe"
+# 官方客户端进程映像名（CN；双域取值见 profile.client_image_name）
+CLIENT_IMAGE_NAME = REALM_CN.client_image_name
 
 
 class IdeSwitchError(RuntimeError):
@@ -97,50 +96,132 @@ class OfficialKey:
         return out
 
 
-def resolve_client_exe() -> Path | None:
-    """官方客户端 exe 定位：env 覆盖 → 候选路径展开探测。"""
-    override = os.environ.get("RELAY_WB_IDE_EXE", "").strip()
-    if override:
-        p = Path(override)
-        return p if p.is_file() else None
-    for candidate in _EXE_CANDIDATES:
-        p = Path(os.path.expandvars(candidate))
-        if p.is_file():
-            return p
+def _registry_discovered_exe(profile: WbRealm) -> Path | None:
+    """注册表兜底发现客户端 exe（HKCU/HKLM Uninstall 的 InstallLocation/DisplayIcon）。
+
+    国际版本机实测装在 D:\\Programs\\WorkBuddyAI（非候选盘符），静态候选可能全 miss；
+    注册表查询失败静默返回 None（非 win32 / 无权限 / 无键）。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg  # noqa: PLC0415（仅 win32 可用）
+    except ImportError:  # pragma: no cover
+        return None
+    marker = profile.client_image_name.lower()
+    product_hint = "workbuddy ai" if profile.is_global else "workbuddy"
+    for hive, flags in (
+        (winreg.HKEY_CURRENT_USER, winreg.KEY_READ),
+        (winreg.HKEY_LOCAL_MACHINE,
+         winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)),
+    ):
+        try:
+            root = winreg.OpenKey(
+                hive, r"Software\Microsoft\Windows\CurrentVersion\Uninstall", 0, flags)
+        except OSError:
+            continue
+        with root:
+            try:
+                count = winreg.QueryInfoKey(root)[0]
+            except OSError:
+                continue
+            for idx in range(count):
+                try:
+                    sub_name = winreg.EnumKey(root, idx)
+                    with winreg.OpenKey(root, sub_name) as sub:
+                        def _q(name: str) -> str:
+                            try:
+                                return str(winreg.QueryValueEx(sub, name)[0])
+                            except OSError:
+                                return ""
+                        display = _q("DisplayName").lower()
+                        if product_hint not in display:
+                            continue
+                        if profile.is_global and "ai" not in display:
+                            continue  # CN 键（WorkBuddy）不误命中
+                        if not profile.is_global and "ai" in display:
+                            continue  # 国际键（WorkBuddy AI）不误命中 CN
+                        install = _q("InstallLocation")
+                        if install:
+                            p = Path(install) / profile.client_image_name
+                            if p.is_file():
+                                return p
+                        icon = _q("DisplayIcon")
+                        if icon and marker in icon.lower():
+                            p = Path(icon.strip('"').split(",")[0])
+                            if p.is_file():
+                                return p
+                except OSError:
+                    continue
     return None
 
 
-def auth_file_path() -> Path | None:
-    """登录态文件路径（Windows：%LOCALAPPDATA%/CodeBuddyExtension/Data/Public/auth/）。"""
+def resolve_client_exe(profile: WbRealm = REALM_CN) -> Path | None:
+    """官方客户端 exe 定位（按 profile）：env 覆盖 → 候选路径展开 → 注册表兜底。"""
+    override = os.environ.get(profile.exe_env_override, "").strip()
+    if override:
+        p = Path(override)
+        return p if p.is_file() else None
+    for candidate in profile.exe_candidates:
+        p = Path(os.path.expandvars(candidate))
+        if p.is_file():
+            return p
+    return _registry_discovered_exe(profile)
+
+
+def auth_file_path(profile: WbRealm = REALM_CN) -> Path | None:
+    """登录态文件路径（Windows：%LOCALAPPDATA%/CodeBuddyExtension/Data/Public/auth/）。
+
+    双域同目录并列：CN `workbuddy-desktop.info` / 国际版 `workbuddy-desktop-ai.info`
+    （2026-10-15 本机实测）。
+    """
     local = os.environ.get("LOCALAPPDATA", "").strip()
     if not local:
         return None
-    return Path(local) / "CodeBuddyExtension" / "Data" / "Public" / "auth" / AUTH_FILE_NAME
+    return (Path(local) / "CodeBuddyExtension" / "Data" / "Public" / "auth"
+            / profile.auth_file_name)
 
 
 def logout_marker_path(auth_file: Path) -> Path:
     return Path(f"{auth_file}{LOGOUT_MARKER_SUFFIX}")
 
 
-_key_lock = asyncio.Lock()
-_cached_key: OfficialKey | None = None
-_cached_at = 0.0
+# 密钥缓存按 platform_id 分桶（两客户端各自派生、keyId 不同，不能跨域复用）
+_key_locks: dict[str, asyncio.Lock] = {}
+_cached_keys: dict[str, OfficialKey] = {}
+_cached_at: dict[str, float] = {}
 
 
-def invalidate_key() -> None:
-    """官方密钥变化（keyId 不匹配/客户端重装）后失效缓存，下次重新派生。"""
-    global _cached_key, _cached_at
-    _cached_key = None
-    _cached_at = 0.0
+def _key_lock_for(platform_id: str) -> asyncio.Lock:
+    lock = _key_locks.get(platform_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _key_locks[platform_id] = lock
+    return lock
 
 
-async def get_official_key() -> OfficialKey:
+def invalidate_key(platform_id: str | None = None) -> None:
+    """官方密钥变化（keyId 不匹配/客户端重装）后失效缓存，下次重新派生。
+
+    缺省清空全部（兼容存量调用）；指定 platform_id 只清该域。
+    """
+    if platform_id is None:
+        _cached_keys.clear()
+        _cached_at.clear()
+        return
+    _cached_keys.pop(platform_id, None)
+    _cached_at.pop(platform_id, None)
+
+
+async def get_official_key(profile: WbRealm = REALM_CN) -> OfficialKey:
     """取官方密钥：TTL 缓存 + 单飞派生（asyncio.Lock 即单飞，等待者复用新缓存）。"""
-    global _cached_key, _cached_at
-    async with _key_lock:
-        if _cached_key is not None and time.monotonic() - _cached_at < KEY_TTL_S:
-            return _cached_key
-        exe = resolve_client_exe()
+    lock = _key_lock_for(profile.platform_id)
+    async with lock:
+        cached = _cached_keys.get(profile.platform_id)
+        if cached is not None and time.monotonic() - _cached_at.get(
+                profile.platform_id, 0.0) < KEY_TTL_S:
+            return cached
+        exe = resolve_client_exe(profile)
         if exe is None:
             raise IdeSwitchError("未找到 WorkBuddy 官方客户端，无法读写其登录态")
         env = dict(os.environ)
@@ -175,8 +256,8 @@ async def get_official_key() -> OfficialKey:
             key = OfficialKey(base64.b64decode(out, validate=True))
         except (ValueError, IdeSwitchError) as e:
             raise IdeSwitchError("WorkBuddy 官方加密密钥解析失败，已停止覆盖") from e
-        _cached_key = key
-        _cached_at = time.monotonic()
+        _cached_keys[profile.platform_id] = key
+        _cached_at[profile.platform_id] = time.monotonic()
         return key
 
 
@@ -499,10 +580,10 @@ def write_account_to_auth_file_sync(account: dict, auth_file: Path, key: Officia
 # ── 状态读取（account.uid 明文，无需密钥）与进程管理 ──
 
 
-def read_ide_state_sync() -> dict:
+def read_ide_state_sync(profile: WbRealm = REALM_CN) -> dict:
     """官方客户端安装/登录态概览（running 由编排层异步补充，此处不查进程）。"""
-    exe = resolve_client_exe()
-    auth_file = auth_file_path()
+    exe = resolve_client_exe(profile)
+    auth_file = auth_file_path(profile)
     marker = logout_marker_path(auth_file) if auth_file else None
     state: dict = {
         "installed": exe is not None,
@@ -522,28 +603,29 @@ def read_ide_state_sync() -> dict:
     return state
 
 
-def is_client_running() -> bool:
+def is_client_running(profile: WbRealm = REALM_CN) -> bool:
     """官方客户端是否在运行（tasklist 按映像名查）。"""
     if sys.platform != "win32":
         return False
+    image = profile.client_image_name
     try:
         out = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {CLIENT_IMAGE_NAME}"],
+            ["tasklist", "/FI", f"IMAGENAME eq {image}"],
             check=False,
             capture_output=True, timeout=10, creationflags=_CREATE_NO_WINDOW,
         ).stdout.decode(errors="replace")
     except (OSError, subprocess.SubprocessError):
         return False
-    return CLIENT_IMAGE_NAME.lower() in out.lower()
+    return image.lower() in out.lower()
 
 
-def close_client() -> None:
+def close_client(profile: WbRealm = REALM_CN) -> None:
     """关闭官方客户端（taskkill /IM /T /F；对齐 cockpit-tools close_pid 的进程树强杀）。"""
     if sys.platform != "win32":
         raise IdeSwitchError("IDE 切号当前仅支持 Windows")
     try:
         subprocess.run(
-            ["taskkill", "/IM", CLIENT_IMAGE_NAME, "/T", "/F"],
+            ["taskkill", "/IM", profile.client_image_name, "/T", "/F"],
             check=False,
             capture_output=True, timeout=TASKKILL_TIMEOUT_S, creationflags=_CREATE_NO_WINDOW,
         )
@@ -551,9 +633,9 @@ def close_client() -> None:
         raise IdeSwitchError(f"关闭 WorkBuddy 客户端失败：{e}") from e
 
 
-def start_client() -> None:
+def start_client(profile: WbRealm = REALM_CN) -> None:
     """启动官方客户端（DETACHED | CREATE_NO_WINDOW，不等待退出）。"""
-    exe = resolve_client_exe()
+    exe = resolve_client_exe(profile)
     if exe is None:
         raise IdeSwitchError("未找到 WorkBuddy 官方客户端，无法启动")
     if sys.platform != "win32":
@@ -573,7 +655,7 @@ def start_client() -> None:
 # ── 切换编排（用户拍板 2026-10-11：客户端运行中 → 自动关闭 → 写入 → 自动重启） ──
 
 
-async def switch_account(account: dict) -> dict:
+async def switch_account(account: dict, profile: WbRealm = REALM_CN) -> dict:
     """账号池凭证 → 官方客户端登录态文件，返回切换结果。
 
     顺序：先派生密钥（失败时客户端未受影响）→ 关客户端（写窗口前提，退出时
@@ -582,18 +664,18 @@ async def switch_account(account: dict) -> dict:
     """
     if sys.platform != "win32":
         raise IdeSwitchError("IDE 切号当前仅支持 Windows")
-    key = await get_official_key()
-    auth_file = auth_file_path()
+    key = await get_official_key(profile)
+    auth_file = auth_file_path(profile)
     if auth_file is None:
         raise IdeSwitchError("无法定位 WorkBuddy 登录态文件路径（本机缺少 LOCALAPPDATA）")
-    await asyncio.to_thread(close_client)
+    await asyncio.to_thread(close_client, profile)
     await asyncio.to_thread(write_account_to_auth_file_sync, account, auth_file, key)
-    await asyncio.to_thread(start_client)
+    await asyncio.to_thread(start_client, profile)
     return {"status": "ok", "current_uid": str(account.get("uid") or "")}
 
 
-async def ide_state() -> dict:
+async def ide_state(profile: WbRealm = REALM_CN) -> dict:
     """客户端概览 + 运行状态（供前端「IDE 在用」标记与按钮可用性）。"""
-    state = await asyncio.to_thread(read_ide_state_sync)
-    state["running"] = await asyncio.to_thread(is_client_running)
+    state = await asyncio.to_thread(read_ide_state_sync, profile)
+    state["running"] = await asyncio.to_thread(is_client_running, profile)
     return state

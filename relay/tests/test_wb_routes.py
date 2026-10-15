@@ -311,7 +311,7 @@ def test_import_local_maps_409_when_absent(client, monkeypatch):
     from relay.platforms.workbuddy import ide_switch
     from relay.platforms.workbuddy import imports as wb_imports
 
-    monkeypatch.setattr(ide_switch, "auth_file_path", lambda: None)
+    monkeypatch.setattr(ide_switch, "auth_file_path", lambda profile=None: None)
     r = client.post("/v1/platforms/workbuddy/accounts/import-local", headers=_auth())
     assert r.status_code == 409
     assert "未在本机" in r.json()["detail"]

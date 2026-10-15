@@ -307,9 +307,9 @@ def test_import_local_reads_decrypted_file(tmp_path, monkeypatch):
     auth_file = tmp_path / "workbuddy-desktop.info"
     doc = sw.encode_session(_plain_local_doc(), TEST_KEY)  # 真实 seal 链构造加密文件
     auth_file.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(sw, "auth_file_path", lambda: auth_file)
+    monkeypatch.setattr(sw, "auth_file_path", lambda profile=None: auth_file)
 
-    async def fake_key():
+    async def fake_key(profile=None):
         return TEST_KEY
 
     monkeypatch.setattr(sw, "get_official_key", fake_key)
@@ -330,7 +330,7 @@ def test_import_local_reads_decrypted_file(tmp_path, monkeypatch):
 
 def test_import_local_missing_file(tmp_path, monkeypatch):
     from relay.platforms.workbuddy import ide_switch as sw
-    monkeypatch.setattr(sw, "auth_file_path", lambda: tmp_path / "nope.info")
+    monkeypatch.setattr(sw, "auth_file_path", lambda profile=None: tmp_path / "nope.info")
     with pytest.raises(ImportParseError, match="未在本机"):
         asyncio.run(imports.import_local())
 
@@ -340,6 +340,77 @@ def test_import_local_logged_out_marker(tmp_path, monkeypatch):
     auth_file = tmp_path / "workbuddy-desktop.info"
     auth_file.write_text("{}", encoding="utf-8")
     sw.logout_marker_path(auth_file).write_text("logged-out", encoding="utf-8")
-    monkeypatch.setattr(sw, "auth_file_path", lambda: auth_file)
+    monkeypatch.setattr(sw, "auth_file_path", lambda profile=None: auth_file)
     with pytest.raises(ImportParseError, match="未在本机"):
         asyncio.run(imports.import_local())
+
+
+# ── 双域（2026-10-15 二期）：本机导入按 profile + 9router provider 分派 ──
+
+def test_import_local_global_profile(tmp_path, monkeypatch):
+    """国际版 profile：读 -ai 登录态文件 → 落国际池（CN 池零写入）；归属校验通过。"""
+    from relay.platforms.workbuddy import ide_switch as sw
+    from relay.platforms.workbuddy.realms import REALM_GLOBAL
+
+    auth_file = tmp_path / "workbuddy-desktop-ai.info"
+    doc = _plain_local_doc()
+    doc["auth"]["domain"] = "www.workbuddy.ai"
+    doc["account"]["uid"] = "uid-gl"
+    doc["accounts"][0]["uid"] = "uid-gl"
+    doc["allAccounts"][0]["uid"] = "uid-gl"
+    enc = sw.encode_session(doc, TEST_KEY)
+    auth_file.write_text(json.dumps(enc, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(sw, "auth_file_path", lambda profile=None: auth_file)
+
+    async def fake_key(profile=None):
+        return TEST_KEY
+
+    monkeypatch.setattr(sw, "get_official_key", fake_key)
+
+    async def fake_prefetch(account, profile=None):
+        return
+
+    monkeypatch.setattr(oauth, "prefetch_caches", fake_prefetch)
+
+    account = asyncio.run(imports.import_local(profile=REALM_GLOBAL))
+    assert account["uid"] == "uid-gl"
+    assert account["domain"] == "www.workbuddy.ai"
+    assert len(asyncio.run(store.load_accounts("workbuddy-global"))) == 1
+    assert asyncio.run(store.load_accounts("workbuddy")) == []  # CN 池零写入
+
+
+def test_import_local_global_rejects_cn_domain(tmp_path, monkeypatch):
+    """国际版 profile 读到 CN 域登录态（错位场景）→ 拒绝并引导。"""
+    from relay.platforms.workbuddy import ide_switch as sw
+    from relay.platforms.workbuddy.realms import REALM_GLOBAL
+
+    auth_file = tmp_path / "workbuddy-desktop-ai.info"
+    doc = sw.encode_session(_plain_local_doc(), TEST_KEY)  # domain=www.workbuddy.cn
+    auth_file.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(sw, "auth_file_path", lambda profile=None: auth_file)
+
+    async def fake_key(profile=None):
+        return TEST_KEY
+
+    monkeypatch.setattr(sw, "get_official_key", fake_key)
+    with pytest.raises(ImportParseError, match="国内版"):
+        asyncio.run(imports.import_local(profile=REALM_GLOBAL))
+
+
+def test_parse_9router_provider_by_profile():
+    """9router providerConnections 筛选按 profile：国际版只吃 codebuddy-intl。"""
+    from relay.platforms.workbuddy.realms import REALM_GLOBAL
+
+    doc = {"providerConnections": [
+        {"accessToken": _jwt(sub="uid-cn"), "provider": "codebuddy-cn", "name": "cn"},
+        {"accessToken": _jwt(sub="uid-gl"), "provider": "codebuddy-intl", "name": "gl"},
+    ]}
+    [cn] = imports.parse_import_text(json.dumps(doc))              # CN 默认
+    assert cn["uid"] == "uid-cn"
+    [gl] = imports.parse_import_text(json.dumps(doc), REALM_GLOBAL)
+    assert gl["uid"] == "uid-gl"
+    # 单侧缺失 → 明确报错
+    only_cn = json.dumps({"providerConnections": [
+        {"accessToken": _jwt(), "provider": "codebuddy-cn"}]})
+    with pytest.raises(ImportParseError, match="无 codebuddy-intl"):
+        imports.parse_import_text(only_cn, REALM_GLOBAL)

@@ -35,3 +35,4 @@ Thumbs.db
 
 # WorkBuddy AI 会话数据（工作日志/记忆，属本地状态）
 .workbuddy/
+.zcode/

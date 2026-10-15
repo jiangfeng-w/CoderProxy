@@ -137,24 +137,24 @@ def payload_from_import_value(value: object, index: int | None = None) -> dict:
     return payload
 
 
-def parse_import_text(text: str) -> list[dict]:
+def parse_import_text(text: str, profile: WbRealm = REALM_CN) -> list[dict]:
     """粘贴/文件文本 → payload 列表：`{`/`[` 开头走 JSON，否则整串当纯 token。
 
     纯 token 只产 `{access_token, source:"token"}`——联网补全在 import_text 编排层做
-    （解析层保持纯函数可测）。
+    （解析层保持纯函数可测）。profile 仅影响 9router providerConnections 的筛选名。
     """
     stripped = (text or "").strip()
     if not stripped:
         raise ImportParseError("请输入 Token 或 JSON")
     if stripped[0] in "{[":
-        return _parse_import_json(stripped)
+        return _parse_import_json(stripped, profile)
     token = normalize_token(stripped)
     if not token:
         raise ImportParseError("未解析到 access token")
     return [{"access_token": token, "source": "token"}]
 
 
-def _parse_import_json(text: str) -> list[dict]:
+def _parse_import_json(text: str, profile: WbRealm = REALM_CN) -> list[dict]:
     try:
         doc = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -172,20 +172,22 @@ def _parse_import_json(text: str) -> list[dict]:
                 if not items:
                     raise ImportParseError(f"导入 JSON 的 {key} 数组为空")
                 return [payload_from_import_value(item, i + 1) for i, item in enumerate(items)]
-        # 9router 设置导出：providerConnections[]（只吃 codebuddy-cn，其它平台跳过）
+        # 9router 设置导出：providerConnections[]（按 profile 吃对应 provider，其它平台跳过；
+        # 双域：CN 吃 codebuddy-cn / 国际版吃 codebuddy-intl——防串池，2026-10-15 二期）
         conns = doc.get("providerConnections")
         if isinstance(conns, list):
+            provider = profile.nine_router_provider
             picked, skipped = [], 0
             for conn in conns:
                 if not isinstance(conn, dict) or not any(conn.get(k) for k in _TOKEN_KEYS):
                     continue
-                if conn.get("provider") not in (None, "codebuddy-cn"):
+                if conn.get("provider") not in (None, provider):
                     skipped += 1
                     continue
                 picked.append(conn)
             if not picked:
                 hint = f"（{skipped} 条其它平台账号已跳过）" if skipped else ""
-                raise ImportParseError(f"providerConnections 中无 codebuddy-cn 账号{hint}")
+                raise ImportParseError(f"providerConnections 中无 {provider} 账号{hint}")
             return [payload_from_import_value(item, i + 1) for i, item in enumerate(picked)]
         # 无包裹也无 token：按单条记录解析，报出「缺少 access_token」（cockpit 三级降级口径）
         return [payload_from_import_value(doc)]
@@ -247,17 +249,17 @@ async def complete_from_accounts_api(access_token: str,
 # ── 本机导入（读官方客户端登录态，复用 ide_switch 密钥派生/解密） ──
 
 
-async def _local_payload() -> dict:
-    auth_file = ide_switch.auth_file_path()
+async def _local_payload(profile: WbRealm = REALM_CN) -> dict:
+    auth_file = ide_switch.auth_file_path(profile)
     marker = ide_switch.logout_marker_path(auth_file) if auth_file else None
     if auth_file is None or not auth_file.exists() or (marker is not None and marker.exists()):
-        raise ImportParseError("未在本机 WorkBuddy 客户端中找到登录信息")
+        raise ImportParseError(f"未在本机 {profile.display_name} 客户端中找到登录信息")
     try:
         raw = await asyncio.to_thread(auth_file.read_text, encoding="utf-8")
         doc = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ImportParseError(f"本机登录信息不是有效 JSON：{exc}") from exc
-    key = await ide_switch.get_official_key()
+    key = await ide_switch.get_official_key(profile)
     decoded = ide_switch.decode_session(doc, key)
     auth = decoded.get("auth") if isinstance(decoded, dict) else None
     account = decoded.get("account") if isinstance(decoded, dict) else None
@@ -302,7 +304,7 @@ async def import_text(text: str, profile: WbRealm = REALM_CN) -> list[dict]:
 
     归属校验（§6）：JSON 里带域且域族不符（国际号进 CN / CN 号进国际版）→ 拒绝该条。
     """
-    payloads = parse_import_text(text)
+    payloads = parse_import_text(text, profile)
     imported: list[dict] = []
     for payload in payloads:
         if payload.get("source") == "token":
@@ -328,10 +330,18 @@ async def import_text(text: str, profile: WbRealm = REALM_CN) -> list[dict]:
 async def import_local(profile: WbRealm = REALM_CN) -> dict:
     """读本机官方客户端当前登录账号入库（解密成功即入库，配额预取 best-effort）。
 
-    CN 生态专属（CN 客户端登录态 / cockpit·9router 格式）；国际版未挂载本端点
-    （routes 侧保持 CN 专用路径，前端不显示入口）。
+    双域（2026-10-15 二期）：按 profile 读对应客户端登录态（CN workbuddy-desktop.info /
+    国际版 workbuddy-desktop-ai.info，本机实测同目录并列、结构同构）；入库前补归属校验
+    （§6 口径——CN 客户端登录态只会是 CN 域账号，但防御脏数据/错位场景）。
     """
-    payload = await _local_payload()
+    payload = await _local_payload(profile)
+    raw_domain = str(payload.get("domain") or "")
+    if not profile.allows_domain(raw_domain):
+        if profile.is_global:
+            raise ImportParseError(
+                f"本机登录账号域 {raw_domain} 属于国内版，请到「WorkBuddy CN」标签页导入")
+        raise ImportParseError(
+            f"本机登录账号域 {raw_domain} 属于国际版，请到「WorkBuddy」标签页导入")
     entry = _to_entry(payload)
     account = await store.upsert_account(profile.platform_id, entry, preserve=True)
     await prefetch_caches(account, profile=profile)

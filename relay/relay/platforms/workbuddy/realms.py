@@ -53,6 +53,19 @@ class WbRealm:
     chat_domain: str = ""  # 非空 → chat 恒发 X-Domain（国际版）；空 = 按账号 domain（CN）
     ensure_system_first: bool = False  # chat 首条强制 system（国际版实测 400/11128）
     quota_fallback_style: str = "saas"  # get-user-resource 回退头风格（CN saas / 国际版 desktop）
+    # ── 官方客户端集成（ide_switch / imports 本机导入；2026-10-15 二期增补） ──
+    auth_file_name: str = "workbuddy-desktop.info"  # %LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\
+    client_image_name: str = "WorkBuddy.exe"  # tasklist/taskkill 映像名
+    exe_env_override: str = "RELAY_WB_IDE_EXE"  # 客户端 exe 显式覆盖 env 名
+    exe_candidates: tuple[str, ...] = (
+        r"%LOCALAPPDATA%\Programs\WorkBuddy\WorkBuddy.exe",
+        r"%PROGRAMFILES%\WorkBuddy\WorkBuddy.exe",
+        r"%PROGRAMFILES(X86)%\WorkBuddy\WorkBuddy.exe",
+    )
+    # ── 导出集成（exports；2026-10-15 二期增补） ──
+    cockpit_id_prefix: str = "workbuddy"  # cockpit id = <prefix>_md5(uid)
+    nine_router_provider: str = "codebuddy-cn"  # 9router providerConnections.provider
+    export_filename_base: str = "workbuddy_accounts"  # cockpit 导出文件名基
 
     # ─────────────── base 类：读时取 settings（env / monkeypatch 生效） ───────────────
 
@@ -156,6 +169,25 @@ REALM_GLOBAL = WbRealm(
     chat_domain="www.workbuddy.ai",
     ensure_system_first=True,
     quota_fallback_style="desktop",
+    # 国际版官方客户端（WorkBuddy AI，2026-10-15 本机实测：
+    #   - 安装于 D:\Programs\WorkBuddyAI\WorkBuddyAI.exe（非默认盘，注册表兜底发现）
+    #   - 登录态文件 workbuddy-desktop-ai.info 与 CN 同目录并列、结构同构
+    #     （account/auth/accounts/allAccounts 四根 + 同字段级 $wbEncrypted）
+    #   - exe 内含同名 binding electron_browser_workbuddy_storage（密钥派生同款）
+    auth_file_name="workbuddy-desktop-ai.info",
+    client_image_name="WorkBuddyAI.exe",
+    exe_env_override="RELAY_WB_AI_IDE_EXE",
+    exe_candidates=(
+        r"%LOCALAPPDATA%\Programs\WorkBuddyAI\WorkBuddyAI.exe",
+        r"%PROGRAMFILES%\WorkBuddyAI\WorkBuddyAI.exe",
+        r"%PROGRAMFILES(X86)%\WorkBuddyAI\WorkBuddyAI.exe",
+        r"D:\Programs\WorkBuddyAI\WorkBuddyAI.exe",
+    ),
+    # cockpit 国际版导出（CodebuddyAccount 形状；id=codebuddy_+md5(小写 uid)，
+    # 与用户实物 codebuddy_461e541f… 逐字吻合）+ 9router provider codebuddy-intl
+    cockpit_id_prefix="codebuddy",
+    nine_router_provider="codebuddy-intl",
+    export_filename_base="codebuddy_accounts",
 )
 
 ALL_REALMS: tuple[WbRealm, WbRealm] = (REALM_CN, REALM_GLOBAL)

@@ -5,6 +5,7 @@ keyless：不依赖官方客户端、真实密钥或进程——密钥用合成 
 """
 import base64
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -302,7 +303,7 @@ def test_read_ide_state_sync(tmp_path, monkeypatch):
     auth_file = tmp_path / "CodeBuddyExtension" / "Data" / "Public" / "auth" / "workbuddy-desktop.info"
     auth_file.parent.mkdir(parents=True)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    monkeypatch.setattr(sw, "resolve_client_exe", lambda: Path("C:/fake/WorkBuddy.exe"))
+    monkeypatch.setattr(sw, "resolve_client_exe", lambda profile=None: Path("C:/fake/WorkBuddy.exe"))
     doc = _plain_auth_file()
     doc["account"]["uid"] = "uid-live"
     auth_file.write_text(json.dumps(doc), encoding="utf-8")
@@ -329,3 +330,85 @@ def test_read_ide_state_sync(tmp_path, monkeypatch):
 def test_official_key_rejects_wrong_length():
     with pytest.raises(IdeSwitchError):
         OfficialKey(bytes(31))
+
+
+# ── 双域 profile（2026-10-15 二期：国际版客户端登录态/进程/exe 参数化） ──
+
+def test_realm_profile_client_integration_fields():
+    """profile 客户端集成字段：CN/国际版路径与进程名（本机实测形态）。"""
+    from relay.platforms.workbuddy.realms import REALM_CN, REALM_GLOBAL
+
+    assert REALM_CN.auth_file_name == "workbuddy-desktop.info"
+    assert REALM_CN.client_image_name == "WorkBuddy.exe"
+    assert REALM_CN.exe_env_override == "RELAY_WB_IDE_EXE"
+    assert REALM_GLOBAL.auth_file_name == "workbuddy-desktop-ai.info"
+    assert REALM_GLOBAL.client_image_name == "WorkBuddyAI.exe"
+    assert REALM_GLOBAL.exe_env_override == "RELAY_WB_AI_IDE_EXE"
+    assert any("WorkBuddyAI" in c for c in REALM_GLOBAL.exe_candidates)
+
+
+def test_auth_file_path_dual_realm(tmp_path, monkeypatch):
+    """两域登录态文件同目录并列、文件名按 profile 分派。"""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    from relay.platforms.workbuddy.realms import REALM_CN, REALM_GLOBAL
+
+    cn = sw.auth_file_path(REALM_CN)
+    gl = sw.auth_file_path(REALM_GLOBAL)
+    assert cn.name == "workbuddy-desktop.info"
+    assert gl.name == "workbuddy-desktop-ai.info"
+    assert cn.parent == gl.parent  # 同目录并列（本机实测）
+
+
+def test_read_ide_state_sync_global_profile(tmp_path, monkeypatch):
+    """国际版 profile：从 -ai 文件读 current_uid；CN profile 看不到国际版文件。"""
+    from relay.platforms.workbuddy.realms import REALM_CN, REALM_GLOBAL
+
+    auth_file = (tmp_path / "CodeBuddyExtension" / "Data" / "Public" / "auth"
+                 / "workbuddy-desktop-ai.info")
+    auth_file.parent.mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(
+        sw, "resolve_client_exe",
+        lambda profile=None: Path("D:/Programs/WorkBuddyAI/WorkBuddyAI.exe"))
+    doc = _plain_auth_file()
+    doc["account"]["uid"] = "uid-global"
+    auth_file.write_text(json.dumps(doc), encoding="utf-8")
+    state = sw.read_ide_state_sync(REALM_GLOBAL)
+    assert state["installed"] is True
+    assert state["auth_exists"] is True
+    assert state["current_uid"] == "uid-global"
+    # CN profile 查的是 workbuddy-desktop.info（不存在 → auth_exists False）
+    assert sw.read_ide_state_sync(REALM_CN)["auth_exists"] is False
+
+
+def test_key_cache_isolated_per_platform():
+    """密钥缓存按 platform_id 分桶（invalidate 单域不清另一域）。"""
+    from relay.platforms.workbuddy.realms import REALM_CN, REALM_GLOBAL
+
+    sw._cached_keys[REALM_CN.platform_id] = OfficialKey(bytes([7] * 32))
+    sw._cached_keys[REALM_GLOBAL.platform_id] = OfficialKey(bytes([9] * 32))
+    sw._cached_at[REALM_CN.platform_id] = time.monotonic()
+    sw._cached_at[REALM_GLOBAL.platform_id] = time.monotonic()
+    try:
+        sw.invalidate_key(REALM_CN.platform_id)
+        assert REALM_CN.platform_id not in sw._cached_keys
+        assert REALM_GLOBAL.platform_id in sw._cached_keys
+        sw.invalidate_key()  # 全清
+        assert not sw._cached_keys
+    finally:
+        sw._cached_keys.clear()
+        sw._cached_at.clear()
+
+
+def test_resolve_client_exe_env_override_dual_realm(tmp_path, monkeypatch):
+    """env 覆盖按 profile 分派（CN RELAY_WB_IDE_EXE / 国际版 RELAY_WB_AI_IDE_EXE）。"""
+    from relay.platforms.workbuddy.realms import REALM_CN, REALM_GLOBAL
+
+    fake_cn = tmp_path / "WorkBuddy.exe"
+    fake_gl = tmp_path / "WorkBuddyAI.exe"
+    fake_cn.write_text("x")
+    fake_gl.write_text("x")
+    monkeypatch.setenv("RELAY_WB_IDE_EXE", str(fake_cn))
+    monkeypatch.setenv("RELAY_WB_AI_IDE_EXE", str(fake_gl))
+    assert sw.resolve_client_exe(REALM_CN) == fake_cn
+    assert sw.resolve_client_exe(REALM_GLOBAL) == fake_gl
