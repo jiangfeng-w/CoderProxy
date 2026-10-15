@@ -98,7 +98,8 @@ note_success(uid)：fail_count=0、degraded_until=0
 - priority spec 已定稿（2026-10-11），不重复设计；本批实施顺序建议：**本需求先行，priority 紧随**（或同一 PR）
 - `store.py` preserve 名单一次性合并 `priority + fail_count + degraded_until + model_cooldowns`（避免两次改）
 - `_pick_account` 合并后语义：先按 priority 分组 → 组内过滤冷却/降权 → 游标轮询；**高优组全冷却/全降权时落到下一组**（可用性优先于优先级——在 priority spec 上补一句此决策）
-- `AccountView`（`base.py`）加 `priority` 时顺带透出 `degraded_until` / `model_cooldowns`（只读展示：「该号限流中，12:30 恢复」——前端是否展示由用户定）
+- `AccountView`（`base.py`）加 `priority` 时顺带透出 `degraded_until` / `model_cooldowns`（只读；**前端倒计时展示已拍板必做**，见 §7-E）
+  - `model_cooldowns` 透出时**已过期条目先惰性清理**（对齐 9router `clearAccountError` 的过期清理与 `pruneExpiredModelCooldowns`），保证前端拿到的"最早到期"语义干净
 
 ### 6. 被否决的备选
 
@@ -120,7 +121,19 @@ note_success(uid)：fail_count=0、degraded_until=0
 
 **D. 6004 封顶改「尊重上游时间」**（§3 已修订）：解析成功锁满上游墙钟（宽松封顶 12h 防脏数据）；解析失败才走 15min 有界退避。用户 2026-10-15 拍板。
 
-**E. 可选增补（待用户排期）：前端限流倒计时展示**——账号卡片 meta 行显示「限流中 · HH:MM 恢复」（`degraded_until` 与 `model_cooldowns` 最近到期），对齐 9router `CooldownTimer` 形态；后端 `AccountView` 透出（§5 已计划）。
+**E. 前端限流倒计时展示（2026-10-15 用户拍板必做，对齐 9router）**：
+
+用户要求「和 9router 一样显示出来，可以获取到限流解除时间」。9router 实际做法（已读源码）：
+
+- **数据源**：连接记录上的扁平字段 `modelLock_${model}`（ISO 串）；前端 `ConnectionRow.js:91-112` 取**所有 `modelLock_*` 中最早且未到期者**作为 `modelLockUntil`，`useEffect` 每秒重算 `isCooldown`（到期自动消失、状态回 active）
+- **展示**：`CooldownTimer.js`（42 行）——`⏱ {remaining}` 橙色等宽小字，每秒 tick；格式化 `Xs`（<60s）/ `Xm Ys`（<1h）/ `Xh Ym`（≥1h）；到期返回 null 不渲染
+- **触达**：只在 `isCooldown && isActive !== false` 时显示（禁用号不显示倒计时）
+
+本仓库落点（双域通用，CN/国际同款）：
+- 后端：`AccountView` 透出 `degraded_until`（ms）+ `model_cooldowns`（{model: {until, reason}}）——前端直接算最早到期
+- 前端：`WorkBuddyTab.vue` 账号卡片 meta 行加倒计时组件（`<CooldownCountdown :until>` 每秒 tick，格式化同 9router 口径：`Xs`/`Xm Ys`/`Xh Ym`，`⏱` 前缀）；**取 `degraded_until` 与 `model_cooldowns` 全部未到期条目的最早者**——语义即「该号最早何时可能恢复出场」
+- 展示文案区分两类：连败挂起（降权）显示 `⏱ 挂起 Xm`；模型冷却显示 `⏱ 限流 Xh Ym`（含 reason 6004/11102 tooltip「最晚恢复：YYYY-MM-DD HH:MM:SS」）
+- 到期自动消失（每秒重算，与 9router 一致）；账号卡片其余操作（删除/刷新配额等）不受影响
 
 **复核已对齐项（无需改动）**：连败降级语义（不延长/成功清零/refresh 不清）、模型级 6004 豁免、11102 负缓存与成功只清 11102、请求级 4xx 不罚（9router 同哲学）、落盘/preserve/priority 协调。
 
@@ -146,6 +159,7 @@ note_success(uid)：fail_count=0、degraded_until=0
 - [ ] **11140 双语义**：`request illegal` → 换号+全池 503；限流文案 → 模型冷却（两形态各一用例）
 - [ ] **12153**：换号重试 + 全池 503（不喂连败断言）
 - [ ] **6004 尊重上游时间**：解析出远未来重置时间（如 8h）→ 冷却锁满（宽松封顶 12h 断言）
+- [ ] **前端倒计时（对齐 9router）**：AccountView 透出 `degraded_until`/`model_cooldowns`；前端每秒 tick、取最早未到期条、格式化 `Xs`/`Xm Ys`/`Xh Ym`、到期自动消失；挂起/限流两类文案可区分；format:check + build 绿
 
 ## 实施步骤（commit 序列）
 
@@ -155,6 +169,7 @@ note_success(uid)：fail_count=0、degraded_until=0
 | 2 | `feat: 模型级冷却与 11102 负缓存`（chat parse_error/轮换链 + 测试） | pytest；冷却时长/跳过/清除用例 |
 | 3 | `feat: 全池挂起 429 映射`（routes + 测试） | pytest + 冒烟 |
 | 4 | `chore: priority 合并落地或交接注记`（视批次安排） | 全量回归 |
+| 5 | `feat: 前端限流倒计时（对齐 9router CooldownTimer）`（AccountView 透出 + WorkBuddyTab 倒计时组件） | format:check + build；手动验收倒计时真实倒走 |
 
 ## 改动文件清单
 
