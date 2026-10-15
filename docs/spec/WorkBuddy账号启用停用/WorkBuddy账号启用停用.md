@@ -56,9 +56,16 @@
 - 健康管理需求在 `chat.py` 选号链内再叠「非降权/非冷却」过滤（**不改** catalog/门控——其 spec 已明确），与本需求的启用过滤正交；本批实施时一次写全。
 - `refresh_credentials` 经 `_normal_accounts` 天然排除停用号（停用号不参与任何请求路径，含被动刷新）；重新启用后下次选中时经 `ensure_token` 按需刷新——无手动刷新需求，口径闭环。
 
-### 并行修复：BUG-007 目录缓存先于账号检查（本批必带）
+### 并行修复：BUG-007 目录缓存先于账号检查 + BUG-008 并发 stampede（本批必带）
 
-见 `docs/已知问题.md` BUG-007：`catalog.py::load_models` 的缓存命中判断**先于** `_pick_account` 账号检查——池空（删光账号或全停用）后目录最长 1h 仍返回缓存，「模型看得见、一用就 503」。本需求改 `_pick_account` 与其相邻，**同批修**：把 `_pick_account` 提到缓存判断之前，池空 → 清本桶缓存 + 返回 `[]`（不触网/不设负缓存）。修正后「全停用 ≈ 池空」的目录语义为**即时为空**（否则全停用用户会看到同样的 stale 态）。验收用例随本批加（BUG-007 §5）。
+两条均见 `docs/已知问题.md`，与 `catalog.py::_pick_account`/`load_models` 同函数相邻，本批一次改完：
+
+- **BUG-007**：`load_models` 的缓存命中判断**先于** `_pick_account` 账号检查——池空（删光账号或全停用）后目录最长 1h 仍返回缓存，「模型看得见、一用就 503」。修法：把 `_pick_account` 提到缓存判断之前，池空 → 清本桶缓存 + 返回 `[]`（不触网/不设负缓存）。修正后「全停用 ≈ 池空」的目录语义为**即时为空**（否则全停用用户会看到同样的 stale 态）。
+- **BUG-008**：`load_models` 无 single-flight——冷缓存/过期瞬间 N 个并发调用各拉一轮上游（2N 次 GET，聊天路径每请求都经 `find_provider_model` → `load_models`）。修法：per-platform_id `asyncio.Lock`（双域分桶）+ 锁内双检缓存（对齐 `adapter.py::_refresh_locks`/`ensure_token` 既有模式）；`force=True` 建议绕锁（语义即强拉）。
+
+另注（**非** bug，被问核实）：**多账号不会造成多次拉取**——目录取「首个 normal 号」（uid 排序），3 个账号也只选 1 个号拉取，上游请求数只与端点数有关（v3 + 企业端点 = 2 次）。
+
+验收用例随本批加（BUG-007 §5 / BUG-008 §5）。
 
 ### 关键实现陷阱（必须覆盖）
 
@@ -145,9 +152,9 @@ relay/relay-onefile.spec、relay/relay.spec      # 无新模块则不动（store
 
 | # | commit | 验证 |
 |---|---|---|
-| 1 | `feat: 账号池启用字段与全链路选号排除`（store + base + chat + catalog + routes 门控 + 测试；**含 BUG-007 修复**） | pytest 全量 + ruff；默认（无字段）行为逐请求等价回归 |
+| 1 | `feat: 账号池启用字段与全链路选号排除`（store + base + chat + catalog + routes 门控 + 测试；**含 BUG-007 + BUG-008 修复**） | pytest 全量 + ruff；默认（无字段）行为逐请求等价回归 |
 | 2 | `feat: 账号启用停用端点与卡片开关`（routes + api/store/tab + 路由测试） | pytest + format:check + build |
-| 3 | `chore: spec 台账收尾`（含 BUG-007 勾销回填） | 打包冒烟（无模块级新增则仅产物验证）+ 台账回填 |
+| 3 | `chore: spec 台账收尾`（含 BUG-007 / BUG-008 勾销回填） | 打包冒烟（无模块级新增则仅产物验证）+ 台账回填 |
 
 > 与健康管理/优先级同批时的合并注记：三项一次改 preserve 名单与选号链；本 spec 的 commit 1 与健康 commit 1/2、优先级 commit 1 合并为同一批次提交亦可（按实施会话安排）。
 
@@ -158,6 +165,7 @@ relay/relay-onefile.spec、relay/relay.spec      # 无新模块则不动（store
   - [ ] chat：单号停用 → 永不被选（MockTransport 断言上游只收启用号的请求）；全停用 → `NoAvailableAccountError`（503 语义）
   - [ ] catalog：停用号被跳过；全停用 → `_pick_account` None（目录空）
   - [ ] **BUG-007**：seed 账号 force 拉目录 → 删光/全停用 → 普通读返回 `[]`（不再缓存 stale）；重新启用/加号 → 普通读恢复
+  - [ ] **BUG-008**：冷缓存 N 并发 → 上游请求数 == 2（非 2N）；双域锁隔离；force 语义锁死（见 BUG-008 §5）
   - [ ] routes：端点 200/404/400（含 `enabled: 1` 拒绝）；AccountView 含 `enabled` 且不含 token（照旧断言）
   - [ ] 门控：全池停用 → `_available` False / `_any_platform_available` 跳过该池（双池另一池正常时服务仍可用）
 - [ ] ruff + `npm run format:check` + `npm run build` 通过
