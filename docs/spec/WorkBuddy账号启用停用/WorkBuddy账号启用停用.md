@@ -39,7 +39,7 @@
 | 语义 | 用户意图；只有 `POST .../enabled` 端点写它；`upsert_account`（重登录/导入）preserve 保留 |
 | 排除面 | **全链路**（用户拍板）：反代选号 + 目录选号 + 服务门控；管理端点与导出不受影响 |
 | 读取口径 | 统一助手 `store.is_selectable(a)`：`status == "normal" and a.get("enabled") is not False`（缺失/null/非 false 一律视为启用——存量文件零迁移） |
-| 全停用语义 | ≈「池空」：目录空（1h TTL 内仍走缓存，之后为空）、聊天请求 503（`NoAvailableAccountError`）、服务门控该池视为不可用（另一池/牛码/自定义供应商可用则服务照常） |
+| 全停用语义 | ≈「池空」：目录**即时为空**（`load_models` 池空即清缓存返回空，见下「BUG-007 并行修复」）、聊天请求 503（`NoAvailableAccountError`）、服务门控该池视为不可用（另一池/牛码/自定义供应商可用则服务照常） |
 | 端点 | `POST /v1/platforms/{platform}/accounts/{uid}/enabled`，body `{enabled: bool}` → 更新后 AccountView；404 账号不存在 / 400 非法 body（单一端点幂等，对齐壳转发仅 GET/POST/DELETE 约束） |
 | 前端 | 账号卡片头部：名称前 NSwitch（size small）；停用态卡片淡化 +「已停用」NTag；停用时不显示健康倒计时（与 9router 一致） |
 | 测试 | 全 keyless：store 默认/preserve（**含 falsy 陷阱**）/选号排除/全停用 503/门控/端点 |
@@ -55,6 +55,10 @@
 
 - 健康管理需求在 `chat.py` 选号链内再叠「非降权/非冷却」过滤（**不改** catalog/门控——其 spec 已明确），与本需求的启用过滤正交；本批实施时一次写全。
 - `refresh_credentials` 经 `_normal_accounts` 天然排除停用号（停用号不参与任何请求路径，含被动刷新）；重新启用后下次选中时经 `ensure_token` 按需刷新——无手动刷新需求，口径闭环。
+
+### 并行修复：BUG-007 目录缓存先于账号检查（本批必带）
+
+见 `docs/已知问题.md` BUG-007：`catalog.py::load_models` 的缓存命中判断**先于** `_pick_account` 账号检查——池空（删光账号或全停用）后目录最长 1h 仍返回缓存，「模型看得见、一用就 503」。本需求改 `_pick_account` 与其相邻，**同批修**：把 `_pick_account` 提到缓存判断之前，池空 → 清本桶缓存 + 返回 `[]`（不触网/不设负缓存）。修正后「全停用 ≈ 池空」的目录语义为**即时为空**（否则全停用用户会看到同样的 stale 态）。验收用例随本批加（BUG-007 §5）。
 
 ### 关键实现陷阱（必须覆盖）
 
@@ -132,7 +136,7 @@ relay/relay-onefile.spec、relay/relay.spec      # 无新模块则不动（store
 - 停用**不清理**该号的健康惩罚与冷却状态（`fail_count`/`degraded_until`/`model_cooldowns` 保留）；重新启用后按原状态继续参与——与 9router 同口径（停用不清状态）；清零属健康管理范畴，不在本期。
 - 导出/导入**不携带**停用态：cockpit 格式无该概念、9router `isActive` 属其自身连接治理——回导按默认启用。**已知且接受**（如日后要携带，需改两格式 + 两侧解析，另议）。
 - 停用号仍出现在账号列表与统计里（要能再启用）；不产请求，计费口径无变化。
-- 全停用时目录走缓存（1h TTL 内仍列出模型），TTL 后为空；请求则即时 503（门控不依赖目录缓存）。
+- 全停用时目录**即时为空**（BUG-007 并行修复后：池空即清缓存返回空，不再有 1h TTL 滞后）；请求即时 503（门控不依赖目录缓存）。
 - 优先级（priority）**不因停用而重排**：停用号仍占其优先级组，只是不参选；启用后自动回原组。
 - 管理端点（签到/配额/IDE 切号/导出）忽略 `enabled`（照常执行）——本就是用户显式对单号操作。
 - `enabled` 落盘在账号行（`platform_workbuddy.json`），用户可手改文件——不做防护（桌面单用户口径，同现状）。
@@ -141,9 +145,9 @@ relay/relay-onefile.spec、relay/relay.spec      # 无新模块则不动（store
 
 | # | commit | 验证 |
 |---|---|---|
-| 1 | `feat: 账号池启用字段与全链路选号排除`（store + base + chat + catalog + routes 门控 + 测试） | pytest 全量 + ruff；默认（无字段）行为逐请求等价回归 |
+| 1 | `feat: 账号池启用字段与全链路选号排除`（store + base + chat + catalog + routes 门控 + 测试；**含 BUG-007 修复**） | pytest 全量 + ruff；默认（无字段）行为逐请求等价回归 |
 | 2 | `feat: 账号启用停用端点与卡片开关`（routes + api/store/tab + 路由测试） | pytest + format:check + build |
-| 3 | `chore: spec 台账收尾` | 打包冒烟（无模块级新增则仅产物验证）+ 台账回填 |
+| 3 | `chore: spec 台账收尾`（含 BUG-007 勾销回填） | 打包冒烟（无模块级新增则仅产物验证）+ 台账回填 |
 
 > 与健康管理/优先级同批时的合并注记：三项一次改 preserve 名单与选号链；本 spec 的 commit 1 与健康 commit 1/2、优先级 commit 1 合并为同一批次提交亦可（按实施会话安排）。
 
@@ -153,7 +157,8 @@ relay/relay-onefile.spec、relay/relay.spec      # 无新模块则不动（store
   - [ ] store：缺省（无 `enabled` 字段）视为启用；`enabled=False` upsert 重登录后保留（**falsy 陷阱回归**）；`update_account` patch
   - [ ] chat：单号停用 → 永不被选（MockTransport 断言上游只收启用号的请求）；全停用 → `NoAvailableAccountError`（503 语义）
   - [ ] catalog：停用号被跳过；全停用 → `_pick_account` None（目录空）
+  - [ ] **BUG-007**：seed 账号 force 拉目录 → 删光/全停用 → 普通读返回 `[]`（不再缓存 stale）；重新启用/加号 → 普通读恢复
   - [ ] routes：端点 200/404/400（含 `enabled: 1` 拒绝）；AccountView 含 `enabled` 且不含 token（照旧断言）
   - [ ] 门控：全池停用 → `_available` False / `_any_platform_available` 跳过该池（双池另一池正常时服务仍可用）
 - [ ] ruff + `npm run format:check` + `npm run build` 通过
-- [ ] 手动验收（待用户）：停用 A 后聊天请求只走 B（日志可见选号）；全停用 → 聊天 503 / 模型列表按目录口径收敛；重新启用恢复；签到/配额/切号/导出不受停用影响；停用后重登录仍保持停用
+- [ ] 手动验收（待用户）：停用 A 后聊天请求只走 B（日志可见选号）；全停用 → 聊天 503 / 模型列表**即时为空**（BUG-007）重新启用恢复；签到/配额/切号/导出不受停用影响；停用后重登录仍保持停用
