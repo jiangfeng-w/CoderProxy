@@ -93,13 +93,14 @@ note_success(uid)：fail_count=0、degraded_until=0
 - 现有 `NoAvailableAccountError`（无号 / 全部凭证被拒）维持 503 + Retry-After 不变
 - 管理端点（签到/配额/IDE 切号）**不受**降权/冷却影响（用户显式操作单号，照常执行）
 
-### 5. 与《WorkBuddy 反代账号优先级》的协调（同批实施）
+### 5. 与《WorkBuddy 反代账号优先级》《WorkBuddy 账号启用停用》的协调（同批实施）
 
-- priority spec 已定稿（2026-10-11），不重复设计；本批实施顺序建议：**本需求先行，priority 紧随**（或同一 PR）
-- `store.py` preserve 名单一次性合并 `priority + fail_count + degraded_until + model_cooldowns`（避免两次改）
-- `_pick_account` 合并后语义：先按 priority 分组 → 组内过滤冷却/降权 → 游标轮询；**高优组全冷却/全降权时落到下一组**（可用性优先于优先级——在 priority spec 上补一句此决策）
-- `AccountView`（`base.py`）加 `priority` 时顺带透出 `degraded_until` / `model_cooldowns`（只读；**前端倒计时展示已拍板必做**，见 §7-E）
+- priority spec 已定稿（2026-10-11）、启用停用 spec 已定稿（2026-10-15），均不重复设计；三需求**同批实施**（顺序建议：本需求先行 → priority 紧随 → 启用停用收尾，或同一 PR）
+- `store.py` preserve 名单一次性合并 `priority + fail_count + degraded_until + model_cooldowns + enabled`（避免多次改；`enabled` 为 bool、需 falsy 判在场——见启用停用 spec「关键实现陷阱」）
+- `_pick_account` 合并后语义：先按 priority 分组 → 组内过滤（**启用** ∩ 非降权 ∩ 非冷却）→ 游标轮询；**高优组全冷却/全降权/全停用时落到下一组**（可用性优先于优先级——在 priority spec 上补一句此决策）
+- `AccountView`（`base.py`）加 `priority` 时顺带透出 `degraded_until` / `model_cooldowns` / `enabled`（只读；**前端倒计时展示已拍板必做**，见 §7-E）
   - `model_cooldowns` 透出时**已过期条目先惰性清理**（对齐 9router `clearAccountError` 的过期清理与 `pruneExpiredModelCooldowns`），保证前端拿到的"最早到期"语义干净
+- 停用与冷却正交（启用停用 spec 边界）：停用**不清**降权/冷却状态，重新启用后按原状态继续参与；停用的排除面比本需求更宽（反代选号 + 目录 + 门控），本需求只在反代选号链内叠加过滤
 
 ### 6. 被否决的备选
 
@@ -134,6 +135,7 @@ note_success(uid)：fail_count=0、degraded_until=0
 - 前端：`WorkBuddyTab.vue` 账号卡片 meta 行加倒计时组件（`<CooldownCountdown :until>` 每秒 tick，格式化同 9router 口径：`Xs`/`Xm Ys`/`Xh Ym`，`⏱` 前缀）；**取 `degraded_until` 与 `model_cooldowns` 全部未到期条目的最早者**——语义即「该号最早何时可能恢复出场」
 - 展示文案区分两类：连败挂起（降权）显示 `⏱ 挂起 Xm`；模型冷却显示 `⏱ 限流 Xh Ym`（含 reason 6004/11102 tooltip「最晚恢复：YYYY-MM-DD HH:MM:SS」）
 - 到期自动消失（每秒重算，与 9router 一致）；账号卡片其余操作（删除/刷新配额等）不受影响
+- **停用门控**（对齐 9router `isActive !== false`）：账号被用户停用（`enabled === false`，《[WorkBuddy 账号启用停用](../WorkBuddy账号启用停用/)》）时不显示倒计时——停用号不出场，冷却恢复时间对其无意义
 
 **复核已对齐项（无需改动）**：连败降级语义（不延长/成功清零/refresh 不清）、模型级 6004 豁免、11102 负缓存与成功只清 11102、请求级 4xx 不罚（9router 同哲学）、落盘/preserve/priority 协调。
 
