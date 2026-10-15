@@ -865,6 +865,12 @@ onUnmounted(stopPolling)
               </button>
             </div>
             <p class="dlg-expire">授权有效期：600s；轮询间隔：2s</p>
+            <p
+              v-if="isGlobal"
+              class="dlg-note"
+            >
+              提示：授权完成后浏览器可能自动唤起「WorkBuddy CN」客户端——这是上游页面的协议回跳 （<code>workbuddy://</code> 被 CN 客户端注册，AI 页面回跳未区分）， <strong>不影响本次登录</strong>，关掉即可。
+            </p>
             <NButton
               class="open-btn"
               type="primary"
@@ -1474,6 +1480,24 @@ onUnmounted(stopPolling)
   text-align: center;
   color: var(--cp-dim);
   font-size: 12px;
+}
+/* 国际版 OAuth 弹窗提示（workbuddy:// 回跳唤起 CN 客户端的知情说明） */
+.dlg-note {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  background: var(--cp-panel-2);
+  border: 1px solid var(--cp-border);
+  border-radius: 6px;
+  color: var(--cp-dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.dlg-note code {
+  font-family: var(--cp-mono, monospace);
+  color: var(--cp-text);
+}
+.dlg-note strong {
+  color: var(--cp-text);
 }
 /* 授权说明盒（对齐 cockpit-tools：「授权 IDE 登录信息」信息框） */
 .auth-box {

@@ -153,6 +153,7 @@
 - 国际版模型默认可见性规则与 CN 同款（前缀 ∈ {`wbcn`, `wbg`} + 无档位 → 默认隐藏）
 - 前缀大小写不敏感匹配（现口径继承）：`WBCN/…`、`WBG/…` 等输入均归一为小写规范形态输出
 - 前缀撞名：`wbg` / `wbcn` 均为 3+ 字符、撞名概率极低；`name_conflicts` 只拦新建/改名、不追溯存量自定义供应商——若存量恰有同名自定义供应商会遮蔽其前缀路由，届时手动改名即可（知情接受，不做迁移脚本）
+- **`workbuddy://` 协议回跳唤起 CN 客户端（2026-10-15 用户实测 + 注册表取证）**：添加**国际版**账号时，浏览器授权完成后可能自动打开一次 **WorkBuddy CN 客户端**。根因：上游 AI 页面 OAuth 回跳用 `workbuddy://` scheme，而 Windows 注册表里该 scheme 被 CN 客户端抢注（`HKCU\Software\Classes\workbuddy\shell\open\command` → `WorkBuddy.exe`；国际版注册的是 `workbuddy-ai://`、另一条 `buddy-app://` 也指向 CN）——**上游页面行为，relay/本应用未启动任何 CN 客户端**（添加账号链路零 start_client 调用），不写数据、不影响登录结果。缓解：国际版 OAuth 弹窗加知情提示文案（本地修订，非修复）；不改注册表（侵入用户系统）
 - 规则 5：全部真机验证只用小号
 
 ## 验收
