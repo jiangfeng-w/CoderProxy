@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "com.coderproxy.desktop.dev",
+  "app": {
+    "windows": [
+      {
+        "title": "CoderProxy（开发版）",
+        "width": 960,
+        "height": 680,
+        "minWidth": 800,
+        "minHeight": 600
+      }
+    ]
+  }
+}
