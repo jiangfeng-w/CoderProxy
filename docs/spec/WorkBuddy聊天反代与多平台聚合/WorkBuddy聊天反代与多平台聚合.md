@@ -6,6 +6,7 @@
 > **依赖**：WorkBuddy多账号登录与签到（账号池底座，已实现 2026-10-08）；与[多协议端点兼容](../多协议端点兼容-三协议入站统一/)共享入站归一层（正交）
 > **定稿日期**：2026-10-07（架构）/ 2026-10-08（细化）；**实现完成**：2026-10-09
 > **隐私声明**：本文档仅含公开开源项目信息与占位符示例，不含任何真实账号、凭证、token、uid。
+> **追加注记（2026-10-17）**：出站头族增**会话头族三件套**——`X-Conversation-ID` / `X-Conversation-Request-ID` / `X-Conversation-Message-ID`（各 32 hex、每请求现生成）+ 同值别名 `X-Root-Request-ID` / `X-Request-ID`，**两域同发**（`chat.py::_headers`）。背景：上游 2026-10-15/16 起对国际版 chat 网关加渠道校验，缺三件套即 `400 code=11128`（msg `conversation id missing`，displayTips「这次调用没通过渠道校验，可能不是官方客户端发出的」）。依据：panel PR #190（Live A/B「只加 `X-Conversation-ID` 即 200」+ v1.13.0 backport 5 个国际账号通过）、9router PR #4949（抓包官方 5.8.4 客户端：会话 id 每请求新值、上游不据此存历史；别名与 trace 族形态）；我方受控探针实测（纯对话/带工具/工具续轮三形态被拦，补三件套即 200；CN 带同组头回归 200）。CN 未强制但实测容忍、与官方客户端同源家族 → 同发（panel 生产亦两域同发）。详见 `docs/已知问题.md` BUG-014；trace 族（`X-Trace-ID`/`traceparent`/`b3`/`X-B3-*`）按 9router 抓包可后置补齐。
 
 ## 1. 背景 / 目标
 
