@@ -1,8 +1,12 @@
 """工具配对安全网（BUG-4「出站安全网」，spec §4.5.3 规划落地）。
 
 对齐参考实现 `workbuddy2api-panel/internal/upstream/tool_pairing.go`（逐条移植）并
-吸收 `chatcoder`/`9router` 的「补缺失结果」路线，共三层（`repair_tool_pairing` 一键串联）：
+吸收 `chatcoder`/`9router` 的「补缺失结果」路线，共四层（`repair_tool_pairing` 一键串联）：
 
+- `merge_adjacent_tool_calls(messages)`：把**相邻**的两条 assistant.tool_calls 声明
+  合并成一条（上游 deepseek 系对「背靠背拆分」形态判 11148 顶死会话；参考实现
+  `mergeAdjacentToolCalls` 2026-09-20 线上对照实测：拆两条 → 503/11148，合成一条
+  → 200；`content: []` 也算空——部分客户端用它表达「无正文」）；
 - `fill_missing_tool_results(messages)`：给 assistant.tool_calls 中**缺结果**的调用补一条
   显式占位 tool 消息（对齐 chatcoder `ensure_tool_pairing` 的「补显式丢失占位而非假数据」；
   9router `fixMissingToolResponses` 只补空串，占位文案对模型更友好——调用记录不丢、
@@ -27,8 +31,11 @@ tool_call_sequence_broken）并顶死整条会话。网关是最后一道防线�
 （显式占位），补不齐的（双侧都无主的）裁掉——宁可丢一轮工具上下文，也好过整条
 会话报废。
 
-调用序（`repair_tool_pairing`）：**先 fill 再 repack 再 cleanup**——
-- fill 先行：缺失的占位插在 assistant 之后，随后 repack 可把它与既有结果一并归位
+调用序（`repair_tool_pairing`）：**先 merge 再 fill 再 repack 再 cleanup**——
+- merge 最先行：两条相邻 assistant.tool_calls 先合成一批，fill/repack 才能看到完整
+  「一批调用 + 一批结果」的形态（若 fill 先行，第一条 assistant 的缺失结果占位会插进
+  两条 assistant 之间、相邻关系被破坏，合并永远不会发生——正是要挡的 11148 形态）；
+- fill 次行：缺失的占位插在 assistant 之后，随后 repack 可把它与既有结果一并归位
   （若先 repack 再 fill，`asst[c1,c2] + tool c1 + X` 这类输入会把新占位插在 X 前、
   与 c1 结果错位）；
 - cleanup 收尾：仍是「让请求通过」的安全网，双侧对称裁剪，任何输入都不会再产生半截配对。
@@ -85,6 +92,90 @@ def _content_is_empty(msg: object) -> bool:
     if isinstance(content, (list, dict)):
         return len(content) == 0
     return False
+
+
+def _empty_content_for_merge(v) -> bool:
+    """content 是否为空（缺失 / None / 空串 / 空数组）——合并判定专用。
+
+    空数组也必须算空：有客户端把「没有正文」发成 `content: []` 而不是 null，
+    此前按「非字符串一律非空」处理 → 背靠背的两条 assistant(tool_calls) 不合并
+    → 上游 deepseek 系判 11148（正是 merge 要挡的形态，条件漏了 []）。
+    非空数组仍视为有内容：宁可漏合并，也不丢内容。字符串按参考实现口径**不做
+    strip**（纯空白串视为有内容——条件从严，不引入新语义）。"""
+    if v is None:
+        return True
+    if isinstance(v, str):
+        return v == ""
+    if isinstance(v, list):
+        return len(v) == 0
+    return False
+
+
+def _merge_reasoning_content(dst: dict, src: dict) -> None:
+    """把 src 的 reasoning_content 并入 dst（两边都有则换行拼接）。
+
+    deepseek 多轮要求 assistant 带思维链回填（本仓库 `_backfill_reasoning_content`
+    同源逻辑），合并时丢弃会换一个错误。"""
+    rc = src.get("reasoning_content")
+    if not isinstance(rc, str) or rc == "":
+        return
+    prev = dst.get("reasoning_content")
+    if isinstance(prev, str) and prev != "":
+        dst["reasoning_content"] = prev + "\n" + rc
+        return
+    dst["reasoning_content"] = rc
+
+
+def merge_adjacent_tool_calls(messages: list) -> list:
+    """相邻 assistant.tool_calls 合并成一条（对齐参考实现 `mergeAdjacentToolCalls`）。
+
+    上游 deepseek 系对「背靠背拆分」形态（两条相邻的、各自带 tool_calls 的 assistant）
+    判 400 code=11148（tool_call_sequence_broken），整条会话报废：客户端每次重试重放
+    同一条历史，池侧换号也无效（不是账号问题）。网关作为最后一道防线按最严口径归一。
+
+    合并条件从严（避免引入新语义），两种形态：
+    1. 本条是带 tool_calls 且**无正文**的 assistant → 并入上一条同为
+       assistant+tool_calls 的消息（背靠背的并行调用声明）；
+    2. 反向：本条是纯正文 assistant（无 tool_calls 键），上一条是带 tool_calls
+       且无正文的 assistant → 把正文折进上一条（部分 OpenAI 兼容客户端把正文与
+       调用声明拆成两条独立 assistant 回放）。
+    两条消息必须**相邻**（中间隔着任何消息都不合并——隔着消息说明不是同一批声明，
+    凭猜测合并会改变语义）；形态 2 只认字符串正文（数组正文可能含多模态块，拼接
+    会丢结构）。
+
+    两形态都会搬迁/拼接 `reasoning_content`（不丢思维链回填）。无改动时返回原对象。
+    """
+    if len(messages) < 2:
+        return messages
+    out: list = []
+    changed = False
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "assistant" and out:
+            prev = out[-1]
+            prev_is_call_head = (
+                isinstance(prev, dict) and prev.get("role") == "assistant"
+                and isinstance(prev.get("tool_calls"), list) and bool(prev["tool_calls"]))
+            tcs = m.get("tool_calls")
+            # 形态一：本条 = tool_calls 非空 + 无正文 → 并入上一条调用声明
+            if (prev_is_call_head and isinstance(tcs, list) and tcs
+                    and _empty_content_for_merge(m.get("content"))):
+                prev["tool_calls"] = list(prev["tool_calls"]) + list(tcs)
+                _merge_reasoning_content(prev, m)
+                changed = True
+                continue  # 本条已并入上一条，不再单独出站
+            # 形态二：本条 = 纯正文字符串（无 tool_calls 键）→ 折进上一条无正文的调用声明
+            if "tool_calls" not in m:
+                txt = m.get("content")
+                if (prev_is_call_head and isinstance(txt, str) and txt != ""
+                        and _empty_content_for_merge(prev.get("content"))):
+                    prev["content"] = txt
+                    _merge_reasoning_content(prev, m)
+                    changed = True
+                    continue  # 正文已折进上一条
+        out.append(m)
+    if not changed:
+        return messages
+    return out
 
 
 def fill_missing_tool_results(messages: list) -> list:
@@ -153,14 +244,16 @@ def fill_missing_tool_results(messages: list) -> list:
 
 
 def repair_tool_pairing(messages: list) -> list:
-    """工具配对一键修复：fill（补缺失显式占位）→ repack（归位）→ cleanup（裁孤儿）。
+    """工具配对一键修复：merge（相邻合并）→ fill（补缺失显式占位）→ repack（归位）
+    → cleanup（裁孤儿/空 name）。
 
-    参考管线同序（chatcoder：`repair_tool_call_ids → ensure_tool_pairing →
-    normalize_tool_sequence`；2api-panel 出站：`repack → cleanup`）。任何输入
-    经此函数后保证：带 tool_calls 的 assistant 之后**连续**跟着本批全部结果，
-    且无孤儿（无主 tool 消息 / 无结果调用）。
+    参考管线同序（2api-panel 出站：`mergeAdjacentToolCalls → repack → cleanup`；
+    chatcoder：`repair_tool_call_ids → ensure_tool_pairing → normalize_tool_sequence`）。
+    任何输入经此函数后保证：带 tool_calls 的 assistant 之后**连续**跟着本批全部结果，
+    且无孤儿（无主 tool 消息 / 无结果调用 / 空 name 调用）。
     """
-    return cleanup_orphan_tool_calls(repack_tool_results(fill_missing_tool_results(messages)))
+    return cleanup_orphan_tool_calls(
+        repack_tool_results(fill_missing_tool_results(merge_adjacent_tool_calls(messages))))
 
 
 def repack_tool_results(messages: list) -> list:
@@ -246,6 +339,23 @@ def repack_tool_results(messages: list) -> list:
     return out
 
 
+def _tool_call_name_empty(tc: object) -> bool:
+    """assistant.tool_calls[] 单项的 function.name 是否为空（参考实现同口径）。
+
+    仅当 `function` 对象存在、`name` 字段存在且为**空白字符串**时判真；
+    function / name 字段缺失时判假——历史报文里存在不带 function 的占位条目，
+    上游不会因此拒参，不扩大打击面。"""
+    if not isinstance(tc, dict):
+        return False
+    fn = tc.get("function")
+    if not isinstance(fn, dict):
+        return False
+    name = fn.get("name")
+    if not isinstance(name, str):
+        return False
+    return name.strip() == ""
+
+
 def cleanup_orphan_tool_calls(messages: list) -> list:
     """剔除无法配对的 tool_call 与 tool 结果（对齐参考 resolveToolPairing 语义）。
 
@@ -254,6 +364,11 @@ def cleanup_orphan_tool_calls(messages: list) -> list:
       assistant 只留有结果的调用（过滤后为空则删 `tool_calls` 键，不删消息本身；
       内容为空字符串同样的空壳消息是合法 wire 形态）；`role:tool` 只在对应调用
       被保留时保留，否则删除整条消息；
+    - 追加否决条件：`function.name` 为空白串（含纯空白）的调用一律不保留——上游
+      对这类条目直接判 11133 model_param_invalid（tool_calls[i].function.name must
+      be a non-empty string），带不带配对结果都会拒；带结果的脏条目原本会命中
+      keepCalls 原样出站（线上「整条会话每轮 503、只能清历史」的成因，参考实现
+      535e19e 修复）。删除动作复用同一份对称裁剪；
     - 空 `tool_calls: []` 键顺手清理（hermes `sanitize_api_messages` 口径：部分
       严格实现拒绝空数组；此类消息本身保留）；
     - 无任何工具流量且无空 `tool_calls` → 原对象原样返回（零分配零改动）。
@@ -264,6 +379,7 @@ def cleanup_orphan_tool_calls(messages: list) -> list:
         return messages
     call_ids: set[str] = set()
     result_ids: set[str] = set()
+    name_bad_ids: set[str] = set()
     has_traffic = False
     for m in messages:
         if not isinstance(m, dict):
@@ -278,13 +394,22 @@ def cleanup_orphan_tool_calls(messages: list) -> list:
             tcs = m.get("tool_calls")
             if isinstance(tcs, list) and not tcs:
                 has_traffic = True  # 空 tool_calls 也是待清理对象
-            for tid in _tool_call_ids(m):
-                call_ids.add(tid)
-                has_traffic = True
+            if isinstance(tcs, list):
+                for tc in tcs:
+                    if not isinstance(tc, dict):
+                        continue
+                    tid = tc.get("id")
+                    if isinstance(tid, str) and tid:
+                        call_ids.add(tid)
+                        if _tool_call_name_empty(tc):
+                            name_bad_ids.add(tid)
+                        has_traffic = True
     if not has_traffic:
         return messages
 
-    keep_calls = {tid for tid in call_ids if tid in result_ids}
+    # keepCalls：调用 id 双侧齐全（调用存在且结果存在），且 function.name 非空白串。
+    keep_calls = {tid for tid in call_ids
+                  if tid in result_ids and tid not in name_bad_ids}
 
     # 1) assistant.tool_calls：按 keep_calls 对称裁剪——只留有结果的调用，
     #    过滤后为空则删键（就地改写，同参考实现；无改动消息保持原样）；
@@ -330,4 +455,5 @@ def cleanup_orphan_tool_calls(messages: list) -> list:
 
 
 __all__ = ["MISSING_RESULT_PLACEHOLDER", "cleanup_orphan_tool_calls",
-           "fill_missing_tool_results", "repack_tool_results", "repair_tool_pairing"]
+           "fill_missing_tool_results", "merge_adjacent_tool_calls",
+           "repack_tool_results", "repair_tool_pairing"]

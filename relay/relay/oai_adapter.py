@@ -135,8 +135,11 @@ def _parse_content_block(content) -> tuple[str | None, list[dict] | None]:
             if not isinstance(b, dict):
                 continue
             if b.get("type") == "text" and b.get("text"):
-                texts.append(str(b["text"]))
+                texts.append(_sanitize_fingerprint(str(b["text"])) or "")
             else:
+                text = b.get("text")
+                if isinstance(text, str) and text:
+                    b = {**b, "text": _sanitize_fingerprint(text)}
                 blocks.append(b)
         return ("\n".join(texts) or None), (blocks or None)
     return content, None
@@ -287,15 +290,77 @@ _FINGERPRINT_BRAND_RE = re.compile(
 )
 _ZWSP = "\u200b"  # ZERO WIDTH SPACE（写成转义，防止不可见字符被工具链吃掉）
 
+# 追加指纹清单（2026-10-16 对照参考实现 `workbuddy2api-panel/internal/upstream/sanitize.go`
+# 补齐；该清单为其上游（WB 同族，错误码同族）实测，我方尚未复测——复测姿势见
+# docs/上游风控与客户端兼容.md §4/§5，本轮不跑真实上游请求）：
+#   - 裸 "11128"：请求体任何位置出现即**整单拦截**（11128 正是「内容拦截」自身的
+#     错误码，上游据此识别在讨论/回显其内部错误码的请求；相邻 11148/11101/11115
+#     放行）。改写成 "11-128" 保留可读性与指代——零宽空格会被上游归一化（实测无效）。
+#   - 注入指令句 / 身份句 / 反馈句：一词之差改写，语义不变：
+#     Claude Code 的 "Main branch (…)" 句、Codex CLI 首句、Anthropic 反馈句。
+# 既有 ZWSP 口径（品牌词插零宽空格）保留为第二层（牛码实测有效，风控文档 §2）。
+_SANITIZE_REWRITES: tuple[tuple[str, str], ...] = (
+    ("11128", "11-128"),
+    ("Main branch (you will usually use this for PRs)",
+     "Default branch (you will usually use this for PRs)"),
+    ("You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
+     "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."),
+    ("To give feedback, users should report the issue at "
+     "https://github.com/anthropics/claude-code/issues",
+     "To provide feedback, users should report the issue at "
+     "https://github.com/anthropics/claude-code/issues"),
+    ("You are Claude Code, Anthropic's official CLI for Claude",
+     "You are Claude Code, Anthropic's official CLI tool for Claude"),
+)
+
+# 快速预检针（小写匹配）：绝大多数文本不含任何指纹，未命中即原样返回（零改写）。
+_FINGERPRINT_NEEDLES: tuple[str, ...] = (
+    "11128", "main branch (", "you are a coding agent running in the codex cli",
+    "github.com/anthropics/", "official cli for claude", "zcode", "claude code",
+)
+
 
 def _sanitize_fingerprint(text: str | None) -> str | None:
-    """身份指纹句中的品牌词插入零宽空格，规避上游精确子串封禁。"""
+    """指纹净化：改写层（参考实现清单）+ ZWSP 层（我方牛码口径）。"""
     if not text:
         return text
+    low = text.lower()
+    if not any(n in low for n in _FINGERPRINT_NEEDLES):
+        return text
+    for before, after in _SANITIZE_REWRITES:
+        if before in text:
+            text = text.replace(before, after)
     return _FINGERPRINT_BRAND_RE.sub(
         lambda m: m.group(1) + m.group(2)[0] + _ZWSP + m.group(2)[1:],
         text,
     )
+
+
+def _sanitize_arguments(value):
+    """工具参数递归清洗（字符串化 JSON 解析后的 dict/list/str 结构）。
+
+    参考实现把 `tool_calls[].function.arguments`（字符串化 JSON）按文本整体走
+    sanitize（`sanitize.go::sanitizeToolCalls`）——参数里携带的指纹（某文件内容
+    含 Anthropic 仓库链接/身份句等）与 content 同属「请求体文本」，同样会被上游
+    拦截。本实现按解析后的结构递归清洗字符串值（与内部 dict 形态一致，避开
+    JSON 转义问题）。
+    """
+    if isinstance(value, str):
+        return _sanitize_fingerprint(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_arguments(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_arguments(v) for v in value]
+    return value
+
+
+def _pick_max_tokens(body: dict):
+    """max_tokens 取用口径：max_tokens 优先；缺失回退 `max_completion_tokens`
+    （OpenAI 新字段 → 旧字段翻译，参考实现 `translateMaxCompletionTokens` 口径）。"""
+    value = body.get("max_tokens")
+    if value is None:
+        value = body.get("max_completion_tokens")
+    return value
 
 
 def _parse_tool_calls(tool_calls) -> list[dict] | None:
@@ -316,7 +381,7 @@ def _parse_tool_calls(tool_calls) -> list[dict] | None:
         out.append({
             "id": tc.get("id") or "",
             "name": fn.get("name") or "",
-            "arguments": args,
+            "arguments": _sanitize_arguments(args),
         })
     return out or None
 
@@ -355,7 +420,7 @@ def oai_request_to_chat_request(body: dict) -> ChatRequest:
         stream=bool(body.get("stream", False)),
         tools=body.get("tools"),
         temperature=body.get("temperature"),
-        max_tokens=body.get("max_tokens"),
+        max_tokens=_pick_max_tokens(body),
         reasoning_effort=reasoning_effort,
         thinking=thinking,
     )

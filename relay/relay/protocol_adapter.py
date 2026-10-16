@@ -32,7 +32,8 @@ from typing import Any
 
 from app.models.schemas import ChatMessage, ChatRequest, ChatResponse, Usage
 
-from relay.oai_adapter import _extract_thinking_signals, _sanitize_fingerprint
+from relay.oai_adapter import (_extract_thinking_signals, _sanitize_arguments,
+                               _sanitize_fingerprint)
 
 # ─────────────────────────── 协议标识 ───────────────────────────
 
@@ -397,7 +398,7 @@ def responses_to_chat_request(body: dict) -> ChatRequest:
             current_assistant.tool_calls.append({
                 "id": _clamp_responses_call_id(item.get("call_id")),
                 "name": name.strip(),
-                "arguments": args,
+                "arguments": _sanitize_arguments(args),
             })
 
         elif item_type in (_RESPONSES_ITEM_FUNCTION_CALL_OUTPUT,
@@ -409,7 +410,7 @@ def responses_to_chat_request(body: dict) -> ChatRequest:
             pending.append(ChatMessage(
                 role="tool",
                 tool_call_id=_clamp_responses_call_id(item.get("call_id")),
-                content=_coerce_output_to_str(item.get("output")),
+                content=_sanitize_fingerprint(_coerce_output_to_str(item.get("output"))),
             ))
 
         elif item_type == _RESPONSES_ITEM_ADDITIONAL_TOOLS:
@@ -508,7 +509,7 @@ def _anthropic_content_to_chat(
                 "id": _ensure_tool_call_id(block.get("id"), msg_idx, k,
                                            str(block.get("name") or "")),
                 "name": str(block.get("name") or ""),
-                "arguments": _args_to_dict(block.get("input")),
+                "arguments": _sanitize_arguments(_args_to_dict(block.get("input"))),
             })
         elif btype == "thinking":
             t = block.get("thinking")
@@ -548,7 +549,7 @@ def _anthropic_tool_result_to_messages(block: dict, msg_idx: int,
     return [ChatMessage(
         role="tool",
         tool_call_id=_ensure_tool_call_id(block.get("tool_use_id"), msg_idx, block_idx),
-        content=text,
+        content=_sanitize_fingerprint(text),
     )]
 
 

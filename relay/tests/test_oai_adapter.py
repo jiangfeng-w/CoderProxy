@@ -83,6 +83,79 @@ def test_parse_content_blocks():
     assert msg.content_blocks[0]["type"] == "image_url"
 
 
+# ───────── 指纹清单补齐（2026-10-16 对齐参考实现 sanitize.go 实测清单） ─────────
+
+def test_sanitize_bare_11128_rewritten():
+    """裸 11128 是上游整单拦截条件（与该数字上下文无关）→ 连字符改写保留可读性。"""
+    assert _sanitize_fingerprint("上游报错 code=11128") == "上游报错 code=11-128"
+    assert _sanitize_fingerprint("错误码 11128 是什么") == "错误码 11-128 是什么"
+    # 相邻错误码（11148/11101/11115）不受牵连（留有边界）
+    assert _sanitize_fingerprint("code=11148") == "code=11148"
+    assert _sanitize_fingerprint("code=11101") == "code=11101"
+
+
+def test_sanitize_injection_and_feedback_sentences_rewritten():
+    """注入指令句 / Codex 首句 / Anthropic 反馈句：一词之差改写，语义不变。"""
+    assert _sanitize_fingerprint(
+        "Main branch (you will usually use this for PRs)"
+    ) == "Default branch (you will usually use this for PRs)"
+    assert _sanitize_fingerprint(
+        "You are a coding agent running in the Codex CLI, a terminal-based coding assistant."
+    ) == ("You are a coding agent running in the Codex CLI tool, "
+          "a terminal-based coding assistant.")
+    out = _sanitize_fingerprint(
+        "To give feedback, users should report the issue at "
+        "https://github.com/anthropics/claude-code/issues")
+    assert out.startswith("To provide feedback, users should report the issue at ")
+
+
+def test_sanitize_claude_code_identity_suffix_rewritten():
+    """Claude Code 身份句后缀改写（同时受 ZWSP 层保护，两种形态都破坏精确匹配）。"""
+    out = _sanitize_fingerprint(
+        "You are Claude Code, Anthropic's official CLI for Claude")
+    assert "official CLI for Claude" not in out
+    assert "official CLI tool for Claude" in out
+
+
+def test_request_tool_call_arguments_sanitized():
+    """工具参数（字符串化 JSON）与 content 同属请求体文本：同样净化。"""
+    body = {
+        "model": "m",
+        "messages": [{
+            "role": "assistant", "content": None,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {
+                "name": "Write",
+                "arguments": '{"cmd": "echo 11128", "file": "a.txt"}',
+            }}],
+        }],
+    }
+    req = oai_request_to_chat_request(body)
+    args = req.messages[0].tool_calls[0]["arguments"]
+    assert args == {"cmd": "echo 11-128", "file": "a.txt"}
+
+
+def test_multimodal_text_part_sanitized():
+    """多模态数组的 text part 同样过净化（image part 不动）。"""
+    body = {"model": "m", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "帮我查 code=11128"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
+    ]}]}
+    req = oai_request_to_chat_request(body)
+    assert req.messages[0].content == "帮我查 code=11-128"
+
+
+def test_parse_max_completion_tokens_fallback():
+    """max_tokens 优先；缺失回退 max_completion_tokens（新字段翻译）。"""
+    req = oai_request_to_chat_request({
+        "model": "m", "messages": [{"role": "user", "content": "hi"}],
+        "max_completion_tokens": 64})
+    assert req.max_tokens == 64
+    req2 = oai_request_to_chat_request({
+        "model": "m", "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 8, "max_completion_tokens": 64})
+    assert req2.max_tokens == 8
+
+
 def test_parse_tool_calls_history():
     body = {
         "model": "m",

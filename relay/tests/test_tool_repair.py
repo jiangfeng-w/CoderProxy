@@ -1,19 +1,21 @@
-"""工具配对安全网单测（BUG-4）：fill_missing_tool_results / repack_tool_results /
-cleanup_orphan_tool_calls / repair_tool_pairing（一键三层）。
+"""工具配对安全网单测（BUG-4）：merge_adjacent_tool_calls / fill_missing_tool_results /
+repack_tool_results / cleanup_orphan_tool_calls / repair_tool_pairing（一键四层）。
 
 纯函数级（wire dict 形态），对照参考 tool_pairing.go / chatcoder ensure_tool_pairing 语义：
+- merge：相邻双 assistant.tool_calls → 合成一条（11148 形态；`content: []` 也算空）；
 - fill：assistant.tool_calls 缺结果 → 补显式占位（不删调用、不动齐全批次）；
 - repack：结果间夹插入物 → 后移；错位结果 → 窗口探测收拢；批内结果按声明序归位；
   同 id 重复留先到者；下一组组头不被吞；无改动返回原对象；
-- cleanup：双侧对称裁剪（孤立结果删、无结果调用删/裁、批内部分保留）；空
-  `tool_calls: []` 键清理；
-- repair：fill→repack→cleanup 串联，任何输入终态「无孤儿、无断裂」；
+- cleanup：双侧对称裁剪（孤立结果删、无结果调用删/裁、**空 name 调用剔**、批内部分
+  保留）；空 `tool_calls: []` 键清理；
+- repair：merge→fill→repack→cleanup 串联，任何输入终态「无孤儿、无断裂」；
 - 无工具流量 → 原对象（零改动）。
 """
 from relay.tool_repair import (
     MISSING_RESULT_PLACEHOLDER,
     cleanup_orphan_tool_calls,
     fill_missing_tool_results,
+    merge_adjacent_tool_calls,
     repack_tool_results,
     repair_tool_pairing,
 )
@@ -421,3 +423,114 @@ def test_repair_empty_tool_calls_full_pipeline():
     out = repair_tool_pairing(msgs)
     assert "tool_calls" not in out[1]
     assert out[0] is msgs[0]
+
+
+# ──────────────── merge：相邻 assistant.tool_calls 合并（11148 形态） ────────────────
+
+def _call(cid: str) -> dict:
+    return {"id": cid, "type": "function", "function": {"name": "Bash", "arguments": "{}"}}
+
+
+def test_merge_back_to_back_tool_calls():
+    """背靠背两条 assistant.tool_calls（后条无正文）→ 合并成一条，调用按序拼接。"""
+    msgs = [_user(), _asst(["c1"]), _asst(["c2"])]
+    out = merge_adjacent_tool_calls(msgs)
+    assert [m["role"] for m in out] == ["user", "assistant"]
+    assert [tc["id"] for tc in out[1]["tool_calls"]] == ["c1", "c2"]
+
+
+def test_merge_empty_array_content_also_merges():
+    """`content: []` 也算空——部分客户端用它表达「无正文」（条件漏 [] 即漏合并）。"""
+    msgs = [{"role": "assistant", "content": [], "tool_calls": [_call("c1")]},
+            {"role": "assistant", "content": [], "tool_calls": [_call("c2")]}]
+    out = merge_adjacent_tool_calls(msgs)
+    assert len(out) == 1
+    assert [tc["id"] for tc in out[0]["tool_calls"]] == ["c1", "c2"]
+
+
+def test_merge_moves_and_joins_reasoning_content():
+    """reasoning_content 不丢：后条拆迁、两边都有换行拼接（deepseek 多轮回填）。"""
+    msgs = [{"role": "assistant", "content": None, "reasoning_content": "前",
+             "tool_calls": [_call("c1")]},
+            {"role": "assistant", "content": "", "reasoning_content": "后",
+             "tool_calls": [_call("c2")]}]
+    out = merge_adjacent_tool_calls(msgs)
+    assert out[0]["reasoning_content"] == "前\n后"
+
+
+def test_merge_folds_text_into_prev_call_head():
+    """反向形态：纯正文 assistant 折进上一条无正文的调用声明。"""
+    msgs = [_asst(["c1"]), {"role": "assistant", "content": "这是正文"}]
+    out = merge_adjacent_tool_calls(msgs)
+    assert len(out) == 1
+    assert out[0]["content"] == "这是正文"
+    assert [tc["id"] for tc in out[0]["tool_calls"]] == ["c1"]
+
+
+def test_merge_skips_when_not_adjacent_or_non_empty():
+    """从严不合并：中间隔消息 / 后条带正文且带 tool_calls → 原对象返回（零改动）。"""
+    not_adjacent = [_asst(["c1"]), _user("x"), _asst(["c2"])]
+    assert merge_adjacent_tool_calls(not_adjacent) is not_adjacent
+    with_text = [_asst(["c1"]), _asst(["c2"], content="正文")]
+    assert merge_adjacent_tool_calls(with_text) is with_text
+
+
+def test_repair_merge_before_fill_full_pipeline():
+    """全管线顺序：merge 先行 → 合并批缺结果照常补占位（终态一批调用接两结果）。"""
+    msgs = [_asst(["c1"]), _asst(["c2"]), _tool("c1", "real")]
+    out = repair_tool_pairing(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool", "tool"]
+    assert [tc["id"] for tc in out[0]["tool_calls"]] == ["c1", "c2"]
+    assert out[1]["content"] == "real"
+    assert out[2]["content"] == MISSING_RESULT_PLACEHOLDER
+
+
+# ──────────────── cleanup：function.name 为空的调用剔除（11133 形态） ────────────────
+
+def _asst_named(entries: list) -> dict:
+    """entries = [(id, name)]；name=None 表示不带 function 键。"""
+    tcs = []
+    for cid, name in entries:
+        tc = {"id": cid, "type": "function"}
+        if name is not None:
+            tc["function"] = {"name": name, "arguments": "{}"}
+        tcs.append(tc)
+    return {"role": "assistant", "content": None, "tool_calls": tcs}
+
+
+def test_cleanup_drops_empty_name_call_with_result():
+    """空 name 调用带配对结果 → 两侧对称剔除（否则上游判 11133 顶死会话）。"""
+    msgs = [_asst_named([("c1", "")]), _tool("c1")]
+    out = cleanup_orphan_tool_calls(msgs)
+    assert len(out) == 1
+    assert "tool_calls" not in out[0]
+
+
+def test_cleanup_whitespace_name_is_dirty():
+    msgs = [_asst_named([("c1", "   ")]), _tool("c1")]
+    out = cleanup_orphan_tool_calls(msgs)
+    assert len(out) == 1 and "tool_calls" not in out[0]
+
+
+def test_cleanup_missing_function_key_not_dirty():
+    """缺 function 键的历史占位条目不判脏（参考实现口径：不扩大打击面）。"""
+    msgs = [_asst_named([("c1", None)]), _tool("c1")]
+    out = cleanup_orphan_tool_calls(msgs)
+    assert len(out) == 2
+    assert out[0]["tool_calls"][0]["id"] == "c1"
+
+
+def test_cleanup_mixed_batch_only_dirty_trimmed():
+    """批内混合：只剔空 name 项，其余照常保留；两侧对称。"""
+    msgs = [_asst_named([("c1", ""), ("c2", "Bash")]), _tool("c1"), _tool("c2")]
+    out = cleanup_orphan_tool_calls(msgs)
+    assert [tc["id"] for tc in out[0]["tool_calls"]] == ["c2"]
+    assert [m["tool_call_id"] for m in out[1:]] == ["c2"]
+
+
+def test_repair_empty_name_full_pipeline():
+    """全管线：空 name 调用剔除后批次仍连续（结果侧同去）。"""
+    msgs = [_asst_named([("c1", ""), ("c2", "Bash")]), _tool("c1"), _tool("c2")]
+    out = repair_tool_pairing(msgs)
+    assert [m["role"] for m in out] == ["assistant", "tool"]
+    assert out[1]["tool_call_id"] == "c2"

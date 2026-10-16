@@ -143,6 +143,41 @@ def test_responses_parallel_function_calls_grouped():
     assert [tc["name"] for tc in req.messages[0].tool_calls] == ["a", "b"]
 
 
+# ──────── 指纹净化：工具参数 / 工具输出（2026-10-16 补齐，与 content 同口径） ────────
+
+def test_responses_tool_args_and_output_sanitized():
+    req = pa.responses_to_chat_request({
+        "model": "m",
+        "input": [
+            {"type": "function_call", "call_id": "c1", "name": "Bash",
+             "arguments": '{"cmd": "grep 11128 log.txt"}'},
+            {"type": "function_call_output", "call_id": "c1",
+             "output": "Main branch (you will usually use this for PRs)"},
+        ],
+    })
+    assert req.messages[0].tool_calls[0]["arguments"] == {"cmd": "grep 11-128 log.txt"}
+    assert req.messages[1].content == "Default branch (you will usually use this for PRs)"
+
+
+def test_anthropic_tool_use_and_result_sanitized():
+    req = pa.anthropic_to_chat_request({
+        "model": "m",
+        "max_tokens": 16,
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash",
+                 "input": {"cmd": "echo 11128"}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1",
+                 "content": "code=11128"}]},
+        ],
+    })
+    assistant = next(m for m in req.messages if m.role == "assistant")
+    assert assistant.tool_calls[0]["arguments"] == {"cmd": "echo 11-128"}
+    tool_msg = next(m for m in req.messages if m.role == "tool")
+    assert tool_msg.content == "code=11-128"
+
+
 def test_responses_interleaved_two_batches_keep_results_adjacent():
     """BUG-4 回归：ZCode 形态 `fc,fc → fco,fco → fc → fco` 每批结果紧跟其 assistant。
 
