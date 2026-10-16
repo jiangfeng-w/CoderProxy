@@ -8,6 +8,7 @@ import pytest
 from relay.config import settings
 from relay.platforms import store
 from relay.platforms.workbuddy import catalog
+from relay.platforms.workbuddy.realms import REALM_GLOBAL
 
 V3_URL = f"{settings.wb_api_base}{catalog.V3_CONFIG_PATH}"
 ENT_URL = f"{settings.wb_api_base}{catalog.ENTERPRISE_MODELS_PATH}"
@@ -185,3 +186,112 @@ def test_non_chat_filter_rules():
     assert catalog._non_chat_model({"id": "m", "maxOutputTokens": 8192}) is False
     assert catalog._non_chat_model({"id": "m", "tags": ["text-to-image"]}) is True
     assert catalog._non_chat_model({"id": "glm-5.3"}) is False
+
+
+def test_non_chat_filter_generation_tags():
+    """图/视频生成 tag 族扩展（2026-10-16 对齐参考实现）：seedance 视频、gpt-image 系列。"""
+    assert catalog._non_chat_model({"id": "m", "tags": ["image-to-image"]}) is True
+    assert catalog._non_chat_model({"id": "m", "tags": ["text-to-video"]}) is True
+    assert catalog._non_chat_model({"id": "m", "tags": ["image-to-video"]}) is True
+    assert catalog._non_chat_model({"id": "m", "tags": ["chat"]}) is False
+
+
+# ───────── 国际版三路 UA 并集（2026-10-16 对齐参考实现 global_models.go） ─────────
+
+_GLOBAL_DESKTOP = [
+    {"id": "gpt-6-sol", "name": "GPT-6 Sol", "maxInputTokens": 400000,
+     "maxOutputTokens": 128000, "supportsToolCall": True},
+    {"id": "glm-5.3", "name": "GLM-5.3（桌面档）", "maxInputTokens": 1000000,
+     "maxOutputTokens": 64000},
+]
+_GLOBAL_IDE = [
+    {"id": "glm-5.3", "name": "GLM-5.3（IDE 档）", "maxInputTokens": 1,
+     "maxOutputTokens": 64000},
+    {"id": "o4-mini", "name": "o4-mini", "maxInputTokens": 200000,
+     "maxOutputTokens": 64000},
+]
+_GLOBAL_CLI = [
+    {"id": "deepseek-v4.1-flash", "name": "DeepSeek", "maxInputTokens": 128000,
+     "maxOutputTokens": 64000},
+    {"id": "kimi-k2.8-preview", "name": "Kimi", "maxInputTokens": 128000,
+     "maxOutputTokens": 64000},
+]
+
+
+async def _seed_global_account(uid="u_cat_g"):
+    await store.upsert_account("workbuddy-global", {
+        "uid": uid, "access_token": "at", "refresh_token": "rt",
+        "expires_at": 9_999_999_999_999, "domain": "www.workbuddy.ai"})
+    account = await store.find_account("workbuddy-global", uid)
+    assert account is not None
+    return account
+
+
+def _global_handler(seen_uas: list):
+    def handler(request):
+        if catalog.V3_CONFIG_PATH in str(request.url):
+            ua = request.headers.get("User-Agent", "")
+            seen_uas.append(ua)
+            if ua == catalog._IDE_UA:
+                models = _GLOBAL_IDE
+            elif ua == catalog._CLI_UA:
+                models = _GLOBAL_CLI
+            else:
+                models = _GLOBAL_DESKTOP
+            return httpx.Response(200, json={"code": 0, "data": {"models": models}})
+        return httpx.Response(200, json={"code": 0, "data": {"agents": [], "models": []}})
+    return handler
+
+
+def test_global_v3_three_routes_union_desktop_priority(data_dir):
+    """global：三路 UA 并集；桌面档字段权威（同 id 取桌面档条目），IDE/CLI 补缺失 id。"""
+    _run(_seed_global_account())
+    seen: list[str] = []
+    t = httpx.MockTransport(_global_handler(seen))
+    models = _run(catalog.load_models(force=True, transport=t, profile=REALM_GLOBAL))
+    names = {m["name"] for m in models}
+    assert {"gpt-6-sol", "glm-5.3", "o4-mini", "deepseek-v4.1-flash",
+            "kimi-k2.8-preview"} <= names
+    glm = next(m for m in models if m["name"] == "glm-5.3")
+    assert glm["title"] == "GLM-5.3（桌面档）"  # 主路字段权威
+    assert len(seen) == 3  # 三路各探测一次
+
+
+def test_global_v3_route_partial_failure(data_dir):
+    """单路失败不拖累其余路（WARN 降级），结果仍为可用路并集。"""
+    _run(_seed_global_account())
+
+    def handler(request):
+        if catalog.V3_CONFIG_PATH in str(request.url):
+            ua = request.headers.get("User-Agent", "")
+            if ua == catalog._IDE_UA:
+                return httpx.Response(500, text="boom")
+            models = _GLOBAL_CLI if ua == catalog._CLI_UA else _GLOBAL_DESKTOP
+            return httpx.Response(200, json={"code": 0, "data": {"models": models}})
+        return httpx.Response(200, json={"code": 0, "data": {"agents": [], "models": []}})
+
+    models = _run(catalog.load_models(force=True, transport=httpx.MockTransport(handler),
+                                      profile=REALM_GLOBAL))
+    names = {m["name"] for m in models}
+    assert {"gpt-6-sol", "deepseek-v4.1-flash"} <= names
+    assert "o4-mini" not in names
+
+
+def test_cn_v3_single_route_and_explicit_ua_override(data_dir, monkeypatch):
+    """CN 单路（参考实现 CN 侧亦单路）；显式 wb_user_agent 覆盖同样退化为单路。"""
+    _run(_seed_account())
+    calls: list[str] = []
+
+    def handler(request):
+        if catalog.V3_CONFIG_PATH in str(request.url):
+            calls.append(request.headers.get("User-Agent", ""))
+            return httpx.Response(200, json={"code": 0, "data": {"models": _V3_MODELS}})
+        return httpx.Response(200, json=_ENT_MODELS)
+
+    t = httpx.MockTransport(handler)
+    _run(catalog.load_models(force=True, transport=t))
+    assert len(calls) == 1 and "WorkBuddy/" in calls[0]
+    monkeypatch.setattr(settings, "wb_user_agent", "MyUA/1.0")
+    calls.clear()
+    _run(catalog.load_models(force=True, transport=t))
+    assert calls == ["MyUA/1.0"]

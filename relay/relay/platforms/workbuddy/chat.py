@@ -118,6 +118,22 @@ def _is_kimi_model(model: str) -> bool:
     return str(model or "").strip().lower().startswith("kimi-")
 
 
+# GPT 系 max_tokens 下限（2026-10-16 对齐参考实现 payload.go::clampGPTMinMaxTokens）：
+# 上游 GPT 系对 max_tokens < 16 一律 400 code=11133（model_param_invalid；实测 15 拒、
+# 16 过），而 Claude Code `/model` 切换会发极小 max_tokens 探针——全号轮转同样被拒、
+# 客户端切不过去（换号无效，不是账号问题）。非 GPT 系模型不抬（上游接受小值）。
+_GPT_MIN_MAX_TOKENS = 16
+
+
+def _clamp_gpt_max_tokens(model: str, value):
+    """GPT 系模型 max_tokens 抬到下限 16；其余模型原样返回。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return value
+    if "gpt-" not in str(model or "").lower():
+        return value
+    return max(value, _GPT_MIN_MAX_TOKENS)
+
+
 def _has_reasoning_trace(messages: list) -> bool:
     """会话是否已有 reasoning 痕迹（对齐 2api-panel hasTrace：非空 reasoning string 或 rc 键存在）。"""
     for m in messages:
@@ -283,15 +299,16 @@ class WorkBuddyChatAdapter:
         if request.temperature is not None:
             body["temperature"] = request.temperature
         if request.max_tokens:
-            body["max_tokens"] = request.max_tokens
+            body["max_tokens"] = _clamp_gpt_max_tokens(self._model, request.max_tokens)
         if request.tools:
             body["tools"] = request.tools  # B5：原生透传（不做工具名伪装）
         # B4/BUG-3：思考形状（deepseek 系对齐官方客户端；其余模型维持 B4 透传口径）。
         self._apply_thinking(body, request)
-        # BUG-4 出站安全网（一键三层：fill 补缺失占位 → repack 归位 → cleanup 裁孤儿/
-        # 清空数组，参考管线同序）：修根后转换器正常产出不会断裂，这里兜住 agent 端历史
-        # 里的畸形配对（孤立结果 / 无结果调用 / 结果间夹 developer / 缺结果 / 错位 /
-        # 乱序 / 重复结果 / 空 tool_calls），否则上游判 11148 顶死会话。缺结果补显式
+        # BUG-4 出站安全网（一键四层：merge 相邻合并 → fill 补缺失占位 → repack 归位
+        # → cleanup 裁孤儿/空 name/清空数组，参考管线同序）：修根后转换器正常产出不会
+        # 断裂，这里兜住 agent 端历史里的畸形配对（相邻双 tool_calls 声明 / 孤立结果 /
+        # 无结果调用 / 无 name 调用 / 结果间夹 developer / 缺结果 / 错位 / 乱序 / 重复
+        # 结果 / 空 tool_calls），否则上游判 11148 或 11133 顶死会话。缺结果补显式
         # 占位而非假数据（对齐 chatcoder）。
         body["messages"] = repair_tool_pairing(body["messages"])
         # 多轮一致性：deepseek/kimi 回填 reasoning_content（2api-panel 主档 + 9router

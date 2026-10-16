@@ -8,8 +8,17 @@
 - `GET /console/enterprises/personal/models` → `data.models[]` 31 个 + `data.agents[]`
   （`name:"cli"` 的 `models[]` 白名单）。
 - **口径**：两路并集（v3 为主，企业端点补缺；去重按 id，v3 优先——2api-panel 同口径）；
-  过滤非对话模型（`maxOutputTokens ≤ 256` / `tags` 含 `text-to-image` /
+  过滤非对话模型（`maxOutputTokens ≤ 256` / `tags` 含图/视频生成族
+  `text-to-image`/`image-to-image`/`text-to-video`/`image-to-video` /
   id 前缀 `nes-`/`completion-`/`codewise-`）。
+- **国际版 `/v3/config` 按 UA 三路并集**（2026-10-16 对齐参考实现 7b24e22；**同日本机小号实测**：
+  桌面档 27 条 / IDE 档 7 条 / CLI 档 20 条（过滤非对话后），并集 **31** 条——桌面档独有 8
+  （`gpt-6-sol`/`gpt-6-luna`/`gpt-6.1-sol`/`gpt-5.6-sol`/`gpt-6-astra`/`grok-4.7`/`gemini-3.8-flash`
+  /`step-5-preview`）、IDE 补 3（`o4-mini`/`enhance-1.0`/`auto-chat`）、CLI 补 1（`deep-model`）。
+  **各路集合随上游漂移**（参考实现 10-02 的「CLI 独有 deepseek 系列」在本次实测里已出现在桌面档），
+  故按「桌面档主路 + 其余路补缺 id」的结构对齐、不锁具体模型名）。桌面档为主路（chat 路径同源 UA，
+  字段权威），IDE/CLI 只补桌面档缺失的 id；CN 维持单路（参考实现 CN 侧亦单路）。显式
+  `WB_USER_AGENT` 覆盖时退化为单路（用户自愈优先）。
 - 多账号：取**首个 normal 号**的目录（不同套餐可见模型有差异；不做并集——目录随选号
   账号自然刷新，已知边界）。
 
@@ -18,11 +27,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
 import httpx
 
+from relay.config import settings
 from relay.platforms import store
 from relay.platforms.workbuddy.adapter import WorkBuddyAdapter
 from relay.platforms.workbuddy.client import derive_stable_id, user_agent_for
@@ -36,6 +47,11 @@ V3_CONFIG_PATH = "/v3/config"
 # CN 现状单候选（兼容常量；双域候选序见 realms.WbRealm.enterprise_model_paths——
 # 国际版 /v2 家族优先 → /console 回退）
 ENTERPRISE_MODELS_PATH = "/console/enterprises/personal/models"
+
+# 国际版 `/v3/config` 三路探测的 IDE / CLI UA（参考实现 internal/upstream/client.go
+# 常量逐字：`codeBuddyIDEUA` / `codeBuddyCLIUA`）。桌面档 UA 为 profile 默认（主路）。
+_IDE_UA = "CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0"
+_CLI_UA = "CLI/2.63.2 CodeBuddy/2.63.2"
 
 CACHE_TTL_S = 3600  # 目录缓存 1h（对齐 2api 谱系；失败负缓存 5min）
 NEGATIVE_TTL_S = 300
@@ -110,10 +126,11 @@ async def _pick_account(profile: WbRealm = REALM_CN) -> dict | None:
 async def _fetch_union(account: dict,
                        transport: httpx.AsyncBaseTransport | None = None,
                        profile: WbRealm = REALM_CN) -> list[dict]:
-    """两路并发探测 → 并集（v3 优先；企业端点补缺；两路全败抛最后一个错误）。"""
-    import asyncio
+    """两路并发探测 → 并集（v3 优先；企业端点补缺；两路全败抛最后一个错误）。
+
+    v3 路为 `_fetch_v3_routes`：CN 单路 / 国际版三路 UA 并集（见模块头注释）。"""
     results = await asyncio.gather(
-        _fetch_v3(account, transport=transport, profile=profile),
+        _fetch_v3_routes(account, transport=transport, profile=profile),
         _fetch_enterprise(account, transport=transport, profile=profile),
         return_exceptions=True)
     v3_models = results[0] if isinstance(results[0], list) else []
@@ -134,12 +151,59 @@ async def _fetch_union(account: dict,
     return list(merged.values())
 
 
+def _v3_uas(profile: WbRealm = REALM_CN) -> tuple[str | None, ...]:
+    """`/v3/config` 探测 UA 路（None = profile 默认桌面档 UA）。
+
+    global 三路并集（桌面档主路 + IDE + CLI，三路各有独有模型；见模块头注释）；
+    CN 维持单路（参考实现 CN 侧亦单路）。显式 `wb_user_agent` 覆盖时退化为单路
+    ——用户自愈路径优先，且不额外打上游。
+    """
+    if settings.wb_user_agent or not profile.is_global:
+        return (None,)
+    return (None, _IDE_UA, _CLI_UA)
+
+
+async def _fetch_v3_routes(account: dict,
+                           transport: httpx.AsyncBaseTransport | None = None,
+                           profile: WbRealm = REALM_CN) -> list[dict]:
+    """`/v3/config` 探测：单路（CN / 显式覆盖）或 global 三路 UA 并集。
+
+    合并口径对齐参考实现 `mergeV3Routes`：桌面档条目字段权威（主路，chat 路径
+    同源 UA），IDE/CLI 只补桌面档缺失的模型 id（字段取自各自条目）；单路失败
+    只 WARN 不拖累其余路，全失败抛最后一个错误（与 `_fetch_union`「全败才抛」一致）。
+    """
+    uas = _v3_uas(profile)
+    if len(uas) == 1:
+        return await _fetch_v3(account, transport=transport, profile=profile)
+    results = await asyncio.gather(
+        *[_fetch_v3(account, transport=transport, profile=profile, ua=ua)
+          for ua in uas],
+        return_exceptions=True)
+    merged: dict[str, dict] = {}
+    any_ok = False
+    for ua, result in zip(uas, results):
+        if isinstance(result, Exception):
+            logger.warning("[wb-catalog] v3/config 单路失败（UA=%s）: %s",
+                           ua or "default", result)
+            continue
+        any_ok = True
+        for m in result:
+            merged.setdefault(m["name"], m)  # 主路优先：先到者（桌面档）字段权威
+    if not any_ok:
+        for result in results:
+            if isinstance(result, Exception):
+                raise result
+        return []
+    return list(merged.values())
+
+
 async def _fetch_v3(account: dict,
                     transport: httpx.AsyncBaseTransport | None = None,
-                    profile: WbRealm = REALM_CN) -> list[dict]:
-    """`GET /v3/config` → data.models[]（v3 主路径；桌面档 UA 门禁）。"""
+                    profile: WbRealm = REALM_CN,
+                    ua: str | None = None) -> list[dict]:
+    """`GET /v3/config` → data.models[]（v3 主路径；桌面档 UA 门禁；ua 覆盖可选）。"""
     url = f"{profile.catalog_base}{V3_CONFIG_PATH}"
-    body = await _get_json(url, account, transport=transport, profile=profile)
+    body = await _get_json(url, account, transport=transport, profile=profile, ua=ua)
     data = body.get("data") or {}
     raw = data.get("models") if isinstance(data, dict) else None
     if not isinstance(raw, list):
@@ -195,9 +259,10 @@ async def _fetch_enterprise(account: dict,
 
 async def _get_json(url: str, account: dict,
                     transport: httpx.AsyncBaseTransport | None,
-                    profile: WbRealm = REALM_CN) -> dict:
-    """带桌面档头族的 GET（缓存/注入点经 transport 参数）。"""
-    headers = _catalog_headers(account, profile=profile)
+                    profile: WbRealm = REALM_CN,
+                    ua: str | None = None) -> dict:
+    """带桌面档头族的 GET（缓存/注入点经 transport 参数；ua 覆盖仅三路探测用）。"""
+    headers = _catalog_headers(account, profile=profile, ua=ua)
     async with httpx.AsyncClient(trust_env=False, timeout=30.0,
                                  transport=transport) as client:
         resp = await client.get(url, headers=headers)
@@ -209,15 +274,17 @@ async def _get_json(url: str, account: dict,
     return body
 
 
-def _catalog_headers(account: dict, profile: WbRealm = REALM_CN) -> dict[str, str]:
+def _catalog_headers(account: dict, profile: WbRealm = REALM_CN,
+                     ua: str | None = None) -> dict[str, str]:
     """目录端点头族（v3/config 桌面档；2api 实测 UA 门禁）。
 
     双域差异按 profile：Origin/Referer、Accept-Language、UA 平台段；域/企业头
     分派同 chat（§2 表）：国际版恒 X-Domain: www.workbuddy.ai + X-No-Enterprise-Id。
+    `ua` 覆盖仅全球三路探测用（IDE/CLI 档；None = profile 默认桌面档/显式覆盖）。
     """
     uid = str(account.get("uid") or "")
     headers = {
-        "User-Agent": user_agent_for(profile),
+        "User-Agent": ua or user_agent_for(profile),
         "Accept": "application/json, text/plain, */*",
         "X-Requested-With": "XMLHttpRequest",
         "Origin": profile.origin,
@@ -280,7 +347,13 @@ def _to_entry(m) -> dict | None:
 
 
 def _non_chat_model(m: dict) -> bool:
-    """非对话模型过滤（B 实测口径）：tiny 输出 / 图生成 / 补全族前缀。"""
+    """非对话模型过滤（B 实测口径）：tiny 输出 / 图·视频生成 tag / 补全族前缀。
+
+    tag 族扩展（2026-10-16 对齐参考实现 `client.go::nonChatModel`）：
+    `image-to-image`/`text-to-video`/`image-to-video` 与前缀族并列——桌面档目录会
+    带入 `seedance` 视频、`gpt-image` 系列（两域共用口径），不拦会混进 /v1/models
+    且选中报 11102。
+    """
     mid = str(m.get("id") or "").lower()
     if mid.startswith(("nes-", "completion-", "codewise-")):
         return True
@@ -288,7 +361,8 @@ def _non_chat_model(m: dict) -> bool:
     if isinstance(max_out, (int, float)) and 0 < max_out <= 256:
         return True
     tags = m.get("tags") or []
-    if isinstance(tags, list) and "text-to-image" in tags:
+    if isinstance(tags, list) and any(t in tags for t in (
+            "text-to-image", "image-to-image", "text-to-video", "image-to-video")):
         return True
     return False
 

@@ -98,6 +98,21 @@ def test_transform_forces_stream_and_keeps_tools():
     assert "thinking" not in body
 
 
+def test_transform_gpt_max_tokens_floor_clamped():
+    """GPT 系 max_tokens 下限 16（上游 <16 判 400/11133；Claude Code /model 切换探针
+    会发极小值，不抬则必失败）；非 GPT 系不抬（上游接受小值）。"""
+    a = _adapter(lambda r: _sse_response(["data: [DONE]"]), model="gpt-6-sol")
+    body = a.transform_request(ChatRequest(
+        model="gpt-6-sol", messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=1))
+    assert body["max_tokens"] == 16
+    a2 = _adapter(lambda r: _sse_response(["data: [DONE]"]))
+    body2 = a2.transform_request(ChatRequest(
+        model="glm-5.3-flash", messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=1))
+    assert body2["max_tokens"] == 1
+
+
 def test_transform_effort_none_keeps_without_summary():
     a = _adapter(lambda r: _sse_response(["data: [DONE]"]))
     body = a.transform_request(ChatRequest(
