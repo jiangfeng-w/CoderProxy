@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
 
@@ -400,6 +401,14 @@ class WorkBuddyChatAdapter:
         双域差异按 profile（§2 表）：UA 平台段 / Origin / Accept-Language；
         域与企业头分派——国际版恒 `X-Domain: www.workbuddy.ai` + `X-No-Enterprise-Id`
         （panel injectGlobalChatHeaders）；CN 走账号域现状（零回归）。
+
+        会话头族（BUG-014，2026-10-17）：上游 10-15/16 起对国际版 chat 网关加渠道校验，
+        请求缺 `X-Conversation-*` 三件套即 400 code=11128（msg `conversation id missing`，
+        displayTips「这次调用没通过渠道校验，可能不是官方客户端发出的」）。本函数每次请求
+        调用一次（`_stream_once` L460），故在此现生成即「每请求新 id」——上游不拿会话 id
+        存历史（9router 抓包：官方客户端亦每请求新 id）。两域同发：CN 未强制但实测容忍
+        （panel 生产两域同发）；两个同值别名（`X-Root-Request-ID`/`X-Request-ID`）对齐
+        官方客户端抓包形态（9router PR #4949）。依据与探针见 `docs/已知问题.md` BUG-014。
         """
         uid = str(account.get("uid") or "")
         headers = {
@@ -423,6 +432,12 @@ class WorkBuddyChatAdapter:
             # 每号稳定派生设备头（与账号层同式；防多号设备指纹关联，B8）
             headers["X-Machine-ID"] = derive_stable_id(uid, "machine")
             headers["X-Session-ID"] = derive_stable_id(uid, "session")
+        # 会话头族：必须在 profile 早退分支之前（本函数有两条 return 路径）
+        headers["X-Conversation-ID"] = secrets.token_hex(16)
+        headers["X-Conversation-Request-ID"] = secrets.token_hex(16)
+        headers["X-Conversation-Message-ID"] = secrets.token_hex(16)
+        headers["X-Root-Request-ID"] = headers["X-Conversation-Request-ID"]
+        headers["X-Request-ID"] = headers["X-Conversation-Message-ID"]
         if self._profile.chat_domain:
             headers["X-Domain"] = self._profile.chat_domain
             headers["X-No-Enterprise-Id"] = "1"

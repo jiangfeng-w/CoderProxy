@@ -5,6 +5,7 @@
 """
 import asyncio
 import json
+import re
 
 import httpx
 import pytest
@@ -483,6 +484,34 @@ def test_headers_desktop_tier(data_dir):
     from relay.platforms.workbuddy.client import derive_stable_id
     assert h["X-Machine-ID"] == derive_stable_id("u_wb1", "machine")
     assert h["X-Session-ID"] == derive_stable_id("u_wb1", "session")
+
+
+def test_headers_conversation_trio_both_realms(data_dir):
+    """会话头族（BUG-014，2026-10-17）：两域同发三件套（32 hex、每请求新 id）+ 两个同值别名。
+
+    上游 10-15/16 起对国际版 chat 网关加渠道校验，缺三件套即 400 code=11128
+    （msg `conversation id missing`）；探针实测补三件套即 200。依据见 docs/已知问题.md BUG-014。
+    """
+    from relay.platforms.workbuddy.realms import REALM_GLOBAL
+    _run(_seed_account(domain="www.codebuddy.cn"))
+    account = _run(store.find_account("workbuddy", "u_wb1"))
+    for profile in (wbchat.REALM_CN, REALM_GLOBAL):
+        a = wbchat.WorkBuddyChatAdapter("m", profile=profile)
+        h1 = a._headers(account)
+        h2 = a._headers(account)
+        for name in ("X-Conversation-ID", "X-Conversation-Request-ID",
+                     "X-Conversation-Message-ID"):
+            assert re.fullmatch(r"[0-9a-f]{32}", h1[name]), name
+        # 每请求新 id（上游不拿会话 id 存历史；官方客户端亦每请求新 id）
+        assert h1["X-Conversation-ID"] != h2["X-Conversation-ID"]
+        assert h1["X-Conversation-Message-ID"] != h2["X-Conversation-Message-ID"]
+        # 同值别名（9router 抓包官方客户端形态）
+        assert h1["X-Root-Request-ID"] == h1["X-Conversation-Request-ID"]
+        assert h1["X-Request-ID"] == h1["X-Conversation-Message-ID"]
+        # 国际版早退分支也带上（本函数两条 return 路径）
+        if profile is REALM_GLOBAL:
+            assert h1["X-Domain"] == "www.workbuddy.ai"
+            assert re.fullmatch(r"[0-9a-f]{32}", h1["X-Conversation-ID"])
 
 
 # ─────────────────────────── 帧重建与 usage ───────────────────────────
