@@ -4,7 +4,7 @@
 // 当前真值（顶栏模式/其它页面随同一 store 自动收敛，不再各自维护副本）。
 import { onMounted, ref, watch } from 'vue'
 import { useMessage, NPopconfirm } from 'naive-ui'
-import { relayRestart } from '../api'
+import { relayRestart, relayStatus } from '../api'
 import { configStore, toolModeLabel } from '../store'
 
 const message = useMessage()
@@ -24,6 +24,38 @@ watch(
     portDraft.value = String(p)
   }
 )
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+/**
+ * 等壳把 relay 重启完成并重读真值。
+ *
+ * `relay_restart` 是**后台重启**（壳侧线程 stop+spawn 后立即返回），前端只能轮询
+ * `relay_status` 感知：先看到侧车下线（running=false）再看到新进程就绪（running=true
+ * 且端口变化）才算重启完成。随后重读配置，并用「顺延只向上」的不变量校验——
+ * 起点是配置端口、占用只往高顺延，故实际监听必然 ≥ 配置端口；读到更小的值说明
+ * 联的还是重启前的旧进程，继续等（这就是上一版误报「13601 被占用，顺延到 3601」的根因）。
+ */
+async function reloadAfterRestart(configured: number, oldPort: number | undefined, timeoutMs = 30000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  let sawDown = false
+  while (Date.now() < deadline) {
+    const st = await relayStatus().catch(() => null)
+    if (st && !st.running) sawDown = true
+    if (st && st.running && (sawDown || st.port !== oldPort)) {
+      try {
+        await config.load()
+        // 一致性双检：① 壳报的就绪端口 == relay 报的实际监听（读到旧进程时二者
+        // 必不同）；② 实际监听 ≥ 配置端口（顺延只向上）。两条都过才算读到真值。
+        if (config.listen_port === st.port && config.listen_port >= configured) return true
+      } catch {
+        /* 未就绪，下轮重试 */
+      }
+    }
+    await sleep(400)
+  }
+  return false
+}
 
 async function load() {
   try {
@@ -71,7 +103,8 @@ async function onApplyPort() {
   }
   portBusy.value = true
   try {
-    // 1) 保存端口到 relay（持久化，跨重启一致）；成功后 store 已回写新 port/base_url
+    // 1) 保存「配置端口」到 relay（落盘持久化）；回执里的 listen_port 仍是当前
+    //    实际监听（重启前），故此时 store 里 port ≠ listen_port 属正常过渡态
     try {
       await config.update({ port: p })
     } catch (e) {
@@ -79,19 +112,18 @@ async function onApplyPort() {
       return
     }
     message.info(`已保存端口 ${p}`)
-    // 2) 重启 relay，按持久化端口立即生效
+    const oldPort = config.listen_port
+    // 2) 触发重启；实际重启在壳侧后台线程执行，靠轮询状态等待完成
     try {
       await relayRestart()
     } catch (e) {
       message.error(`重启服务失败：${String(e)}`)
       return
     }
-    // 3) 重启后重读真值：被占用时实际端口会向上顺延（listen_port 才是真值，
-    //    提示行与「Agent 连接地址」随之收敛）
-    try {
-      await config.load()
-    } catch {
-      /* 读不到就保持现状，状态轮询会补载 */
+    // 3) 等新进程就绪后重读真值（被占用时实际端口向上顺延，listen_port 才是真值）
+    if (!(await reloadAfterRestart(p, oldPort))) {
+      message.warning('已触发重启，但未读到新的监听端口；请稍后刷新页面确认')
+      return
     }
     if (config.listen_port === p) {
       message.success(`已重启服务，监听端口 ${p}`)
@@ -242,7 +274,7 @@ onMounted(load)
           >
         </div>
         <div
-          v-if="!portBusy && config.listen_port !== config.port"
+          v-if="!portBusy && config.listen_port > config.port"
           class="hint warn"
         >
           配置端口 {{ config.port }} 已被占用，实际监听 {{ config.listen_port }}；Agent 连接请用下方实际地址（每次启动都从 {{ config.port }} 起扫空位）。
