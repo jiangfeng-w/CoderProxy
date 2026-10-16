@@ -32,7 +32,9 @@ def url_host(host: str) -> str:
 @dataclass
 class Settings:
     # 服务
-    relay_host: str = "127.0.0.1"
+    # 默认 localhost：对外地址友好（对齐 9router 口径），且 cli 会把它的
+    # 全部解析结果（本机为 ::1 + 127.0.0.1）都绑上——agent 先解析到哪个都通
+    relay_host: str = "localhost"
     # relay_port = **实际监听**端口（占用顺延后由 cli 回填；[relay-ready] 行与
     # GUI 展示以它为准）；relay_port_configured = **配置起点**（--port / 磁盘 /
     # env / 默认的有效值，GUI 配置页编辑的就是它）。两者仅在顺延发生时不同。

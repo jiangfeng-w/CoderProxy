@@ -1,7 +1,7 @@
 """CLI 入口：`python -m relay run [--port 3601] [--api-base ...] [--api-key ...]`。
 
 子命令：
-  run          启动 FastAPI relay 服务（默认从 127.0.0.1:3601 起，被占用自动顺延）
+  run          启动 FastAPI relay 服务（默认从 localhost:3601 起，被占用自动顺延）
                --port 指定「配置端口」起点并持久化（不传则用上次保存的端口）；
                --api-key 设置并持久化 key
   login        触发登录（IM 静默优先，降级浏览器 PKCE 并自动打开），轮询至完成
@@ -10,7 +10,8 @@
   config       打印中转配置（base_url / api_key）
 
 端口口径（dev 与安装版并行 spec §2.2「各自配置 + 自动顺延」）：起点 =
-`--port` 显式 > 磁盘「配置端口」> `RELAY_PORT` env > 默认 3601；从起点向上
+`--port` 显式 > 磁盘「配置端口」> `RELAY_PORT` env > 默认 3601；监听地址默认
+`localhost`（IPv4+IPv6 回环都绑，agent 无论先解析到谁都能连）；从起点向上
 connect 快速跳过活监听、独占绑定找第一个空位（窗口 PORT_SCAN_WINDOW），命中
 后把已绑定 socket 交 uvicorn（探测→绑定无空窗）。只有配置端口落盘，实际端口
 不落盘。
@@ -50,85 +51,98 @@ def _setup_logging(level: int = logging.INFO) -> None:
     )
 
 
-def _probe_host(host: str) -> str:
-    """连接探测用的目标地址：通配监听地址换回环（0.0.0.0/空/`*` → 127.0.0.1；`::` → `::1`）。"""
-    if host in ("", "0.0.0.0", "*"):
-        return "127.0.0.1"
-    if host == "::":
-        return "::1"
-    return host
-
-
-def _addr_info(host: str, port: int, *, passive: bool):
+def _addr_infos(host: str, port: int, *, passive: bool) -> list[tuple]:
     """解析监听/探测地址：**由 getaddrinfo 决定地址族**（IPv4 / IPv6 / 主机名都支持）。
 
+    返回**全部**去重地址（不取单个）：`localhost` 在本机解析为 `::1` + `127.0.0.1`
+    两条，两个回环都绑才能保证 agent 无论先解析到谁都能连上（本机实测 ::1 优先）。
     历史坑（2026-10-16 自查修复）：原先写死 AF_INET，`RELAY_HOST=::` / `::1` 时
     探测与绑定全失败 → 误报「端口均被占用」且起不来（旧路径由 uvicorn 绑，IPv6 正常）。
-    取首个 IPv4 结果优先（与默认口径一致），没有 IPv4 再退回其它族（如纯 IPv6 字面量）。
     """
     try:
         infos = socket.getaddrinfo(host or None, port, type=socket.SOCK_STREAM,
                                    flags=socket.AI_PASSIVE if passive else 0)
     except OSError:
-        return None
-    for info in infos:
-        if info[0] == socket.AF_INET:
-            return info
-    return infos[0] if infos else None
+        return []
+    out, seen = [], set()
+    for family, socktype, proto, _, sockaddr in infos:
+        key = (family, sockaddr[0])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((family, socktype, proto, sockaddr))
+    return out
+
+
+# 通配监听地址 → 探测用回环（1:1 映射，保持地址族）
+_WILDCARD_TO_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}
+
+
+def _probe_targets(host: str, port: int) -> list[tuple]:
+    """探测目标地址列表：通配地址按回环探测；主机名保留其全部解析结果。"""
+    return [
+        (family, socktype, proto,
+         (_WILDCARD_TO_LOOPBACK.get(sockaddr[0], sockaddr[0]), sockaddr[1]))
+        for family, socktype, proto, sockaddr in _addr_infos(host, port, passive=False)
+    ]
 
 
 def _probe_occupied(host: str, port: int, timeout: float = _PORT_PROBE_TIMEOUT_S) -> bool:
-    """connect 快速判定：**连通 = 确定被占用**（活监听必然握手成功）。
+    """connect 快速判定：**任一地址连通 = 确定被占用**（活监听必然握手成功）。
 
     未连通不反推「空闲」：本机实测（2026-10-16）连接未监听端口既可能是被拒，
     也可能被本机安全软件静默丢 SYN 而超时——超时与「空闲」不可区分，故只把
     「连通」当正向证据用于快速跳过，真正的空闲由 _bind_exclusive 落实。
     地址解不出（非法主机名等）时按「不占用」处理，交给独占绑定兜底报错。
     """
-    info = _addr_info(_probe_host(host), port, passive=False)
-    if info is None:
-        return False
-    family, socktype, proto, _, sockaddr = info
-    with socket.socket(family, socktype, proto) as s:
-        s.settimeout(timeout)
-        try:
-            s.connect(sockaddr)
-        except OSError:
-            return False
-        return True
+    for family, socktype, proto, sockaddr in _probe_targets(host, port):
+        with socket.socket(family, socktype, proto) as s:
+            s.settimeout(timeout)
+            try:
+                s.connect(sockaddr)
+            except OSError:
+                continue  # 该地址无监听（或被拒/超时）→ 看下一个
+            return True
+    return False
 
 
-def _bind_exclusive(host: str, port: int) -> socket.socket | None:
+def _bind_exclusive(host: str, port: int) -> list[socket.socket] | None:
     """独占绑定（**不加** SO_REUSEADDR）：成功 = 该端口确属空闲且由本进程持有。
 
-    为什么不加 SO_REUSEADDR（spec §2.2.1.4 的实测修订，2026-10-16 本机矩阵）：
+    为什么每个地址都不加 SO_REUSEADDR（spec §2.2.1.4 的实测修订，2026-10-16 本机矩阵）：
     ① 对「同样带 REUSEADDR 的活监听」（uvicorn 默认带）REUSEADDR 绑定**会成功**
        = 劫持对方端口；不加则任何活监听都以 WSAEADDRINUSE/WSAEACCES 失败。
     ② TIME_WAIT 残留不影响独占绑定（服务端 TIME_WAIT 场景实测绑定仍 ok），
        故无需为「快速重启」牺牲排他性。
-    地址族由 _addr_info 决定（IPv6 字面量也能绑）；解不出地址返回 None（视作占用）。
+
+    多地址（`localhost` = IPv4+IPv6 回环）**全绑或全不绑**：任一条失败即释放全部
+    并返回 None（视作该端口被占用，交给扫描顺延）。解不出地址同样返回 None。
     """
-    info = _addr_info(host, port, passive=True)
-    if info is None:
+    infos = _addr_infos(host, port, passive=True)
+    if not infos:
         return None
-    family, socktype, proto, _, sockaddr = info
-    s = socket.socket(family, socktype, proto)
-    try:
-        s.bind(sockaddr)
-    except OSError:
-        s.close()
-        return None
-    return s
+    socks: list[socket.socket] = []
+    for family, socktype, proto, sockaddr in infos:
+        s = socket.socket(family, socktype, proto)
+        try:
+            s.bind(sockaddr)
+        except OSError:
+            s.close()
+            for t in socks:
+                t.close()
+            return None
+        socks.append(s)
+    return socks
 
 
 def pick_listen_socket(host: str, start: int,
-                       window: int = PORT_SCAN_WINDOW) -> tuple[socket.socket, int]:
-    """从起点向上扫出第一个可独占绑定的端口，返回 (已绑定 socket, 端口)。
+                       window: int = PORT_SCAN_WINDOW) -> tuple[list[socket.socket], int]:
+    """从起点向上扫出第一个可独占绑定的端口，返回 (已绑定 socket 列表, 端口)。
 
     起点被占（如安装版已占 3601）→ 顺延到下一个空位；窗口内全占 → SystemExit
     并列明范围。探测与绑定在同一函数内完成（先 connect 快速跳过活监听，再独占
     绑定落实归属），调用方拿到 socket 直接交 uvicorn——「探测→绑定」的 TOCTOU
-    空窗不存在。
+    空窗不存在。`localhost` 这类多地址主机返回多个 socket（一次全绑）。
     """
     if start == 0:
         raise SystemExit("端口不能为 0（请在配置页设置固定端口）")
@@ -138,9 +152,9 @@ def pick_listen_socket(host: str, start: int,
     for port in range(start, end):
         if _probe_occupied(host, port):
             continue  # 活监听：快速跳过（不必等 bind 报错）
-        sock = _bind_exclusive(host, port)
-        if sock is not None:
-            return sock, port
+        socks = _bind_exclusive(host, port)
+        if socks is not None:
+            return socks, port
     raise SystemExit(
         f"端口 {start}–{end - 1} 均被占用，无法自动顺延；请在配置页换一段端口后重启"
     )
@@ -190,7 +204,7 @@ def _cmd_run(args) -> int:
     # settings.relay_port 恒 = 实际监听（[relay-ready] / 壳转发 / 顶栏自动正确）
     settings.relay_port_configured = asyncio.run(
         _resolve_port_start(args.port, settings.relay_port))
-    listen_sock, actual_port = pick_listen_socket(
+    listen_socks, actual_port = pick_listen_socket(
         settings.relay_host, settings.relay_port_configured)
     if actual_port != settings.relay_port_configured:
         print(f"* 端口 {settings.relay_port_configured} 已被占用，自动顺延至 {actual_port}",
@@ -206,12 +220,13 @@ def _cmd_run(args) -> int:
     print("* 模型列表  : GET  /v1/models", flush=True)
     print("* 聊天      : POST /v1/chat/completions", flush=True)
     print("* 登录       : POST /v1/auth/login/start（或 CLI: python -m relay login）", flush=True)
-    # 预绑定 socket 交 uvicorn（内部自行 listen）；host/port 参数随之失效
+    # 预绑定 socket 交 uvicorn（内部自行 listen；localhost = 回环双栈多枚 socket）
     server = uvicorn.Server(uvicorn.Config("relay.routes:app", log_level="info"))
     try:
-        server.run(sockets=[listen_sock])
+        server.run(sockets=listen_socks)
     finally:
-        listen_sock.close()
+        for s in listen_socks:
+            s.close()
     return 0
 
 
@@ -291,7 +306,7 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_run = sub.add_parser("run", help="启动 relay 服务")
-    p_run.add_argument("--host", help="监听地址（默认 RELAY_HOST / 127.0.0.1）")
+    p_run.add_argument("--host", help="监听地址（默认 RELAY_HOST / localhost，回环双栈）")
     p_run.add_argument("--port", type=int, help="监听端口（默认 RELAY_PORT / 3601）")
     p_run.add_argument("--api-base", help="牛码 API 基址（默认 TA3_API_BASE）")
     p_run.add_argument("--tool-mode", choices=["hybrid", "strict", "passthrough"],

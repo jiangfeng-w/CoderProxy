@@ -18,7 +18,7 @@ export const useConfigStore = defineStore('config', {
   state: (): ConfigState => ({
     loaded: false,
     base_url: '',
-    host: '127.0.0.1',
+    host: 'localhost',
     port: 3601,
     listen_port: 3601,
     api_key: '',

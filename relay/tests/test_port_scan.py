@@ -94,13 +94,15 @@ def test_cli_config_prints_saved_port(port_storage, monkeypatch, capsys):
 
 # ─────────────────────────── 顺延扫描与独占绑定 ───────────────────────────
 
-def test_probe_host_maps_wildcard():
-    assert cli._probe_host("0.0.0.0") == "127.0.0.1"
-    assert cli._probe_host("") == "127.0.0.1"
-    assert cli._probe_host("*") == "127.0.0.1"
-    assert cli._probe_host("::") == "::1"
-    assert cli._probe_host("127.0.0.1") == "127.0.0.1"
-    assert cli._probe_host("::1") == "::1"
+def _probe_ips(host: str, port: int = 3601) -> set[str]:
+    return {sockaddr[0] for _, _, _, sockaddr in cli._probe_targets(host, port)}
+
+
+def test_probe_targets_map_wildcard_to_loopback():
+    assert _probe_ips("0.0.0.0") == {"127.0.0.1"}
+    assert _probe_ips("::") == {"::1"}
+    assert _probe_ips("127.0.0.1") == {"127.0.0.1"}
+    assert _probe_ips("::1") == {"::1"}
 
 
 def _ipv6_available() -> bool:
@@ -119,32 +121,70 @@ def _free_port(family: int, bind_host: str) -> int:
     return port
 
 
+def _close_all(socks) -> None:
+    for s in socks:
+        s.close()
+
+
 def test_pick_listen_socket_ipv4_wildcard_host():
     port = _free_port(socket.AF_INET, "127.0.0.1")
-    sock, picked = cli.pick_listen_socket("0.0.0.0", port)
+    socks, picked = cli.pick_listen_socket("0.0.0.0", port)
     try:
         assert picked == port
-        assert sock.family == socket.AF_INET
+        assert [s.family for s in socks] == [socket.AF_INET]
     finally:
-        sock.close()
+        _close_all(socks)
+
+
+def test_pick_listen_socket_localhost_binds_both_loopbacks():
+    """默认主机 localhost：本机解析为 ::1 + 127.0.0.1，两个回环都要绑上——
+    否则 agent 若先解析到 ::1 就连不上（本机实测 ::1 优先）。"""
+    port = _free_port(socket.AF_INET, "127.0.0.1")
+    socks, picked = cli.pick_listen_socket("localhost", port)
+    try:
+        assert picked == port
+        bound = {(s.family, s.getsockname()[0]) for s in socks}
+        assert (socket.AF_INET, "127.0.0.1") in bound
+        if _ipv6_available():
+            assert (socket.AF_INET6, "::1") in bound
+    finally:
+        _close_all(socks)
+
+
+@pytest.mark.skipif(not _ipv6_available(), reason="本机无 IPv6")
+def test_pick_listen_socket_localhost_skips_port_occupied_on_ipv6_only():
+    """只被 IPv6 回环占用的端口，对 localhost 而言也算占用（探测覆盖全部地址）。"""
+    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    s.bind(("::1", 0))
+    s.listen(5)
+    busy = s.getsockname()[1]
+    try:
+        assert cli._probe_occupied("localhost", busy) is True
+        socks, picked = cli.pick_listen_socket("localhost", busy)
+        try:
+            assert picked != busy
+        finally:
+            _close_all(socks)
+    finally:
+        s.close()
 
 
 @pytest.mark.skipif(not _ipv6_available(), reason="本机无 IPv6")
 def test_pick_listen_socket_ipv6_hosts():
     """IPv6 字面量主机名（:: / ::1）必须可绑——历史坑：写死 AF_INET 会误报「均被占用」。"""
     port = _free_port(socket.AF_INET6, "::1")
-    sock, picked = cli.pick_listen_socket("::1", port)
+    socks, picked = cli.pick_listen_socket("::1", port)
     try:
         assert picked == port
-        assert sock.family == socket.AF_INET6
+        assert [s.family for s in socks] == [socket.AF_INET6]
     finally:
-        sock.close()
-    sock, picked = cli.pick_listen_socket("::", port)
+        _close_all(socks)
+    socks, picked = cli.pick_listen_socket("::", port)
     try:
         assert picked == port  # 端口空间与 IPv4 独立，可复用同一号
-        assert sock.family == socket.AF_INET6
+        assert [s.family for s in socks] == [socket.AF_INET6]
     finally:
-        sock.close()
+        _close_all(socks)
 
 
 def test_bind_backstops_probe_blind_spot():
@@ -158,11 +198,11 @@ def test_bind_backstops_probe_blind_spot():
         cli._probe_occupied("127.0.0.1", port)  # 无断言：是否超时取决于队列状态
         cli._probe_occupied("127.0.0.1", port)
         assert cli._bind_exclusive("127.0.0.1", port) is None
-        sock, picked = cli.pick_listen_socket("127.0.0.1", port)
+        socks, picked = cli.pick_listen_socket("127.0.0.1", port)
         try:
             assert picked != port
         finally:
-            sock.close()
+            _close_all(socks)
     finally:
         s.close()
 
@@ -181,14 +221,14 @@ def test_probe_occupied_true_for_listener_false_when_quiet():
 def test_pick_listen_socket_skips_busy_start():
     s, busy = _listener()
     try:
-        sock, picked = cli.pick_listen_socket("127.0.0.1", busy)
+        socks, picked = cli.pick_listen_socket("127.0.0.1", busy)
     finally:
         s.close()
     try:
         assert busy < picked < busy + cli.PORT_SCAN_WINDOW
-        assert sock.getsockname()[1] == picked  # 返回的正是已绑定的口
+        assert socks[0].getsockname()[1] == picked  # 返回的正是已绑定的口
     finally:
-        sock.close()
+        _close_all(socks)
 
 
 def test_pick_listen_socket_accepts_free_start():
@@ -197,11 +237,11 @@ def test_pick_listen_socket_accepts_free_start():
     s.bind(("127.0.0.1", 0))
     free = s.getsockname()[1]
     s.close()
-    sock, picked = cli.pick_listen_socket("127.0.0.1", free)
+    socks, picked = cli.pick_listen_socket("127.0.0.1", free)
     try:
         assert picked == free
     finally:
-        sock.close()
+        _close_all(socks)
 
 
 def test_pick_listen_socket_window_one_busy_raises():
@@ -224,14 +264,14 @@ def test_pick_listen_socket_bind_backstops_probe_false_negative(monkeypatch):
     s, busy = _listener()
     monkeypatch.setattr(cli, "_probe_occupied", lambda *a, **k: False)  # 假装都空闲
     try:
-        sock, picked = cli.pick_listen_socket("127.0.0.1", busy)
+        socks, picked = cli.pick_listen_socket("127.0.0.1", busy)
     finally:
         s.close()
     try:
         assert picked != busy  # 绑定 busy 必失败（对方活监听）→ 顺延
         assert busy < picked < busy + cli.PORT_SCAN_WINDOW
     finally:
-        sock.close()
+        _close_all(socks)
 
 
 def test_pick_listen_socket_zero_or_invalid_raises():
