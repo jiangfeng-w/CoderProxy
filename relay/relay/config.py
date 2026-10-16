@@ -28,7 +28,11 @@ def _env(name: str, default: str) -> str:
 class Settings:
     # 服务
     relay_host: str = "127.0.0.1"
+    # relay_port = **实际监听**端口（占用顺延后由 cli 回填；[relay-ready] 行与
+    # GUI 展示以它为准）；relay_port_configured = **配置起点**（--port / 磁盘 /
+    # env / 默认的有效值，GUI 配置页编辑的就是它）。两者仅在顺延发生时不同。
     relay_port: int = 3601
+    relay_port_configured: int | None = None
     relay_api_key: str = ""
     # ta3
     ta3_api_base: str = "https://lc.yinhaiyun.com/newcoder"

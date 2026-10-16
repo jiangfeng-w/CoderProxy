@@ -19,7 +19,10 @@ export interface AuthStatus {
 export interface Config {
   base_url: string
   host: string
+  /** 配置端口（起点）：GUI 配置页编辑的值；被占用时实际监听会向上顺延 */
   port: number
+  /** 实际监听端口（起点被占用时自动顺延，可能与 port 不同） */
+  listen_port: number
   api_key: string
   tool_mode: string
   model_whitelist: string[]

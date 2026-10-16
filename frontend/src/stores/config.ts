@@ -20,6 +20,7 @@ export const useConfigStore = defineStore('config', {
     base_url: '',
     host: '127.0.0.1',
     port: 3601,
+    listen_port: 3601,
     api_key: '',
     tool_mode: 'hybrid',
     model_whitelist: [],

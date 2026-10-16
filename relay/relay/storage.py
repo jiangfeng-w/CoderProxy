@@ -157,23 +157,39 @@ async def regenerate_api_key() -> str:
 DEFAULT_PORT = 3601
 
 
-async def get_port() -> int:
-    """持久化的监听端口；未设置时返回默认 3601。
+async def get_saved_port() -> int | None:
+    """磁盘持久化的「配置端口」；未保存/非法返回 None。
 
-    GUI「配置页」改端口/重启均以本函数为准，确保每次启动同一个端口。
+    与 get_port() 的区别在 None 的语义：它表示「从未在配置页/--port 保存过」。
+    port 顺延（dev 与安装版并行 spec §2.2）需要区分它——只有配置端口落盘，
+    env 派生与顺延所得的实际监听端口都不落盘。
     """
     state = await _io(_load_state)
     p = (state.get("config") or {}).get("port")
-    return p if isinstance(p, int) and 1 <= p <= 65535 else DEFAULT_PORT
+    return p if isinstance(p, int) and 1 <= p <= 65535 else None
+
+
+async def get_port() -> int:
+    """持久化的配置端口；未设置时返回默认 3601（兼容既有调用）。
+
+    GUI「配置页」改端口/重启均以本函数为准；实际绑定端口由 cli 从该起点向上
+    扫空位（被占用时顺延），实际监听端口见 settings.relay_port。
+    """
+    saved = await get_saved_port()
+    return saved if saved is not None else DEFAULT_PORT
 
 
 async def save_port(port: int) -> int:
-    """持久化监听端口（GUI 配置页写入）。"""
+    """持久化「配置端口」（GUI 配置页写入）；重启后按新起点生效。
+
+    只改配置起点，不动 settings.relay_port（= 实际监听）——本次启动已绑定的口
+    不会因保存而改变，重启才生效（避免 GUI 提前显示「已监听新端口」）。
+    """
     async with _asyncio_lock:
         state = await _io(_load_state)
         state.setdefault("config", {})["port"] = int(port)
         await _io(_save_state, state)
-    settings.relay_port = int(port)
+    settings.relay_port_configured = int(port)
     return int(port)
 
 
@@ -204,8 +220,9 @@ async def apply_persisted_config() -> None:
     """D1 启动装载：磁盘持久化的 config 字段优先于 env/默认兜底。
 
     当前由磁盘装载的字段：tool_mode（磁盘未保存时保持 env/默认，不覆写）。
-    api_key 由 ensure_initialized 装载、port 由 CLI get_port() 装载，各走各的
-    读取路径，本函数只负责其余「持久化优先」的配置字段，供 cli._cmd_run 调用。
+    api_key 由 ensure_initialized 装载、port 由 CLI get_saved_port() 装载（起点，
+    再向上扫空位），各走各的读取路径，本函数只负责其余「持久化优先」的配置字段，
+    供 cli._cmd_run 调用。
     """
     state = await _io(_load_state)
     m = (state.get("config") or {}).get("tool_mode")

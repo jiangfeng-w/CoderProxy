@@ -981,11 +981,18 @@ async def auth_sync():
 
 @app.get("/v1/auth/config")
 async def auth_config():
-    """GUI/CLI 展示用：中转配置（不泄漏牛码 token）。"""
+    """GUI/CLI 展示用：中转配置（不泄漏牛码 token）。
+
+    port = **配置起点**（磁盘 / env / 默认的有效值，GUI 配置页编辑的就是它）；
+    listen_port = **实际监听**（起点被占用时自动顺延，二者可能不同——GUI 据此
+    显示提示行）；base_url 用实际监听端口拼装。
+    """
+    configured_port = settings.relay_port_configured or settings.relay_port
     return {
         "base_url": f"http://{settings.relay_host}:{settings.relay_port}/v1",
         "host": settings.relay_host,
-        "port": settings.relay_port,
+        "port": configured_port,
+        "listen_port": settings.relay_port,
         "api_key": storage.relay_api_key(),
         "tool_mode": settings.tool_mode,
         "model_whitelist": await storage.get_model_whitelist(),

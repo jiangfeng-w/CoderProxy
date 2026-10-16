@@ -3,16 +3,15 @@
 不触发牛码网络请求：
 - storage 数据落 tmp 目录（monkeypatch settings.data_dir）；
 - _ensure_model 的目录同步用空实现顶替；
-- CLI _pick_port 仅本机 socket 探测。
+- CLI 端口起点/顺延探测见 test_port_scan.py（本机回环 socket，无上游）。
 """
 import asyncio
-import socket
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from relay import cli, monitor as monitor_mod, routes as routes_mod, storage, tool_disguise
+from relay import monitor as monitor_mod, routes as routes_mod, storage, tool_disguise
 from relay.config import settings
 from relay.routes import app as relay_app
 
@@ -120,31 +119,11 @@ def test_monitor_clear():
     assert [e["id"] for e in m.events()["events"]] == [1]
 
 
-# ─────────────────────────── cli：固定端口（持久化，无随机/顺延）───────────────────────────
-
-def test_check_port_available_no_op_raises():
-    with pytest.raises(SystemExit, match="0"):
-        cli._check_port_available("127.0.0.1", 0)
-
-
-def test_check_port_available_free_passes():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    # 探测后释放，端口应可绑定；固定端口不引入随机/顺延
-    cli._check_port_available("127.0.0.1", port)
-
-
-def test_check_port_available_conflict_raises():
-    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    blocker.bind(("127.0.0.1", 0))
-    blocker.listen(1)
-    busy = blocker.getsockname()[1]
-    try:
-        with pytest.raises(SystemExit, match="占用"):
-            cli._check_port_available("127.0.0.1", busy)
-    finally:
-        blocker.close()
+# ─────────────────────────── cli：端口（起点 + 顺延，见 test_port_scan.py）───────────────────────────
+#
+# 「固定端口预检即退」已随《dev 与安装版并行运行》改为「配置起点 + 自动顺延」，
+# 相关用例（起点优先级四元 / get_saved_port 边界 / 顺延扫描 / 预绑定）见
+# tests/test_port_scan.py；本文件只保留端口持久化的存储侧用例（下方 fixture 起）。
 
 
 # ─────────────────────────── storage：端口持久化 ───────────────────────────

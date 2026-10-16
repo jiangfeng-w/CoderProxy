@@ -1,12 +1,19 @@
 """CLI 入口：`python -m relay run [--port 3601] [--api-base ...] [--api-key ...]`。
 
 子命令：
-  run          启动 FastAPI relay 服务（默认 127.0.0.1:3601）
-               --port 指定端口并持久化（不传则用上次保存的端口）；--api-key 设置并持久化 key
+  run          启动 FastAPI relay 服务（默认从 127.0.0.1:3601 起，被占用自动顺延）
+               --port 指定「配置端口」起点并持久化（不传则用上次保存的端口）；
+               --api-key 设置并持久化 key
   login        触发登录（IM 静默优先，降级浏览器 PKCE 并自动打开），轮询至完成
   logout       清除本地登录态
   sync         同步模型目录（需已登录）
   config       打印中转配置（base_url / api_key）
+
+端口口径（dev 与安装版并行 spec §2.2「各自配置 + 自动顺延」）：起点 =
+`--port` 显式 > 磁盘「配置端口」> `RELAY_PORT` env > 默认 3601；从起点向上
+connect 快速跳过活监听、独占绑定找第一个空位（窗口 PORT_SCAN_WINDOW），命中
+后把已绑定 socket 交 uvicorn（探测→绑定无空窗）。只有配置端口落盘，实际端口
+不落盘。
 
 环境变量见 relay/config.py；依赖自举见 docs/README.md「自举环境」。
 """
@@ -15,10 +22,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import socket
 import sys
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# 顺延窗口：从配置起点向上最多试这么多个端口，全占则启动失败并列明范围
+PORT_SCAN_WINDOW = 20
+# connect 活性探测超时（本机回环，正常毫秒级；超时按「占用」保守处理）
+_PORT_PROBE_TIMEOUT_S = 0.3
 
 
 def _bootstrap() -> None:
@@ -37,23 +50,87 @@ def _setup_logging(level: int = logging.INFO) -> None:
     )
 
 
-def _check_port_available(host: str, port: int) -> None:
-    """固定端口预检：被占用直接抛错，不做随机/顺延，保证每次启动同一端口。"""
-    import socket
+def _probe_host(host: str) -> str:
+    """连接探测用的目标地址：通配监听地址换回环（0.0.0.0/::/* → 127.0.0.1）。"""
+    return "127.0.0.1" if host in ("", "0.0.0.0", "::", "*") else host
 
-    if port == 0:
-        raise SystemExit("端口不能为 0（已移除随机端口功能，请在配置页设置固定端口）")
+
+def _probe_occupied(host: str, port: int, timeout: float = _PORT_PROBE_TIMEOUT_S) -> bool:
+    """connect 快速判定：**连通 = 确定被占用**（活监听必然握手成功）。
+
+    未连通不反推「空闲」：本机实测（2026-10-16）连接未监听端口既可能是被拒，
+    也可能被本机安全软件静默丢 SYN 而超时——超时与「空闲」不可区分，故只把
+    「连通」当正向证据用于快速跳过，真正的空闲由 _bind_exclusive 落实。
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
         try:
-            s.bind((host, port))
+            s.connect((_probe_host(host), port))
         except OSError:
-            raise SystemExit(f"端口 {port} 已被占用，请更换端口后重启") from None
+            return False
+        return True
+
+
+def _bind_exclusive(host: str, port: int) -> socket.socket | None:
+    """独占绑定（**不加** SO_REUSEADDR）：成功 = 该端口确属空闲且由本进程持有。
+
+    为什么不加 SO_REUSEADDR（spec §2.2.1.4 的实测修订，2026-10-16 本机矩阵）：
+    ① 对「同样带 REUSEADDR 的活监听」（uvicorn 默认带）REUSEADDR 绑定**会成功**
+       = 劫持对方端口；不加则任何活监听都以 WSAEADDRINUSE/WSAEACCES 失败。
+    ② TIME_WAIT 残留不影响独占绑定（服务端 TIME_WAIT 场景实测绑定仍 ok），
+       故无需为「快速重启」牺牲排他性。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind((host, port))
+    except OSError:
+        s.close()
+        return None
+    return s
+
+
+def pick_listen_socket(host: str, start: int,
+                       window: int = PORT_SCAN_WINDOW) -> tuple[socket.socket, int]:
+    """从起点向上扫出第一个可独占绑定的端口，返回 (已绑定 socket, 端口)。
+
+    起点被占（如安装版已占 3601）→ 顺延到下一个空位；窗口内全占 → SystemExit
+    并列明范围。探测与绑定在同一函数内完成（先 connect 快速跳过活监听，再独占
+    绑定落实归属），调用方拿到 socket 直接交 uvicorn——「探测→绑定」的 TOCTOU
+    空窗不存在。
+    """
+    if start == 0:
+        raise SystemExit("端口不能为 0（请在配置页设置固定端口）")
+    if not 1 <= start <= 65535:
+        raise SystemExit(f"端口 {start} 非法（需 1-65535，请在配置页修改）")
+    end = min(start + window, 65536)
+    for port in range(start, end):
+        if _probe_occupied(host, port):
+            continue  # 活监听：快速跳过（不必等 bind 报错）
+        sock = _bind_exclusive(host, port)
+        if sock is not None:
+            return sock, port
+    raise SystemExit(
+        f"端口 {start}–{end - 1} 均被占用，无法自动顺延；请在配置页换一段端口后重启"
+    )
+
+
+async def _resolve_port_start(explicit: int | None, env_or_default: int) -> int:
+    """端口起点：`--port` 显式（落盘持久化）> 磁盘 > env/默认（不落盘）。"""
+    from relay.storage import get_saved_port, save_port
+
+    if explicit is not None:
+        if not 1 <= explicit <= 65535:
+            raise SystemExit(f"端口 {explicit} 非法（需 1-65535）")
+        await save_port(explicit)
+        return explicit
+    saved = await get_saved_port()
+    return saved if saved is not None else env_or_default
 
 
 def _cmd_run(args) -> int:
     from relay.config import settings
     from relay.storage import (apply_persisted_config, ensure_initialized,
-                               get_port, save_port, save_tool_mode)
+                               save_api_key, save_tool_mode)
 
     if args.api_base is not None:
         settings.ta3_api_base = args.api_base
@@ -65,13 +142,6 @@ def _cmd_run(args) -> int:
     # 首次启动：生成并持久化 RELAY_API_KEY（agent 里填这个）
     asyncio.run(ensure_initialized())
 
-    # 端口：显式 --port 优先并持久化；否则用上次保存的端口（保证跨启动一致）
-    if args.port is not None:
-        settings.relay_port = args.port
-        asyncio.run(save_port(args.port))
-    else:
-        settings.relay_port = asyncio.run(get_port())
-
     # D1 启动装载：磁盘持久化配置优先（tool_mode 等），env/默认仅兜底。
     # GUI（壳 spawn sidecar = 本命令无参）由此读到上次保存的模式。
     asyncio.run(apply_persisted_config())
@@ -82,11 +152,18 @@ def _cmd_run(args) -> int:
 
     # CLI 显式 --api-key：覆盖并持久化（GUI 配置页「生成/复制」等价物）
     if args.api_key is not None:
-        from relay.storage import save_api_key
-
         asyncio.run(save_api_key(args.api_key))
 
-    _check_port_available(settings.relay_host, settings.relay_port)
+    # 端口：起点（--port > 磁盘 > env/默认）→ 向上扫空位 → 独占绑定交 uvicorn。
+    # settings.relay_port 恒 = 实际监听（[relay-ready] / 壳转发 / 顶栏自动正确）
+    settings.relay_port_configured = asyncio.run(
+        _resolve_port_start(args.port, settings.relay_port))
+    listen_sock, actual_port = pick_listen_socket(
+        settings.relay_host, settings.relay_port_configured)
+    if actual_port != settings.relay_port_configured:
+        print(f"* 端口 {settings.relay_port_configured} 已被占用，自动顺延至 {actual_port}",
+              flush=True)
+    settings.relay_port = actual_port
 
     import uvicorn
 
@@ -96,8 +173,13 @@ def _cmd_run(args) -> int:
     print("* 模型列表  : GET  /v1/models", flush=True)
     print("* 聊天      : POST /v1/chat/completions", flush=True)
     print("* 登录       : POST /v1/auth/login/start（或 CLI: python -m relay login）", flush=True)
-    uvicorn.run("relay.routes:app", host=settings.relay_host,
-                port=settings.relay_port, log_level="info")
+    # 预绑定 socket 交 uvicorn（内部自行 listen）；host/port 参数随之失效
+    server = uvicorn.Server(uvicorn.Config("relay.routes:app", log_level="info"))
+    try:
+        server.run(sockets=[listen_sock])
+    finally:
+        listen_sock.close()
+    return 0
 
 
 def _cmd_login(args) -> int:

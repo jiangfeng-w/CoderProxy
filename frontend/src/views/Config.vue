@@ -67,7 +67,18 @@ async function onApplyPort() {
   message.info(`已保存端口 ${p}`)
   // 2) 重启 relay，按持久化端口立即生效
   await relayRestart()
-  message.success(`已重启服务，监听端口 ${p}`)
+  // 3) 重启后重读真值：被占用时实际端口会向上顺延（listen_port 才是真值，
+  //    提示行与「Agent 连接地址」随之收敛）
+  try {
+    await config.load()
+  } catch {
+    /* 读不到就保持现状，状态轮询会补载 */
+  }
+  if (config.listen_port === p) {
+    message.success(`已重启服务，监听端口 ${p}`)
+  } else {
+    message.warning(`端口 ${p} 被占用，已自动顺延到 ${config.listen_port}，请按实际端口连接`)
+  }
 }
 
 onMounted(load)
@@ -191,7 +202,7 @@ onMounted(load)
     <div class="card">
       <div class="card-title">服务端口</div>
       <div class="field">
-        <label class="lbl">本地服务端口（保存后自动重启，每次启动固定使用该端口）</label>
+        <label class="lbl">本地服务端口（保存后自动重启；被占用时自动向上顺延到空位）</label>
         <div class="row">
           <input
             class="mono port-input"
@@ -206,6 +217,12 @@ onMounted(load)
             @click="onApplyPort"
             >保存</button
           >
+        </div>
+        <div
+          v-if="config.listen_port !== config.port"
+          class="hint warn"
+        >
+          配置端口 {{ config.port }} 被占用，实际监听 {{ config.listen_port }}；Agent 连接请用下方实际地址（每次启动都从 {{ config.port }} 起扫空位）。
         </div>
       </div>
       <div class="field">
