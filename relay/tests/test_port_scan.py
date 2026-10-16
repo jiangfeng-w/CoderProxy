@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import socket
 
 import pytest
@@ -77,6 +78,18 @@ async def test_get_saved_port_boundaries(port_storage):
     assert await port_storage.get_port() == storage.DEFAULT_PORT  # 兼容口径不变
     await port_storage.save_port(70000)
     assert await port_storage.get_saved_port() is None
+
+
+def test_cli_config_prints_saved_port(port_storage, monkeypatch, capsys):
+    """`python -m relay config` 与起服同口径读磁盘（原先只读 env/默认，
+    配置页存过端口后本命令仍报 3601，agent 会抄到错地址）。"""
+    monkeypatch.setattr(storage.settings, "relay_host", "127.0.0.1")
+    asyncio.run(port_storage.save_port(13601))
+    asyncio.run(port_storage.save_tool_mode("strict"))
+    cli._cmd_config(None)
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:13601/v1" in out
+    assert "tool_mode= strict" in out
 
 
 # ─────────────────────────── 顺延扫描与独占绑定 ───────────────────────────

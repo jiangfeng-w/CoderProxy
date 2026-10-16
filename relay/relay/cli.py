@@ -272,11 +272,16 @@ def _cmd_sync(args) -> int:
 
 def _cmd_config(args) -> int:
     from relay.config import settings, url_host
-    from relay.storage import relay_api_key
+    from relay.storage import apply_persisted_config, get_saved_port, relay_api_key
 
-    print(f"base_url = http://{url_host(settings.relay_host)}:{settings.relay_port}/v1")
+    # 与起服同口径读磁盘（原先只读 env/默认 → 配置页存过端口/模式后本命令仍报旧值）
+    asyncio.run(apply_persisted_config())
+    saved_port = asyncio.run(get_saved_port())
+    port = saved_port if saved_port is not None else settings.relay_port
+    print(f"base_url = http://{url_host(settings.relay_host)}:{port}/v1")
     print(f"api_key  = {relay_api_key()}")
     print(f"tool_mode= {settings.tool_mode}")
+    print("（以上为配置端口；实际监听以运行中实例的 /v1/auth/config → listen_port 为准）")
     return 0
 
 
