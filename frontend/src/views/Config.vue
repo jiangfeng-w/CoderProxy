@@ -2,7 +2,7 @@
 // 配置页：本地 API Key / 工具伪装模式 / 服务端口。读写全部走 useConfigStore——
 // 后端「校验→落盘→改运行值」成功后返回完整 config，由 store 整体回写，页面即展示
 // 当前真值（顶栏模式/其它页面随同一 store 自动收敛，不再各自维护副本）。
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useMessage, NPopconfirm } from 'naive-ui'
 import { relayRestart } from '../api'
 import { configStore, toolModeLabel } from '../store'
@@ -12,6 +12,18 @@ const message = useMessage()
 const config = configStore
 const showKey = ref(false)
 const busy = ref(false)
+// 端口草稿（本地，不写 store）：输入即生效会让「配置端口 vs 实际监听」提示行在
+// **未保存**时就误报「被占用」，且丢掉「存了什么」的唯一真值口径。
+const portDraft = ref(String(config.port))
+const portBusy = ref(false)
+
+// store 真值变化（装载 / 保存回执 / 重启后重读）→ 同步草稿
+watch(
+  () => config.port,
+  p => {
+    portDraft.value = String(p)
+  }
+)
 
 async function load() {
   try {
@@ -52,32 +64,42 @@ async function onToolMode(mode: string) {
 }
 
 async function onApplyPort() {
-  const p = config.port
-  if (!p || p < 1 || p > 65535) {
+  const p = Number(portDraft.value)
+  if (!Number.isInteger(p) || p < 1 || p > 65535) {
     message.error('端口需在 1-65535 之间')
     return
   }
-  // 1) 保存端口到 relay（持久化，跨重启一致）；成功后 store 已回写新 port/base_url
+  portBusy.value = true
   try {
-    await config.update({ port: p })
-  } catch (e) {
-    message.error(`端口保存失败：${String(e)}`)
-    return
-  }
-  message.info(`已保存端口 ${p}`)
-  // 2) 重启 relay，按持久化端口立即生效
-  await relayRestart()
-  // 3) 重启后重读真值：被占用时实际端口会向上顺延（listen_port 才是真值，
-  //    提示行与「Agent 连接地址」随之收敛）
-  try {
-    await config.load()
-  } catch {
-    /* 读不到就保持现状，状态轮询会补载 */
-  }
-  if (config.listen_port === p) {
-    message.success(`已重启服务，监听端口 ${p}`)
-  } else {
-    message.warning(`端口 ${p} 被占用，已自动顺延到 ${config.listen_port}，请按实际端口连接`)
+    // 1) 保存端口到 relay（持久化，跨重启一致）；成功后 store 已回写新 port/base_url
+    try {
+      await config.update({ port: p })
+    } catch (e) {
+      message.error(`端口保存失败：${String(e)}`)
+      return
+    }
+    message.info(`已保存端口 ${p}`)
+    // 2) 重启 relay，按持久化端口立即生效
+    try {
+      await relayRestart()
+    } catch (e) {
+      message.error(`重启服务失败：${String(e)}`)
+      return
+    }
+    // 3) 重启后重读真值：被占用时实际端口会向上顺延（listen_port 才是真值，
+    //    提示行与「Agent 连接地址」随之收敛）
+    try {
+      await config.load()
+    } catch {
+      /* 读不到就保持现状，状态轮询会补载 */
+    }
+    if (config.listen_port === p) {
+      message.success(`已重启服务，监听端口 ${p}`)
+    } else {
+      message.warning(`端口 ${p} 被占用，已自动顺延到 ${config.listen_port}，请按实际端口连接`)
+    }
+  } finally {
+    portBusy.value = false
   }
 }
 
@@ -209,20 +231,21 @@ onMounted(load)
             type="number"
             min="1"
             max="65535"
-            :value="config.port"
-            @input="config.port = Number(($event.target as HTMLInputElement).value)"
+            :value="portDraft"
+            @input="portDraft = ($event.target as HTMLInputElement).value"
           />
           <button
             class="btn primary"
+            :disabled="portBusy"
             @click="onApplyPort"
             >保存</button
           >
         </div>
         <div
-          v-if="config.listen_port !== config.port"
+          v-if="!portBusy && config.listen_port !== config.port"
           class="hint warn"
         >
-          配置端口 {{ config.port }} 被占用，实际监听 {{ config.listen_port }}；Agent 连接请用下方实际地址（每次启动都从 {{ config.port }} 起扫空位）。
+          配置端口 {{ config.port }} 已被占用，实际监听 {{ config.listen_port }}；Agent 连接请用下方实际地址（每次启动都从 {{ config.port }} 起扫空位）。
         </div>
       </div>
       <div class="field">
