@@ -125,3 +125,129 @@ async def test_corrupted_file_treated_empty(data_dir):
     assert await platform_store.load_accounts("workbuddy") == []
     await platform_store.upsert_account("workbuddy", _account())
     assert len(await platform_store.load_accounts("workbuddy")) == 1
+
+
+# ─────────── 三需求同批（2026-10-17）：优先级 / 启用停用 / 健康字段 ───────────
+
+
+async def test_priority_preserve_and_patch(data_dir):
+    """priority：缺省不落盘（读取侧缺省 1）；重登录保留用户设置；update 局部 patch。"""
+    await platform_store.upsert_account("workbuddy", _account())
+    acc = (await platform_store.load_accounts("workbuddy"))[0]
+    assert "priority" not in acc  # 缺省语义在读取侧（不写盘放大）
+    await platform_store.update_account("workbuddy", "u_1", {"priority": 5})
+    await platform_store.upsert_account("workbuddy", _account(access_token="at_new"))
+    acc = (await platform_store.load_accounts("workbuddy"))[0]
+    assert acc["priority"] == 5  # 重登录不清优先级
+
+
+async def test_enabled_falsy_preserve(data_dir):
+    """falsy 陷阱回归：enabled=False 重登录后必须保留（不能静默启用）。"""
+    await platform_store.upsert_account("workbuddy", _account(enabled=False))
+    await platform_store.upsert_account("workbuddy", _account(access_token="at_new"))
+    acc = (await platform_store.load_accounts("workbuddy"))[0]
+    assert acc["enabled"] is False
+
+
+async def test_health_fields_preserve(data_dir):
+    """fail_count / degraded_until / model_cooldowns 重登录后保留（不清惩罚与冷却）。"""
+    await platform_store.upsert_account("workbuddy", _account(
+        fail_count=2, degraded_until=1_234_567,
+        model_cooldowns={"glm-5.3": {"until": 999_999, "reason": "6004", "hits": 1}}))
+    await platform_store.upsert_account("workbuddy", _account(access_token="at_new"))
+    acc = (await platform_store.load_accounts("workbuddy"))[0]
+    assert acc["fail_count"] == 2
+    assert acc["degraded_until"] == 1_234_567
+    assert acc["model_cooldowns"]["glm-5.3"]["reason"] == "6004"
+
+
+def test_is_selectable():
+    """统一读口径：enabled 缺失/null 视为启用；停用与系统态正交。"""
+    assert platform_store.is_selectable({"status": "normal"}) is True
+    assert platform_store.is_selectable({"status": "normal", "enabled": True}) is True
+    assert platform_store.is_selectable({"status": "normal", "enabled": None}) is True
+    assert platform_store.is_selectable({"status": "normal", "enabled": False}) is False
+    assert platform_store.is_selectable({"status": "disabled"}) is False
+    assert platform_store.is_selectable({"status": "disabled", "enabled": True}) is False
+
+
+def test_is_healthy_for_model():
+    """健康过滤：降权 ∩ (uid, model) 冷却；其他模型不受影响。"""
+    now = 1_000_000_000_000
+    assert platform_store.is_healthy_for_model({}, "m", now=now) is True
+    assert platform_store.is_healthy_for_model(
+        {"degraded_until": now + 1}, "m", now=now) is False
+    assert platform_store.is_healthy_for_model(
+        {"degraded_until": now - 1}, "m", now=now) is True  # 已到期
+    assert platform_store.is_healthy_for_model(
+        {"model_cooldowns": {"m": {"until": now + 1, "reason": "6004"}}}, "m",
+        now=now) is False
+    assert platform_store.is_healthy_for_model(
+        {"model_cooldowns": {"m": {"until": now + 1}}}, "other", now=now) is True
+
+
+async def test_note_failure_degrades_and_success_resets(data_dir):
+    """连败软降级：3 连败挂起 5min（计数清零）；降权期内达阈不延长；成功清零。"""
+    await platform_store.upsert_account("workbuddy", _account())
+    now = 1_000_000_000_000
+    await platform_store.note_failure("workbuddy", "u_1", now=now)
+    await platform_store.note_failure("workbuddy", "u_1", now=now)
+    acc = (await platform_store.load_accounts("workbuddy"))[0]
+    assert acc["fail_count"] == 2 and not acc.get("degraded_until")
+    await platform_store.note_failure("workbuddy", "u_1", now=now)
+    acc = (await platform_store.load_accounts("workbuddy"))[0]
+    assert acc["fail_count"] == 0
+    assert acc["degraded_until"] == now + platform_store.DEGRADE_WINDOW_MS
+    # 降权期内再次达阈：不延长（防用户重试把降权越堆越厚）
+    for _ in range(3):
+        await platform_store.note_failure("workbuddy", "u_1", now=now + 1000)
+    acc = (await platform_store.load_accounts("workbuddy"))[0]
+    assert acc["degraded_until"] == now + platform_store.DEGRADE_WINDOW_MS
+    # 成功清零
+    await platform_store.note_success("workbuddy", "u_1")
+    acc = (await platform_store.load_accounts("workbuddy"))[0]
+    assert acc["fail_count"] == 0 and acc["degraded_until"] == 0
+
+
+async def test_health_notes_missing_account_silent(data_dir):
+    """喂入口纪律：账号已被删 → 静默忽略（不炸主链路）。"""
+    await platform_store.note_failure("workbuddy", "u_missing")
+    await platform_store.note_success("workbuddy", "u_missing")
+    await platform_store.note_rate_limit("workbuddy", "u_missing", "m")
+    await platform_store.clear_model_missing("workbuddy", "u_missing", "m")
+
+
+async def test_note_rate_limit_backoff_reset_and_cap(data_dir):
+    """6004：有界退避 60s×2^(hits-1)；冷却期内不延长；恢复时间锁满（12h 宽松封顶）。"""
+    await platform_store.upsert_account("workbuddy", _account())
+    now = 1_000_000_000_000
+    until1 = await platform_store.note_rate_limit("workbuddy", "u_1", "m", now=now)
+    assert until1 == now + 60_000  # hits=1 → 60s
+    until2 = await platform_store.note_rate_limit("workbuddy", "u_1", "m", now=now + 1000)
+    assert until2 == until1  # 冷却期内：不翻倍不延长
+    until3 = await platform_store.note_rate_limit("workbuddy", "u_1", "m", now=until1 + 1)
+    assert until3 == until1 + 1 + 120_000  # hits=2 → 120s
+    # 恢复时间（8h14m 实测形态）→ 锁满（尊重上游时间）
+    reset_at = until3 + 8 * 3600_000 + 14 * 60_000
+    until4 = await platform_store.note_rate_limit("workbuddy", "u_1", "m",
+                                                  reset_at_ms=reset_at, now=until3 + 1)
+    assert until4 == reset_at
+    # 脏数据（100h）→ 宽松封顶 12h
+    until5 = await platform_store.note_rate_limit("workbuddy", "u_1", "m",
+                                                  reset_at_ms=until4 + 100 * 3600_000,
+                                                  now=until4 + 1)
+    assert until5 == until4 + 1 + platform_store.RATE_LIMIT_MAX_UNTIL_MS
+
+
+async def test_note_model_missing_and_clear(data_dir):
+    """11102 负缓存 10min；成功清除只清 11102（6004 条目不清——各有恢复语义）。"""
+    await platform_store.upsert_account("workbuddy", _account())
+    now = 1_000_000_000_000
+    until = await platform_store.note_model_missing("workbuddy", "u_1", "m", now=now)
+    assert until == now + platform_store.MODEL_MISSING_TTL_MS
+    await platform_store.note_rate_limit("workbuddy", "u_1", "m2", now=now)
+    await platform_store.clear_model_missing("workbuddy", "u_1", "m")
+    acc = (await platform_store.load_accounts("workbuddy"))[0]
+    cds = acc["model_cooldowns"]
+    assert "m" not in cds
+    assert cds["m2"]["reason"] == "6004"  # 6004 条目保留

@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -45,9 +46,25 @@ class PlatformInfo:
     supports_quota: bool = False
 
 
+def _int_or(value: Any, default: int) -> int:
+    """int 宽容归一（手改文件里的字符串数字也接受；bool/None/非法 → default）。"""
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class AccountView:
-    """对外账号视图（不含任何 token）。"""
+    """对外账号视图（不含任何 token）。
+
+    三需求同批（2026-10-17）：透出 priority（优先级，1 起、越小越优先）/
+    enabled（用户级启用开关，缺省 true）/ degraded_until（连败挂起截止，ms）/
+    model_cooldowns（{model: {until, reason}}——6004 冷却与 11102 负缓存；
+    已过期条目在构造时惰性清理，保证前端「最早到期」语义干净）。
+    """
 
     uid: str
     nickname: str = ""
@@ -56,10 +73,25 @@ class AccountView:
     status: str = "normal"
     checkin: dict = field(default_factory=dict)
     quota: dict = field(default_factory=dict)
+    priority: int = 1
+    enabled: bool = True
+    degraded_until: int = 0
+    model_cooldowns: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, account: dict) -> AccountView:
         """由存储行构造视图；敏感字段（access/refresh token）在此天然不透出。"""
+        now = int(time.time() * 1000)
+        cooldowns: dict[str, dict] = {}
+        raw_cd = account.get("model_cooldowns")
+        if isinstance(raw_cd, dict):
+            for model, entry in raw_cd.items():
+                if not isinstance(entry, dict):
+                    continue
+                until = _int_or(entry.get("until"), 0)
+                if until > now:  # 过期条目惰性清理（对齐 9router clearAccountError）
+                    cooldowns[str(model)] = {
+                        "until": until, "reason": str(entry.get("reason") or "")}
         return cls(
             uid=str(account.get("uid") or ""),
             nickname=str(account.get("nickname") or ""),
@@ -68,6 +100,10 @@ class AccountView:
             status=str(account.get("status") or "normal"),
             checkin=dict(account.get("checkin") or {}),
             quota=dict(account.get("quota") or {}),
+            priority=max(1, _int_or(account.get("priority"), 1)),
+            enabled=account.get("enabled") is not False,
+            degraded_until=_int_or(account.get("degraded_until"), 0),
+            model_cooldowns=cooldowns,
         )
 
     def to_dict(self) -> dict:
@@ -79,6 +115,10 @@ class AccountView:
             "status": self.status,
             "checkin": self.checkin,
             "quota": self.quota,
+            "priority": self.priority,
+            "enabled": self.enabled,
+            "degraded_until": self.degraded_until,
+            "model_cooldowns": self.model_cooldowns,
         }
 
 

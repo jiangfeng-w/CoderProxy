@@ -243,6 +243,14 @@ export interface WbAccount {
     fetched_at?: string
     packages?: WbQuotaPackage[]
   }
+  /** 优先级（《WorkBuddy 反代账号优先级》：1 起、越小越优先；缺省 1）。 */
+  priority?: number
+  /** 用户级启用开关（《WorkBuddy 账号启用停用》：缺省视为启用；停用 = 全链路排除）。 */
+  enabled?: boolean
+  /** 连败挂起截止（健康管理：ms 时间戳；0/缺省 = 正常）。 */
+  degraded_until?: number
+  /** 模型冷却表（健康管理：{model: {until, reason}}——6004 限流 / 11102 负缓存）。 */
+  model_cooldowns?: Record<string, { until: number; reason: string }>
 }
 
 export interface WbCheckinResult {
@@ -286,6 +294,9 @@ export const wbDeleteAccount = (uid: string, platform = 'workbuddy'): Promise<{ 
 export const wbCheckin = (uid: string, platform = 'workbuddy'): Promise<{ result: WbCheckinResult; account: WbAccount }> => relay('POST', `/v1/platforms/${platform}/accounts/${uid}/checkin`)
 export const wbCheckinStatus = (uid: string, platform = 'workbuddy'): Promise<WbAccount> => relay('GET', `/v1/platforms/${platform}/accounts/${uid}/checkin-status`)
 export const wbRefreshQuota = (uid: string, platform = 'workbuddy'): Promise<WbAccount> => relay('POST', `/v1/platforms/${platform}/accounts/${uid}/quota`)
+// 三需求同批（2026-10-17）：优先级设置 / 启用停用（均返回更新后 AccountView）。
+export const wbSetPriority = (uid: string, priority: number, platform = 'workbuddy'): Promise<WbAccount> => relay('POST', `/v1/platforms/${platform}/accounts/${uid}/priority`, { priority })
+export const wbSetEnabled = (uid: string, enabled: boolean, platform = 'workbuddy'): Promise<WbAccount> => relay('POST', `/v1/platforms/${platform}/accounts/${uid}/enabled`, { enabled })
 export const wbIdeState = (platform = 'workbuddy'): Promise<WbIdeState> => relay('GET', `/v1/platforms/${platform}/ide-state`)
 export const wbIdeSwitch = (uid: string, platform = 'workbuddy'): Promise<{ status: string; current_uid: string }> => relay('POST', `/v1/platforms/${platform}/accounts/${uid}/ide-switch`)
 export const wbImportText = (text: string, platform = 'workbuddy'): Promise<{ imported: number; accounts: WbAccount[] }> => relay('POST', `/v1/platforms/${platform}/accounts/import`, { text })

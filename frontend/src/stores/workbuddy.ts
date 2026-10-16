@@ -7,7 +7,7 @@
 // - 双域：两池状态天然独立 → 按 platform 工厂化（defineStore('wb-'+platform) 惰性注册 +
 //   模块级 Map 缓存实例保证幂等；不采用「单 store 加 platform 维度」）。
 import { defineStore } from 'pinia'
-import { listWbAccounts, wbCheckin, wbCheckinStatus, wbDeleteAccount, wbExport, wbIdeState, wbIdeSwitch, wbImportLocal, wbImportText, wbLoginCancel, wbLoginStart, wbLoginStatus, wbRefreshQuota, type WbAccount, type WbExportResult, type WbIdeState } from '../api'
+import { listWbAccounts, wbCheckin, wbCheckinStatus, wbDeleteAccount, wbExport, wbIdeState, wbIdeSwitch, wbImportLocal, wbImportText, wbLoginCancel, wbLoginStart, wbLoginStatus, wbRefreshQuota, wbSetEnabled, wbSetPriority, type WbAccount, type WbExportResult, type WbIdeState } from '../api'
 import { pinia } from '../pinia'
 
 type LoginPhase = 'idle' | 'starting' | 'pending' | 'success' | 'failed'
@@ -112,6 +112,24 @@ function defineWorkbuddyStore(platform: string) {
         this.busyUid = uid
         try {
           this.applyAccount(await wbCheckinStatus(uid, this.platform))
+        } finally {
+          this.busyUid = ''
+        }
+      },
+      /** 设置账号优先级（1 起、越小越优先；成功后局部收敛）。 */
+      async setPriority(uid: string, priority: number): Promise<void> {
+        this.busyUid = uid
+        try {
+          this.applyAccount(await wbSetPriority(uid, priority, this.platform))
+        } finally {
+          this.busyUid = ''
+        }
+      },
+      /** 启用/停用账号（用户级开关；停用 = 全链路排除，成功后局部收敛）。 */
+      async setEnabled(uid: string, enabled: boolean): Promise<void> {
+        this.busyUid = uid
+        try {
+          this.applyAccount(await wbSetEnabled(uid, enabled, this.platform))
         } finally {
           this.busyUid = ''
         }

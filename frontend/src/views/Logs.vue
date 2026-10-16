@@ -15,7 +15,10 @@ const kindMeta: Record<string, { label: string; cls: string }> = {
   chat_request: { label: '请求', cls: 'cyan' },
   chat_done: { label: '完成', cls: 'green' },
   chat_error: { label: '错误', cls: 'red' },
-  auth_401_refresh: { label: '401刷新', cls: 'yellow' }
+  auth_401_refresh: { label: '401刷新', cls: 'yellow' },
+  // 选号日志（三需求同批验收反馈 2026-10-17）：每次选号/换号落一条——
+  // 用于验证「同优先级轮询」「停用排除」「冷却跳过」等选号行为。
+  wb_pick: { label: '选号', cls: 'orange' }
 }
 
 const rows = ref<LogRow[]>([])
@@ -171,6 +174,16 @@ function detailOf(row: LogRow): string {
     }
     case 'auth_401_refresh':
       return '上游返回 401，已自动刷新重试'
+    case 'wb_pick': {
+      // 选号日志：detail = {uid, nickname, priority}（验收反馈 2026-10-17）
+      const d = row.detail
+      const rec = typeof d === 'object' && d ? (d as Record<string, unknown>) : {}
+      const uid = String(rec.uid ?? '')
+      const nickname = String(rec.nickname ?? '')
+      const prio = Number(rec.priority ?? 1)
+      const name = nickname ? `${nickname}（${uid.slice(0, 8)}…）` : `${uid.slice(0, 8)}…`
+      return `选中 ${name} · 优先级 ${prio}`
+    }
     default:
       return ''
   }

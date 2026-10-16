@@ -1,6 +1,6 @@
 # WorkBuddy 账号启用停用
 
-> **状态**：方案已定稿（2026-10-15；用户拍板三决策：**单独立项** / **全链路排除** / **新增 `enabled` 字段**）
+> **状态**：**已实现（2026-10-17，与《[健康管理](../WorkBuddy反代账号池健康管理/)》《[优先级](../WorkBuddy反代账号优先级/)》同批一次落地；含 BUG-007/BUG-008 并行修复）**——pytest 670 绿（本批 +43 用例（含国际版池直接用例 ×3））+ 前端 format/build 绿；手动验收（停用 A 后只走 B 等）待用户。原「方案已定稿」注记保留如下：2026-10-15（用户拍板三决策：**单独立项** / **全链路排除** / **新增 `enabled` 字段**）
 > **优先级**：交付
 > **来源**：用户需求「可以启用和停用某个账号，就像 9router，停用的时候请求就不会走这个账号」
 > **前置**：账号池存储（《WorkBuddy多账号登录与签到》）+ 反代选号（《WorkBuddy聊天反代与多平台聚合》）+ 双域拆分（《WorkBuddy双域账号支持》）
@@ -158,15 +158,15 @@ relay/relay-onefile.spec、relay/relay.spec      # 无新模块则不动（store
 
 > 与健康管理/优先级同批时的合并注记：三项一次改 preserve 名单与选号链；本 spec 的 commit 1 与健康 commit 1/2、优先级 commit 1 合并为同一批次提交亦可（按实施会话安排）。
 
-## 验收
+## 验收（2026-10-17 回填：逐项对应用例名）
 
-- [ ] `pytest tests/ -x -q` 全绿，含：
-  - [ ] store：缺省（无 `enabled` 字段）视为启用；`enabled=False` upsert 重登录后保留（**falsy 陷阱回归**）；`update_account` patch
-  - [ ] chat：单号停用 → 永不被选（MockTransport 断言上游只收启用号的请求）；全停用 → `NoAvailableAccountError`（503 语义）
-  - [ ] catalog：停用号被跳过；全停用 → `_pick_account` None（目录空）
-  - [ ] **BUG-007**：seed 账号 force 拉目录 → 删光/全停用 → 普通读返回 `[]`（不再缓存 stale）；重新启用/加号 → 普通读恢复
-  - [ ] **BUG-008**：冷缓存 N 并发 → 上游请求数 == 2（非 2N）；双域锁隔离；force 语义锁死（见 BUG-008 §5）
-  - [ ] routes：端点 200/404/400（含 `enabled: 1` 拒绝）；AccountView 含 `enabled` 且不含 token（照旧断言）
-  - [ ] 门控：全池停用 → `_available` False / `_any_platform_available` 跳过该池（双池另一池正常时服务仍可用）
-- [ ] ruff + `npm run format:check` + `npm run build` 通过
+- [x] `pytest tests/ -x -q` 全绿，含：
+  - [x] store：缺省（无 `enabled` 字段）视为启用；`enabled=False` upsert 重登录后保留（**falsy 陷阱回归**——`test_enabled_falsy_preserve`）；`update_account` patch（`test_set_enabled_via_routes`）
+  - [x] chat：单号停用 → 永不被选（MockTransport 断言上游只收启用号的请求——`test_disabled_account_never_selected`）；全停用 → `NoAvailableAccountError`（503 语义——`test_all_disabled_raises_no_available`）
+  - [x] catalog：停用号被跳过；全停用 → `_pick_account` None（目录空——`test_all_disabled_equals_empty_pool`）
+  - [x] **BUG-007**：seed 账号 force 拉目录 → 删光/全停用 → 普通读返回 `[]`（不再缓存 stale）；重新启用/加号 → 普通读恢复（`test_pool_empty_clears_cache_immediately`、`test_all_disabled_equals_empty_pool`）
+  - [x] **BUG-008**：冷缓存 N 并发 → 上游请求数 == 2（非 2N）（`test_single_flight_cold_cache_concurrency`）；双域锁隔离（`test_single_flight_locks_are_per_platform`）；force 语义锁死（绕锁强拉——`test_force_bypasses_cache`）
+  - [x] routes：端点 200/404/400（含 `enabled: 1` 拒绝——`test_set_enabled_via_routes`）；AccountView 含 `enabled` 且不含 token（照旧断言——`test_accounts_expose_governance_fields`）
+  - [x] 门控：全池停用 → `_available` False / `_any_platform_available` 跳过该池（双池另一池正常时服务仍可用——`test_availability_respects_disabled`）
+- [x] ruff（与基线一致）+ `npm run format:check` + `npm run build` 通过
 - [ ] 手动验收（待用户）：停用 A 后聊天请求只走 B（日志可见选号）；全停用 → 聊天 503 / 模型列表**即时为空**（BUG-007）重新启用恢复；签到/配额/切号/导出不受停用影响；停用后重登录仍保持停用

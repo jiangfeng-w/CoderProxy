@@ -1,6 +1,6 @@
 # WorkBuddy 反代账号优先级
 
-> **状态**：方案已定稿（2026-10-11；评估结论：好做——改动集中三处，无新依赖/无加密/无进程管理，比 IDE 切号量级小一半以上）
+> **状态**：**已实现（2026-10-17，与《[健康管理](../WorkBuddy反代账号池健康管理/)》《[启用停用](../WorkBuddy账号启用停用/)》同批一次落地）**——pytest 670 绿（本批 +43 用例（含国际版池直接用例 ×3））+ 前端 format/build 绿；手动验收（设 A=1/B=2 等）待用户。原「方案已定稿」注记保留如下：2026-10-11（评估结论：好做——改动集中三处，无新依赖/无加密/无进程管理，比 IDE 切号量级小一半以上）
 > **优先级**：交付
 > **来源**：用户需求「反代 workbuddy 可以给每个账号设置优先级，从 1 开始，数字越小优先级越高，先把优先级高的账号用完；同一优先级内保持现有轮询；默认所有账号优先级都是 1」
 > **前置**：「WorkBuddy聊天反代与多平台聚合」的账号池轮询选号 + 「WorkBuddy多账号登录与签到」的多账号存储
@@ -96,8 +96,8 @@ relay/relay-onefile.spec、relay/relay.spec      # 无新模块则不动（route
 | 2 | `feat: 账号优先级设置端点与卡片入口`（routes + api/store/tab + 路由测试） | pytest + format/build |
 | 3 | `chore: spec 台账收尾` | 打包冒烟（若无模块级新增则仅产物验证）+ 台账 |
 
-## 验收
+## 验收（2026-10-17 回填）
 
-- [ ] `pytest tests/ -x -q` 全绿（含：默认全 1 时选号序列与现状**逐请求等价**的回归用例；跨优先级降级用例）
-- [ ] ruff + format:check + build 通过
+- [x] `pytest tests/ -x -q` 全绿（含：默认全 1 时选号序列与现状**逐请求等价**的回归用例——`test_rotation_picks_across_accounts` 零改动通过；跨优先级降级用例——`test_priority_fallback_on_credential_rejected`；分组选号——`test_priority_tier_selection`；端点——`test_set_priority_via_routes`）
+- [x] ruff（与基线一致）+ format:check + build 通过
 - [ ] 手动验收（待用户）：设 A=1/B=2，聊天两次均落 A；A 删除或凭证失效后自动用 B；恢复默认 1 后轮询如常

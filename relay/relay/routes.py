@@ -101,12 +101,15 @@ async def _serving() -> bool:
 
 
 async def _any_platform_available() -> bool:
-    """非牛码上游可用性：WorkBuddy 双池任一非空 / 启用的自定义供应商非空。"""
+    """非牛码上游可用性：WorkBuddy 双池任一有**启用**号 / 启用的自定义供应商非空。
+
+    停用（enabled=False）号不算可用（启用停用 spec：全停用 ≈ 池空）。
+    """
     try:
         from relay.platforms import PLATFORMS, store
         for platform_id in PLATFORMS:
             accounts = await store.load_accounts(platform_id)
-            if any(str(a.get("status") or "normal") == "normal" for a in accounts):
+            if any(store.is_selectable(a) for a in accounts):
                 return True
     except Exception as exc:  # noqa: BLE001（存储异常不阻断服务决策）
         logger.warning("[relay] 检查 WorkBuddy 账号池失败: %s", exc)
@@ -260,6 +263,25 @@ def _upstream_error_response(exc: Exception,
         return JSONResponse(status_code=502,
                             content=_protocol_error_payload(protocol, str(exc)[:1000],
                                                             502))
+    if _is_model_unavailable(exc):
+        # §8-A：模型级全锁 → 400 + code=model_unavailable（hint 带账号数与最早
+        # 解封时刻——消息文本由 chat 层构造，含上游原文）。503 会被客户端当瞬时
+        # 故障自动重试、404 会被当「模型不存在」下架，400 + 解锁时间才语义正确。
+        message = str(exc)[:1000]
+        if protocol == PROTOCOL_ANTHROPIC:
+            payload = _anthropic_error_payload(message, 400, "model_unavailable")
+        else:
+            payload = {"error": {"message": message, "type": "invalid_request_error",
+                                 "code": "model_unavailable"}}
+        return JSONResponse(status_code=400, content=payload)
+    if _is_all_accounts_suspended(exc):
+        # §4：池全部降权/冷却（账号级成因）→ 429 + Retry-After（全池最近到期秒数）
+        resp = JSONResponse(
+            status_code=429,
+            content=_protocol_error_payload(protocol, str(exc)[:1000], 429,
+                                            "all_accounts_suspended"))
+        resp.headers["Retry-After"] = str(int(getattr(exc, "retry_after_s", 60) or 60))
+        return resp
     if _is_no_available_account(exc):
         resp = JSONResponse(
             status_code=503,
@@ -281,6 +303,18 @@ def _is_no_available_account(exc: Exception) -> bool:
     """WorkBuddy 账号池无可用账号（避免 routes 顶部硬依赖平台模块）。"""
     from relay.platforms.workbuddy.chat import NoAvailableAccountError
     return isinstance(exc, NoAvailableAccountError)
+
+
+def _is_all_accounts_suspended(exc: Exception) -> bool:
+    """WorkBuddy 池全部降权/冷却（账号级成因；健康管理 spec §4）→ 429 + Retry-After。"""
+    from relay.platforms.workbuddy.chat import AllAccountsSuspendedError
+    return isinstance(exc, AllAccountsSuspendedError)
+
+
+def _is_model_unavailable(exc: Exception) -> bool:
+    """WorkBuddy 模型级全锁（健康管理 spec §8-A）→ 400 + code=model_unavailable。"""
+    from relay.platforms.workbuddy.chat import ModelUnavailableError
+    return isinstance(exc, ModelUnavailableError)
 
 
 def _is_empty_stream_error(exc: Exception) -> bool:
@@ -417,7 +451,8 @@ async def _ensure_provider_model(ref: model_ref.ModelRef, probe: bool) -> dict:
     if found is None or (not probe and not await storage.is_model_enabled(ref.canonical)):
         # 池不可用（如无 WorkBuddy 账号）与模型不存在语义区分：前者 503 引导配置
         if found is None and await adapter_registry.provider_available(ref.prefix) is False:
-            raise PlatformUnavailableError(f"{ref.prefix} 账号不可用，请到供应商页添加账号")
+            raise PlatformUnavailableError(
+                f"{ref.prefix} 账号不可用，请到供应商页添加或启用账号")
         raise HTTPException(
             status_code=404, detail=f"未知或未启用的模型: {ref.canonical}")
     # 可见性门控（模型列表过时治理）：只对目录命中的条目追加（found 存在才谈隐藏）；

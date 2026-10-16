@@ -30,6 +30,7 @@ import re
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
+from datetime import datetime
 
 import httpx
 
@@ -100,6 +101,20 @@ _CODE_11101_BAD_PARAMS = 11101  # 参数错 / 非流式
 _CODE_11102_MODEL_MISSING = 11102  # 模型不可用
 _CODE_11128_CHANNEL_BLOCKED = 11128  # 渠道风控（agent 身份句等）
 _CODE_6004_RATE_LIMIT = 6004  # 限流（msg 常附恢复时间文案）
+
+# ── 健康管理分流（2026-10-17，spec §2/§7）──
+_CODE_11140_REQUEST_ILLEGAL = 11140  # 双语义：授权类（request illegal）/ 限流文案
+_CODE_12153_SESSION_DEAD = 12153  # 会话失效（Offline user session not found）
+# 11140 不可按 code 一刀切——同 code 承载授权与限流双语义，按 msg 关键词分流（panel 警示）
+_RATE_LIMIT_MSG_RE = re.compile(r"rate.?limit", re.IGNORECASE)
+# 内容/授权类零惩罚标记（§7-C：msg 关键词中英双形态，不按 code 死判）
+_CONTENT_BLOCK_MARKERS = ("blocked by security policy", "unapproved channel",
+                          "illegal api invocation")
+_SESSION_DEAD_MARKERS = ("offline user session not found",)
+
+# 6004 恢复时间解析（对齐 panel ParseRateReset + 9router 正则；两形态同一时区 UTC+8）
+_RESET_CN_RE = re.compile(r"将在\s*(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\s*重置")
+_RESET_EN_RE = re.compile(r"will reset at\s*(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
 
 # ── BUG-3：deepseek 系思考形状（对齐 workbuddy2api-panel/internal/upstream/thinking.go）──
 # 官方客户端对 deepseek 系「开思考」= `thinking.type=enabled` **且**带某档
@@ -223,11 +238,179 @@ def _backfill_reasoning_content(messages: list[dict], model: str,
 
 
 class NoAvailableAccountError(RuntimeError):
-    """账号池无可用账号（无 normal 账号 / 全部凭证被拒）。routes 映射 503。"""
+    """账号池无可用账号（无 normal 账号 / 全部停用 / 全部凭证或会话被拒）。routes 映射 503。"""
+
+
+class AllAccountsSuspendedError(RuntimeError):
+    """池中有启用账号但全部处于降权/冷却（账号级成因）→ routes 映射 429 + Retry-After。
+
+    retry_after_s：全池最近到期时刻（秒，至少 1）——agent 按它决定重试时机。
+    """
+
+    def __init__(self, message: str, *, retry_after_s: int = 60) -> None:
+        super().__init__(message)
+        self.retry_after_s = int(retry_after_s)
+
+
+class ModelUnavailableError(RuntimeError):
+    """模型级全锁：全池该模型命中 6004 冷却 / 11102 负缓存，或上游直接返回 11102。
+
+    routes 映射 400 + code=model_unavailable（spec §8-A：客户端把 503 当瞬时故障
+    自动重试、把 404 当「模型不存在」下架；400 + 解锁时间才是「现在别用、几点后再试」
+    的正确语义）。accounts：池中启用账号数；unlock_at_ms：最早解封时刻（ms）。
+    """
+
+    def __init__(self, message: str, *, accounts: int = 0, unlock_at_ms: int = 0) -> None:
+        super().__init__(message)
+        self.accounts = int(accounts)
+        self.unlock_at_ms = int(unlock_at_ms)
 
 
 class _CredentialRejected(RuntimeError):
-    """本轮账号凭证被上游拒绝（401/403）：换号重试信号。"""
+    """本轮账号凭证被上游拒绝（401/403）：换号重试信号（不喂连败）。"""
+
+
+class _SessionRejected(RuntimeError):
+    """会话/授权失效（11140 request illegal / 12153）：换号重试、不喂连败。"""
+
+
+class _UpstreamTimeout(RuntimeError):
+    """读超时（上游停滞）：不换号、不喂连败（§8-C 超时止损）。"""
+
+
+class _UpstreamCodeError(PlatformUpstreamError):
+    """带上游 code/msg 的结构化错误（分流判定用；对外仍是 PlatformUpstreamError）。
+
+    http_status：上游原始 HTTP 状态（分流时区分「5xx 喂连败」与「4xx 业务错误不喂」）。
+    """
+
+    def __init__(self, message: str, *, status: int, http_status: int = 0,
+                 code: int | None = None, raw_msg: str = "") -> None:
+        super().__init__(message, status=status)
+        self.http_status = int(http_status or 0)
+        self.code = code
+        self.raw_msg = raw_msg
+
+
+def _extract_code_msg(body_text: str) -> tuple[int | None, str]:
+    """上游错误体 → (code, msg)；非 JSON / 非数字 code → (None, ...)。"""
+    code: int | None = None
+    msg = ""
+    try:
+        data = json.loads(body_text)
+        if isinstance(data, dict):
+            raw_code = data.get("code")
+            if isinstance(raw_code, int) or (isinstance(raw_code, str)
+                                             and raw_code.isdigit()):
+                code = int(raw_code)
+            msg = str(data.get("msg") or data.get("message") or "")
+    except ValueError:
+        pass
+    return code, msg
+
+
+def _classify_upstream_error(exc: Exception) -> str:
+    """喂入口分流（健康管理 spec §2 表 + §7/§8 增补）。
+
+    返回：model_cooldown / model_missing / session / business / generic。
+    - model_cooldown：6004 或 11140 限流文案 → 模型级冷却（不喂连败、不换号）；
+    - model_missing：11102 → 负缓存（不喂连败、不换号）；
+    - session：11140 request illegal / 12153 → 换号、不喂；全池 → 503 引导重登；
+    - business：4xx 业务/内容类错误（11148/11128/11101 等，含内容拦截标记）→ 不喂不换；
+    - generic：5xx / 网络（不知道原因的失败）→ 喂连败 + 换号（未产出帧时）。
+    """
+    code = getattr(exc, "code", None)
+    msg = str(getattr(exc, "raw_msg", "") or "")
+    low = msg.lower()
+    status = int(getattr(exc, "status", 0) or 0)
+    if code == _CODE_6004_RATE_LIMIT or "频率限制" in msg or "限额" in msg:
+        return "model_cooldown"
+    if code == _CODE_11102_MODEL_MISSING:
+        return "model_missing"
+    if code == _CODE_11140_REQUEST_ILLEGAL or "request illegal" in low:
+        return "model_cooldown" if _RATE_LIMIT_MSG_RE.search(msg) else "session"
+    if code == _CODE_12153_SESSION_DEAD or any(m in low for m in _SESSION_DEAD_MARKERS):
+        return "session"
+    if any(m in low for m in _CONTENT_BLOCK_MARKERS):
+        return "business"
+    if status >= 500:
+        return "generic"
+    return "business"
+
+
+def _parse_reset_at_ms(msg: str) -> int | None:
+    """6004 恢复时间解析（CN/EN 两形态，均 UTC+8 墙钟 → ms）；未知形态 None。
+
+    「绝不臆造时间」：解析失败返回 None，由 store.note_rate_limit 走有界退避。
+    """
+    for pat in (_RESET_CN_RE, _RESET_EN_RE):
+        m = pat.search(str(msg or ""))
+        if not m:
+            continue
+        try:
+            dt = datetime.strptime(m.group(1).replace("T", " "), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        return int(dt.replace(tzinfo=store.CN_TZ).timestamp() * 1000)
+    return None
+
+
+def _fmt_ms(ms: int) -> str:
+    """ms 时间戳 → UTC+8 可读时间（错误文案用）。"""
+    if not ms:
+        return "未知"
+    return datetime.fromtimestamp(ms / 1000, store.CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _priority(account: dict) -> int:
+    """账号优先级（1 起、越小越优先；缺省/非法 → 1）。"""
+    try:
+        value = int(account.get("priority") or 1)
+    except (TypeError, ValueError):
+        return 1
+    return max(value, 1)
+
+
+def _earliest_recovery_s(accounts: list[dict], model: str, now: int) -> int:
+    """全池挂起时取「最近到期」时刻（降权 ∪ 模型冷却），返回秒（至少 1）。"""
+    earliest: int | None = None
+    for a in accounts:
+        du = int(a.get("degraded_until") or 0)
+        if du > now and (earliest is None or du < earliest):
+            earliest = du
+        cd = store.model_cooldown_until(a, model, now=now)
+        if cd and (earliest is None or cd < earliest):
+            earliest = cd
+    if earliest is None:
+        return 60
+    return max(1, (earliest - now + 999) // 1000)
+
+
+def _earliest_model_unlock_ms(accounts: list[dict], model: str, now: int) -> int:
+    """全池模型锁：该模型冷却的最早解封时刻（ms；无命中 → 0）。"""
+    earliest = 0
+    for a in accounts:
+        cd = store.model_cooldown_until(a, model, now=now)
+        if cd and (not earliest or cd < earliest):
+            earliest = cd
+    return earliest
+
+
+async def _log_pick(platform_id: str, model: str, account: dict) -> None:
+    """选号日志（kind=`wb_pick`，GUI 日志页可筛；写库失败不影响主链路）。
+
+    验收反馈（2026-10-17）：优先级/轮询效果需要「哪个请求走了哪个号」的可见性
+    ——每次选号（含换号重试）落一条，detail 带 uid/昵称/优先级。
+    """
+    try:
+        from relay import db  # 延迟导入：旁路依赖不进模块级
+        await db.log_event(
+            kind="wb_pick", model=model,
+            detail={"uid": str(account.get("uid") or ""),
+                    "nickname": str(account.get("nickname") or ""),
+                    "priority": _priority(account)})
+    except Exception as exc:  # noqa: BLE001（旁路：日志失败不阻断聊天）
+        logger.warning("[wb-chat] 选号日志写入失败: %s", exc)
 
 
 class WorkBuddyChatAdapter:
@@ -253,19 +436,59 @@ class WorkBuddyChatAdapter:
     # ─────────────────────── 账号池选号（§4.3） ───────────────────────
 
     async def _normal_accounts(self) -> list[dict]:
+        """启用号列表（系统态 normal ∩ 用户未停用；启用停用 spec 统一读口径）。"""
         accounts = [a for a in await store.load_accounts(self._profile.platform_id)
-                    if str(a.get("status") or "normal") == "normal"]
+                    if store.is_selectable(a)]
         # uid 排序 + 全局游标 → 跨请求轮转（同号不连续命中）
         return sorted(accounts, key=lambda a: str(a.get("uid") or ""))
 
-    async def _pick_account(self, tried: set[str]) -> dict:
-        accounts = [a for a in await self._normal_accounts()
-                    if str(a.get("uid") or "") not in tried]
-        if not accounts:
+    async def _pick_account(self, tried: set[str],
+                            rejected: set[str] | None = None) -> dict:
+        """选号（三需求同批一次写全）：启用 ∩ 非 tried → 健康过滤 → priority 分组 → 组内游标。
+
+        - 无启用号 / 全 tried / 全停用 → NoAvailableAccountError（503）；
+        - 有候选但全部降权/冷却：本轮已有凭证/会话被拒（rejected 非空）→ 503 引导重登
+          （spec §4：429 仅在「非凭证被拒场景」）；账号级降权 → 429（最近到期秒数）；
+          全为模型冷却 → 400 model_unavailable（最早解封时刻）；
+        - priority：取最小优先级组（组内游标轮询）；高优组全冷却/降权/停用时
+          自然落到下一组（可用性优先于优先级）。
+        """
+        now = store.now_ms()
+        candidates = [a for a in await self._normal_accounts()
+                      if str(a.get("uid") or "") not in tried]
+        if not candidates:
             raise NoAvailableAccountError(
-                f"无可用 {self._profile.display_name} 账号（请到供应商页添加/重登）")
-        idx = _next_cursor() % len(accounts)
-        return accounts[idx]
+                f"无可用 {self._profile.display_name} 账号（请到供应商页添加/启用或重登）")
+        healthy = [a for a in candidates
+                   if store.is_healthy_for_model(a, self._model, now=now)]
+        if not healthy:
+            self._raise_all_suspended(candidates, rejected or set(), now=now)
+        min_pri = min(_priority(a) for a in healthy)
+        tier = [a for a in healthy if _priority(a) == min_pri]
+        idx = _next_cursor() % len(tier)
+        return tier[idx]
+
+    def _raise_all_suspended(self, candidates: list[dict], rejected: set[str],
+                             *, now: int) -> None:
+        """全候选不可用（降权/冷却）→ 按成因抛错（本函数不返回）。"""
+        display = self._profile.display_name
+        if rejected:
+            # 凭证/会话被拒场景优先（spec §4）：用户动作 = 重登 → 503 语义
+            raise NoAvailableAccountError(
+                f"全部 {display} 账号凭证/会话失效，请到供应商页重新登录")
+        degraded = [a for a in candidates
+                    if int(a.get("degraded_until") or 0) > now]
+        if degraded:
+            retry_after = _earliest_recovery_s(candidates, self._model, now)
+            raise AllAccountsSuspendedError(
+                f"全部 {display} 账号暂时挂起（连败/限流冷却），"
+                f"约 {retry_after}s 后自动恢复",
+                retry_after_s=retry_after)
+        unlock = _earliest_model_unlock_ms(candidates, self._model, now)
+        raise ModelUnavailableError(
+            f"模型 {self._model} 全池冷却中（{len(candidates)} 个账号均限流/负缓存），"
+            f"最早 {_fmt_ms(unlock)} 解封",
+            accounts=len(candidates), unlock_at_ms=unlock)
 
     async def refresh_credentials(self) -> bool:
         """401 刷新钩子（routes `_refresh_provider_credentials` 调用）：
@@ -365,19 +588,12 @@ class WorkBuddyChatAdapter:
     # ─────────────────────── 错误识别钩子 ───────────────────────
 
     def parse_error(self, status: int, body_text: str) -> PlatformUpstreamError:
-        """上游错误 → PlatformUpstreamError（status 由 routes 透传为 HTTP 状态码）。"""
-        code: int | None = None
-        msg = ""
-        try:
-            data = json.loads(body_text)
-            if isinstance(data, dict):
-                raw_code = data.get("code")
-                if isinstance(raw_code, int) or (isinstance(raw_code, str)
-                                                 and raw_code.isdigit()):
-                    code = int(raw_code)
-                msg = str(data.get("msg") or data.get("message") or "")
-        except ValueError:
-            pass
+        """上游错误 → PlatformUpstreamError（status 由 routes 透传为 HTTP 状态码）。
+
+        返回 `_UpstreamCodeError`（携带 code/raw_msg/原始 HTTP 状态）供轮换链
+        分流（健康管理 spec §2 喂入口表）；对外行为不变（仍是 PlatformUpstreamError）。
+        """
+        code, msg = _extract_code_msg(body_text)
         if code == _CODE_6004_RATE_LIMIT or "频率限制" in msg or "限额" in msg:
             mapped = 429
         elif code == _CODE_11102_MODEL_MISSING:
@@ -391,7 +607,8 @@ class WorkBuddyChatAdapter:
         text = msg or body_text.strip()[:300] or f"HTTP {status}"
         if code is not None:
             text = f"{text}（上游 code={code}）"
-        return PlatformUpstreamError(text, status=mapped)
+        return _UpstreamCodeError(text, status=mapped, http_status=status,
+                                  code=code, raw_msg=msg)
 
     # ─────────────────────── 传输 ───────────────────────
 
@@ -487,34 +704,138 @@ class WorkBuddyChatAdapter:
                         status, text = frame["__error__"]
                         raise self.parse_error(status, text)
                     yield frame
+        except httpx.ReadTimeout as exc:
+            # §8-C 超时止损：读超时 = 上游停滞，不是账号问题——不换号、不喂连败
+            raise _UpstreamTimeout(f"上游读超时（upstream_timeout）：{exc}") from exc
         except httpx.HTTPError as exc:
             raise PlatformUpstreamError(f"上游网络错误: {exc}", status=502) from exc
 
     async def _frames_with_rotation(self, request: ChatRequest) -> AsyncIterator[dict]:
-        """账号池换号编排：单号 401/403 → 换下一号（每号一次）；全试完 → 503 语义。
+        """账号池换号编排 + 健康喂入口（健康管理 spec §2/§8，2026-10-17 同批）。
 
-        §4.3：全部账号凭证被拒 = 池不可用 → NoAvailableAccountError
-        （routes 映射 503 + Retry-After；引导用户到供应商页重登）。
+        分流表（`_classify_upstream_error`）：
+
+        - 401/403 → 换号（每号一次）、不喂（凭证问题由换号/重登处理）；
+        - session（11140 request illegal / 12153）→ 换号、不喂；全池 → 503 引导重登；
+        - 6004 / 11140 限流文案 → 写 (账号, 模型) 冷却 + 换号（其他号可能可用）；
+          已产出帧不换号 → 429（含恢复时间）；全池命中 → 400 model_unavailable；
+        - 11102 → 写 (账号, 模型) 负缓存 + 换号（跳过该号）；已产出帧不换号；
+          全池命中 → 400 model_unavailable；
+        - generic（5xx/网络）：未产出帧 → 喂连败 + 换号一次（预算 1，防上游整体
+          故障时全池轮转）；已产出帧 → 喂连败 + **绝不换号**（进流纪律）；
+        - business（4xx 业务码）→ 不喂不换，透传；
+        - 读超时 → 不换号、不喂（§8-C）。
+
+        成功判定（§8-B）：仅流正常收尾（含 0 帧干净结束）记成功——清 11102
+        负缓存 + 清零连败/挂起。
         """
         body = self.transform_request(request)
+        pid = self._profile.platform_id
+        display = self._profile.display_name
         tried: set[str] = set()
+        rejected: set[str] = set()  # 凭证/会话被拒的号（全池挂起成因判定用）
+        generic_switched = False  # 5xx/网络换号预算：一次
         total = len(await self._normal_accounts())
         while True:
-            account = await self._pick_account(tried)
+            account = await self._pick_account(tried, rejected)
             uid = str(account.get("uid") or "")
             self._active_uid = uid
+            await _log_pick(self._profile.platform_id, self._model, account)
             account = await self._account_adapter.ensure_token(account)  # 账号层刷新（profile 正确）
+            yielded = False
             try:
                 async for frame in self._stream_once(account, body):
+                    yielded = True
                     yield frame
-                return
             except _CredentialRejected:
                 tried.add(uid)
+                rejected.add(uid)
                 logger.warning("[wb-chat] 账号 %s 凭证被拒，换号重试", uid[:8])
                 if len(tried) >= total:
                     raise NoAvailableAccountError(
-                        f"全部 {self._profile.display_name} 账号凭证失效，"
-                        "请到供应商页重新登录") from None
+                        f"全部 {display} 账号凭证失效，请到供应商页重新登录") from None
+                continue
+            except _UpstreamTimeout as exc:
+                # 不换号、不喂连败（轮转只会让每个健康号各吃一次读超时）
+                raise PlatformUpstreamError(str(exc), status=504) from exc
+            except _UpstreamCodeError as exc:
+                kind = _classify_upstream_error(exc)
+                if kind == "model_cooldown":
+                    until = await store.note_rate_limit(
+                        pid, uid, self._model, reset_at_ms=_parse_reset_at_ms(exc.raw_msg))
+                    logger.warning("[wb-chat] 模型 %s 限流（账号 %s），冷却至 %s",
+                                   self._model, uid[:8], _fmt_ms(until))
+                    if yielded:
+                        # 已产出帧：不换号（进流纪律）→ 429 透传（含恢复时间）
+                        raise PlatformUpstreamError(
+                            f"{exc}；该模型冷却至 {_fmt_ms(until)}", status=429) from exc
+                    tried.add(uid)
+                    if len(tried) >= total:
+                        pool = await self._normal_accounts()
+                        earliest = _earliest_model_unlock_ms(
+                            pool, self._model, store.now_ms()) or until
+                        raise ModelUnavailableError(
+                            f"模型 {self._model} 全池冷却中（{len(pool)} 个账号均限流），"
+                            f"最早 {_fmt_ms(earliest)} 解封",
+                            accounts=len(pool), unlock_at_ms=earliest) from exc
+                    continue
+                if kind == "model_missing":
+                    unlock = await store.note_model_missing(pid, uid, self._model)
+                    if yielded:
+                        raise ModelUnavailableError(
+                            f"模型 {self._model} 当前不可用：{exc}；"
+                            f"最早 {_fmt_ms(unlock)} 解封",
+                            accounts=total, unlock_at_ms=unlock) from exc
+                    tried.add(uid)
+                    logger.warning("[wb-chat] 账号 %s 模型 %s 不可用（11102），换号重试",
+                                   uid[:8], self._model)
+                    if len(tried) >= total:
+                        pool = await self._normal_accounts()
+                        earliest = _earliest_model_unlock_ms(
+                            pool, self._model, store.now_ms()) or unlock
+                        raise ModelUnavailableError(
+                            f"模型 {self._model} 全池不可用（上游 11102），"
+                            f"最早 {_fmt_ms(earliest)} 解封",
+                            accounts=len(pool), unlock_at_ms=earliest) from exc
+                    continue
+                if kind == "session":
+                    if yielded:
+                        raise  # 已产出帧：绝不换号（防重复产出/重复计费）
+                    tried.add(uid)
+                    rejected.add(uid)
+                    logger.warning("[wb-chat] 账号 %s 会话失效，换号重试: %s", uid[:8], exc)
+                    if len(tried) >= total:
+                        raise NoAvailableAccountError(
+                            f"全部 {display} 账号会话失效，请到供应商页重新登录") from None
+                    continue
+                if kind == "business":
+                    raise  # 请求问题不是账号问题：不喂不换
+                # generic：5xx / 网络（不知道原因的失败）——喂连败
+                await store.note_failure(pid, uid)
+                if yielded:
+                    raise
+                if generic_switched or len(tried) + 1 >= total:
+                    raise  # 换号预算用尽 / 已无更多号：透传最后错误
+                generic_switched = True
+                tried.add(uid)
+                logger.warning("[wb-chat] 账号 %s 上游错误，换号重试: %s", uid[:8], exc)
+                continue
+            except PlatformUpstreamError as exc:
+                # 网络层错误（httpx 异常包装 502）等：generic 语义
+                await store.note_failure(pid, uid)
+                if yielded:
+                    raise
+                if generic_switched or len(tried) + 1 >= total:
+                    raise
+                generic_switched = True
+                tried.add(uid)
+                logger.warning("[wb-chat] 账号 %s 上游错误，换号重试: %s", uid[:8], exc)
+                continue
+            else:
+                # 流正常收尾：记成功——清 11102 负缓存 + 清零连败/挂起（§8-B）
+                await store.clear_model_missing(pid, uid, self._model)
+                await store.note_success(pid, uid)
+                return
 
     # ─────────────────────── 出站事件契约 ───────────────────────
 
@@ -772,7 +1093,9 @@ def _assemble_tool_calls(acc: dict[int, dict]) -> list[dict]:
     return out
 
 
-__all__ = ["WorkBuddyChatAdapter", "NoAvailableAccountError", "factory", "reset_cursor"]
+__all__ = ["AllAccountsSuspendedError", "ModelUnavailableError",
+           "NoAvailableAccountError", "WorkBuddyChatAdapter",
+           "factory", "reset_cursor"]
 
 
 def factory(bare_model: str, *, ctx=None, model_entry: dict | None = None,
@@ -798,9 +1121,9 @@ from relay.platforms.workbuddy.realms import ALL_REALMS  # noqa: E402
 
 def _availability_for(profile: WbRealm):
     async def _available() -> bool:
-        """可用性探测：本池是否有 normal 号（routes 区分 503/404 用）。"""
+        """可用性探测：本池是否有启用号（routes 区分 503/404 用）。"""
         accounts = await store.load_accounts(profile.platform_id)
-        return any(str(a.get("status") or "normal") == "normal" for a in accounts)
+        return any(store.is_selectable(a) for a in accounts)
     return _available
 
 

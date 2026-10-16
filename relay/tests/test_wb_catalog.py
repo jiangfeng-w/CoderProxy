@@ -295,3 +295,102 @@ def test_cn_v3_single_route_and_explicit_ua_override(data_dir, monkeypatch):
     calls.clear()
     _run(catalog.load_models(force=True, transport=t))
     assert calls == ["MyUA/1.0"]
+
+
+# ─────────── 三需求同批（2026-10-17）：BUG-007 / BUG-008 / 停用排除 ───────────
+
+
+def test_pool_empty_clears_cache_immediately(data_dir):
+    """BUG-007：删光账号后普通读立即返回 []（清缓存，不再 TTL 滞后）；重新加号恢复。"""
+    _run(_seed_account())
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        if catalog.V3_CONFIG_PATH in str(request.url):
+            return httpx.Response(200, json={"code": 0, "data": {"models": _V3_MODELS}})
+        return httpx.Response(200, json=_ENT_MODELS)
+
+    t = httpx.MockTransport(handler)
+    first = _run(catalog.load_models(force=True, transport=t))
+    assert first  # 有目录
+    n1 = len(calls)
+    # 删光账号 → 普通读：立即 []（不触网、不设负缓存）
+    assert _run(store.delete_account("workbuddy", "u_cat")) is True
+    assert _run(catalog.load_models(transport=t)) == []
+    assert len(calls) == n1
+    assert _run(catalog.load_models(transport=t)) == []
+    # 重新加号 → 普通读恢复（池空时清掉的负缓存不残留）
+    _run(_seed_account(uid="u_new"))
+    third = _run(catalog.load_models(transport=t))
+    assert third and len(calls) > n1
+
+
+def test_all_disabled_equals_empty_pool(data_dir):
+    """全停用 ≈ 池空：目录即时为空（force 也 []）；启用号被正常使用。"""
+    _run(_seed_account(uid="u_a", enabled=False))
+    _run(_seed_account(uid="u_b"))
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(request.headers.get("X-User-Id", ""))
+        if catalog.V3_CONFIG_PATH in str(request.url):
+            return httpx.Response(200, json={"code": 0, "data": {"models": _V3_MODELS}})
+        return httpx.Response(200, json=_ENT_MODELS)
+
+    t = httpx.MockTransport(handler)
+    models = _run(catalog.load_models(force=True, transport=t))
+    assert models
+    assert seen and all(uid == "u_b" for uid in seen)  # 只用启用号拉目录
+    # 全停用 → 目录即时为空
+    _run(store.update_account("workbuddy", "u_b", {"enabled": False}))
+    assert _run(catalog.load_models(transport=t)) == []
+
+
+def test_single_flight_cold_cache_concurrency(data_dir):
+    """BUG-008：冷缓存 N 并发 → 上游只拉一轮（2 次 GET，非 2N）；结果一致。"""
+    _run(_seed_account())
+    calls: list[str] = []
+
+    async def handler(request):
+        calls.append(str(request.url))
+        await asyncio.sleep(0.05)  # 放大并发窗口（真实网络延迟等价物）
+        if catalog.V3_CONFIG_PATH in str(request.url):
+            return httpx.Response(200, json={"code": 0, "data": {"models": _V3_MODELS}})
+        return httpx.Response(200, json=_ENT_MODELS)
+
+    t = httpx.MockTransport(handler)
+
+    async def main():
+        return await asyncio.gather(
+            *[catalog.load_models(transport=t) for _ in range(5)])
+
+    results = _run(main())
+    assert len(calls) == 2  # v3 + 企业端点各一次（非 5×2）
+    baseline = [m["name"] for m in results[0]]
+    assert baseline
+    assert all([m["name"] for m in r] == baseline for r in results)
+
+
+def test_single_flight_locks_are_per_platform(data_dir):
+    """锁按 platform 分桶（双域互不阻塞——不同实例）；同域恒同实例。"""
+    assert catalog._lock_for("workbuddy") is not catalog._lock_for("workbuddy-global")
+    assert catalog._lock_for("workbuddy") is catalog._lock_for("workbuddy")
+
+
+def test_force_bypasses_cache(data_dir):
+    """force=True 绕锁强拉：缓存命中时也重新拉取（语义即「立即强拉」）。"""
+    _run(_seed_account())
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        if catalog.V3_CONFIG_PATH in str(request.url):
+            return httpx.Response(200, json={"code": 0, "data": {"models": _V3_MODELS}})
+        return httpx.Response(200, json=_ENT_MODELS)
+
+    t = httpx.MockTransport(handler)
+    _run(catalog.load_models(force=True, transport=t))
+    n1 = len(calls)
+    _run(catalog.load_models(force=True, transport=t))
+    assert len(calls) == n1 * 2  # force 再次强拉

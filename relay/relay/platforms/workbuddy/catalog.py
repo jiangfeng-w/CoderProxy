@@ -61,9 +61,22 @@ NEGATIVE_TTL_S = 300
 _caches: dict[str, dict] = {}
 _negative_until: dict[str, float] = {}
 
+# single-flight 锁按 platform_id 分桶（BUG-008 修复，2026-10-17）：冷缓存/过期
+# 瞬间 N 并发各拉一轮上游（2N 次 GET）→ 锁内双检后只拉一轮（对齐
+# adapter.py::_refresh_locks / ensure_token 既有模式；双域互不阻塞）。
+_load_locks: dict[str, asyncio.Lock] = {}
+
 # 账号层 adapter 按 profile 惰性缓存（单例改造：原模块级单例写死 CN 会在
 # 国际版目录路径上拿错池实例；实例轻量无状态，按 platform_id 缓存即可）。
 _platform_adapters: dict[str, WorkBuddyAdapter] = {}
+
+
+def _lock_for(platform_id: str) -> asyncio.Lock:
+    lock = _load_locks.get(platform_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _load_locks[platform_id] = lock
+    return lock
 
 
 def _adapter_for(profile: WbRealm) -> WorkBuddyAdapter:
@@ -83,41 +96,84 @@ def _cache_for(platform_id: str) -> dict:
 
 
 def reset_cache() -> None:
-    """测试复位（全桶清零）。"""
+    """测试复位（全桶清零 + 清 single-flight 锁——锁实例不得跨事件循环复用）。"""
     _caches.clear()
     _negative_until.clear()
+    _load_locks.clear()
+
+
+def _clear_cache(platform_id: str) -> None:
+    """池空 → 清本桶缓存与负缓存（BUG-007：目录随账号态即时反映）。
+
+    不清的话：删光/全停用后 1h TTL 内普通读仍返回 stale 目录；且残留负缓存会
+    让「重新加号 → 普通读」在 TTL 内继续返回空。
+    """
+    _cache_for(platform_id).update({"at": 0.0, "models": [], "uid": ""})
+    _negative_until.pop(platform_id, None)
 
 
 async def load_models(*, force: bool = False,
                       transport: httpx.AsyncBaseTransport | None = None,
                       profile: WbRealm = REALM_CN) -> list[dict]:
-    """取 WorkBuddy 模型目录（裸名条目列表；缓存 1h，失败负缓存 5min）。"""
-    cache = _cache_for(profile.platform_id)
-    now = time.time()
-    if not force:
-        if cache["models"] and now - cache["at"] < CACHE_TTL_S:
-            return list(cache["models"])
-        if now < _negative_until.get(profile.platform_id, 0.0):
-            return []
+    """取 WorkBuddy 模型目录（裸名条目列表；缓存 1h，失败负缓存 5min）。
+
+    BUG-007（2026-10-17 修复）：账号检查先于缓存判断——池空（删光/全停用）→
+    清本桶缓存 + 返回 `[]`（不触网、不设负缓存），「全停用 ≈ 池空」的目录语义
+    即时成立（否则 stale 目录会造出「模型看得见、一用就 503」）。
+    BUG-008（2026-10-17 修复）：single-flight——缓存 miss 进 per-platform 锁 +
+    锁内双检，冷缓存 N 并发只拉一轮上游；`force=True` 绕锁强拉（语义即「立即强拉」）。
+    """
+    pid = profile.platform_id
     account = await _pick_account(profile)
     if account is None:
+        _clear_cache(pid)
         return []
+    cache = _cache_for(pid)
+    if not force:
+        now = time.time()
+        if cache["models"] and now - cache["at"] < CACHE_TTL_S:
+            return list(cache["models"])
+        if now < _negative_until.get(pid, 0.0):
+            return []
+        async with _lock_for(pid):
+            # 锁内双检（等锁期间并发可能已写入缓存；池也可能已空）
+            now = time.time()
+            if cache["models"] and now - cache["at"] < CACHE_TTL_S:
+                return list(cache["models"])
+            if now < _negative_until.get(pid, 0.0):
+                return []
+            account = await _pick_account(profile)
+            if account is None:
+                _clear_cache(pid)
+                return []
+            return await _load_and_cache(account, cache, pid,
+                                         transport=transport, profile=profile)
+    # force：绕锁强拉
+    return await _load_and_cache(account, cache, pid,
+                                 transport=transport, profile=profile)
+
+
+async def _load_and_cache(account: dict, cache: dict, pid: str, *,
+                          transport: httpx.AsyncBaseTransport | None = None,
+                          profile: WbRealm = REALM_CN) -> list[dict]:
+    """拉取并写缓存（成功写正缓存；空结果写负缓存 5min）。"""
+    now = time.time()
     account = await _adapter_for(profile).ensure_token(account)
     models = await _fetch_union(account, transport=transport, profile=profile)
     if models:
         cache.update({"at": now, "models": models,
                       "uid": str(account.get("uid") or "")})
     else:
-        _negative_until[profile.platform_id] = now + NEGATIVE_TTL_S
-        logger.warning("[wb-catalog] 目录拉取为空（%s，账号 %s）", profile.platform_id,
+        _negative_until[pid] = now + NEGATIVE_TTL_S
+        logger.warning("[wb-catalog] 目录拉取为空（%s，账号 %s）", pid,
                        str(account.get("uid") or "")[:8])
     return models
 
 
 async def _pick_account(profile: WbRealm = REALM_CN) -> dict | None:
-    """目录拉取选号：本池首个 normal 号（uid 排序稳定）。"""
+    """目录拉取选号：本池首个启用号（uid 排序稳定；全停用 ≈ 池空）。"""
     accounts = [a for a in await store.load_accounts(profile.platform_id)
-                if str(a.get("status") or "normal") == "normal"]
+                if store.is_selectable(a)]
     if not accounts:
         return None
     return sorted(accounts, key=lambda a: str(a.get("uid") or ""))[0]

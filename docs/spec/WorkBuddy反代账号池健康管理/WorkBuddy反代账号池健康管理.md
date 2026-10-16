@@ -1,6 +1,6 @@
 # WorkBuddy 反代账号池健康管理
 
-> **状态**：方案已定稿（2026-10-13 立稿、2026-10-14 定稿；设计已按参考实现逐条核对并修正原方案 4 处事实错误）；**2026-10-15 复核增补**：逐条对照 panel/9router 两参考后补 3 处缺口（11140 双语义、12153 会话失效、内容类零惩罚完整性）+ 1 处数值取向（6004 封顶改「尊重上游时间」——用户拍板）+ 1 处可选增补（前端限流倒计时）；见 §7
+> **状态**：**已实现（2026-10-17，与《[反代账号优先级](../WorkBuddy反代账号优先级/)》《[账号启用停用](../WorkBuddy账号启用停用/)》同批一次落地）**——pytest **670 绿**（本批 +43 用例（含国际版池直接用例 ×3），store/chat/catalog/routes 四层全覆盖）+ ruff 与基线一致 + 前端 format/build 绿；倒计时倒走效果待用户手动验收。原「方案已定稿」注记保留如下：2026-10-13 立稿、2026-10-14 定稿（设计已按参考实现逐条核对并修正原方案 4 处事实错误）；**2026-10-15 复核增补**：逐条对照 panel/9router 两参考后补 3 处缺口（11140 双语义、12153 会话失效、内容类零惩罚完整性）+ 1 处数值取向（6004 封顶改「尊重上游时间」——用户拍板）+ 1 处可选增补（前端限流倒计时）；见 §7
 > **优先级**：核心
 > **来源**：《WorkBuddy 反代优化方案》P0-2（软降级）+ P0-3（软冷却）+ P2-6（负缓存）合并立项——三者共享同一批改动点（store 字段/preserve、chat 轮换链、选号过滤链、routes 映射），拆开会导致同一段代码反复改两次
 > **依据**：workbuddy2api-panel `internal/pool/degrade.go`（连败降权）、`state.go`（`NoteSuccess` / 13 号误杀教训）、`cooldown.go`（`CooldownSoftForModel` 模型级 / `BlockModelBackoff` 负缓存 6h→24h）、`transition.go`（签到只解冻硬冷却）、`internal/server/handler.go`（喂入口纪律）；9router `executors/codebuddy-cn.js`（6004 恢复时间解析）、`services/accountFallback.js`（退避数值 base 2s / max 5min）
@@ -148,20 +148,20 @@ note_success(uid)：fail_count=0、degraded_until=0
 - 6004 恢复时间正则覆盖 CN/EN 两形态；未知形态走有界退避（绝不臆造时间）
 - 全池冷却的 Retry-After 取「最近到期」；若全池降权（无冷却）则 Retry-After = 最近降权到期
 
-## 验收
+## 验收（2026-10-17 回填：逐项对应用例名）
 
-- [ ] 连败：3 连败出池 → 第 4 个请求不再选该号（MockTransport 注入 5xx）；`note_success` 后回池；降权期内不延长
-- [ ] 已 yield 帧的上游错误 → 不换号直接抛（进流纪律回归）+ 喂连败
-- [ ] 6004 两种文案（带恢复时间 / 不带）→ 冷却时长断言；冷却期内选号跳过该 (uid, model)；**同账号其他模型不受影响**
-- [ ] 11102 → 负缓存 10min；命中即跳过；成功清除
-- [ ] 全池冷却 → 429 + Retry-After 响应断言（含取值正确性）
-- [ ] preserve：重登录不重置降权/冷却/priority
-- [ ] 现有 `test_wb_chat.py` / `test_platform_store.py` 零回归
-- [ ] （与 priority 同批时）默认全 1 分组时选号序列与现状逐请求等价
-- [ ] **11140 双语义**：`request illegal` → 换号+全池 503；限流文案 → 模型冷却（两形态各一用例）
-- [ ] **12153**：换号重试 + 全池 503（不喂连败断言）
-- [ ] **6004 尊重上游时间**：解析出远未来重置时间（如 8h）→ 冷却锁满（宽松封顶 12h 断言）
-- [ ] **前端倒计时（对齐 9router）**：AccountView 透出 `degraded_until`/`model_cooldowns`；前端每秒 tick、取最早未到期条、格式化 `Xs`/`Xm Ys`/`Xh Ym`、到期自动消失；挂起/限流两类文案可区分；format:check + build 绿
+- [x] 连败：3 连败出池 → 第 4 个请求不再选该号（`test_consecutive_5xx_suspends_account`）；挂起到期回池（`test_degraded_account_returns_after_window`）；降权期内不延长（`test_note_failure_degrades_and_success_resets`）
+- [x] 已 yield 帧的上游错误 → 不换号直接抛（进流纪律回归）+ 喂连败（`test_upstream_error_after_frames_never_rotates`）
+- [x] 6004 两种文案（带恢复时间 → 锁满 / 不带 → 有界退避）→ 冷却时长断言（`test_6004_parses_reset_time_and_rotates`、`test_note_rate_limit_backoff_reset_and_cap`）；冷却期内选号跳过该 (uid, model)；**同账号其他模型不受影响**（`test_model_cooldown_skips_same_model_only`）
+- [x] 11102 → 负缓存 10min；命中即跳过（`test_11102_negative_cache_skips_account`）；成功清除（`test_note_model_missing_and_clear`）
+- [x] 全池挂起 → 429 + Retry-After 响应断言（`test_all_degraded_raises_suspended`，账号级降权口径）；**模型级全锁按 §8-A 修订 → 400 model_unavailable**（`test_all_model_cooled_raises_model_unavailable`、`test_6004_all_pool_raises_model_unavailable`、`test_11102_all_pool_raises_model_unavailable`）
+- [x] preserve：重登录不重置降权/冷却/priority（`test_health_fields_preserve`、`test_priority_preserve_and_patch`）
+- [x] 现有 `test_wb_chat.py` / `test_platform_store.py` 零回归（全量 670 绿）
+- [x] （与 priority 同批时）默认全 1 分组时选号序列与现状逐请求等价（`test_rotation_picks_across_accounts` 既有回归零改动 + 分组实现保序）
+- [x] **11140 双语义**：`request illegal` → 换号+全池 503；限流文案 → 模型冷却（`test_11140_request_illegal_rotates_no_penalty`、`test_11140_rate_limit_message_goes_model_cooldown`）
+- [x] **12153**：换号重试 + 全池 503（不喂连败断言）（`test_12153_all_pool_raises_no_available`）
+- [x] **6004 尊重上游时间**：解析出远未来重置时间（如 8h）→ 冷却锁满（宽松封顶 12h 断言）（`test_6004_parses_reset_time_and_rotates`、`test_note_rate_limit_backoff_reset_and_cap`）
+- [x] **前端倒计时（对齐 9router）**：AccountView 透出 `degraded_until`/`model_cooldowns`（`test_accounts_expose_governance_fields`，过期条目惰性清理）；前端每秒 tick、取最早未到期条、格式化 `Xs`/`Xm Ys`/`Xh Ym`、到期自动消失；挂起/限流两类文案可区分；format:check + build 绿（倒走效果待用户手动验收）
 
 ## 实施步骤（commit 序列）
 
@@ -222,9 +222,9 @@ docs/spec/WorkBuddy账号启用停用/             # 补「停用号统计单列
 - 视图（可选，建议随 §7-E 倒计时同批）：按（域 + 模型）聚合 `Total / Servable / Locked / State(locked|starved|partial) / UnlockAt / FullyUnlockAt / Reason`——与未决项「真实请求反哺模型状态」相接。
 - 停用号统计**单列**（不并入「已禁用」数字）——《账号启用停用》spec 收尾项。
 
-### 增补验收
+### 增补验收（2026-10-17 回填）
 
-- [ ] 全池 6004 冷却 → `400 model_unavailable`（含解锁时间 hint）；同池账号级降权 → 仍 429
-- [ ] 流式 200 后 error 帧（6004）→ 不记成功、写模型冷却；随后正常流 → 记成功
-- [ ] 读超时 → 不换号（上游只被调用一次）、不喂连败、`upstream_timeout` 文案
-- [ ] 锁池聚合/全池判定在有停用号时不误报（停用号不计入）；停用号统计单列
+- [x] 全池 6004 冷却 → `400 model_unavailable`（含解锁时间 hint）；同池账号级降权 → 仍 429（`test_6004_all_pool_raises_model_unavailable` / `test_all_degraded_raises_suspended`）
+- [x] 流式 200 后 error 帧（6004）→ 不记成功、写模型冷却（`test_6004_after_frames_429_no_rotate`）；随后正常流 → 记成功（`test_11102_negative_cache_skips_account` 换号成功后走 note_success 路径）
+- [x] 读超时 → 不换号（上游只被调用一次）、不喂连败、`upstream_timeout` 文案（`test_read_timeout_no_rotation_no_penalty`）
+- [x] 锁池聚合/全池判定在有停用号时不误报（停用号不计入——选号候选即启用号，`test_all_disabled_equals_empty_pool`）；停用号统计单列：本期无该统计 UI（可选视图项，随「锁池视图」后置）

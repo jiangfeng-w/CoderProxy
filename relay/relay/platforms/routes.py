@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from relay.middleware import require_api_key
 from relay.platforms import PLATFORMS
 from relay.platforms.base import (
+    AccountView,
     PlatformAdapter,
     PlatformAuthError,
     PlatformError,
@@ -93,6 +94,47 @@ async def delete_account(platform: str, uid: str):
             raise HTTPException(status_code=404, detail="账号不存在")
         return {"status": "deleted"}
     return await _dispatch(platform, _run)
+
+
+@router.post("/{platform}/accounts/{uid}/priority")
+async def set_account_priority(platform: str, uid: str, body: dict):
+    """账号优先级（《WorkBuddy 反代账号优先级》：1 起、越小越优先、上限 99）。
+
+    账号池通用概念（不限 WorkBuddy）；body `{priority: int}`；返回更新后 AccountView。
+    账号 404 / 非法值 400（bool 不是业务整数，拒绝）。
+    """
+    from relay.platforms import store
+
+    _platform_or_404(platform)
+    priority = (body or {}).get("priority")
+    if isinstance(priority, bool) or not isinstance(priority, int) \
+            or not 1 <= priority <= 99:
+        raise HTTPException(status_code=400, detail="priority 须为 1–99 的整数")
+    try:
+        row = await store.update_account(platform, uid, {"priority": priority})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="账号不存在") from None
+    return AccountView.from_dict(row).to_dict()
+
+
+@router.post("/{platform}/accounts/{uid}/enabled")
+async def set_account_enabled(platform: str, uid: str, body: dict):
+    """账号启用停用（《WorkBuddy 账号启用停用》：用户级开关，与系统态 status 正交）。
+
+    body `{enabled: bool}`（严格 bool——`1/0` 拒绝）；停用 = 全链路排除
+    （反代选号 / 目录选号 / 服务门控）；返回更新后 AccountView。
+    """
+    from relay.platforms import store
+
+    _platform_or_404(platform)
+    enabled = (body or {}).get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="enabled 须为布尔值")
+    try:
+        row = await store.update_account(platform, uid, {"enabled": enabled})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="账号不存在") from None
+    return AccountView.from_dict(row).to_dict()
 
 
 @router.post("/{platform}/accounts/{uid}/checkin")

@@ -5,7 +5,7 @@
 // 模型区：WorkBuddy 目录（all=1 过滤前缀；主列表仅可见模型）+ 白名单启停 + 手动连通性测试
 // + 「模型显示」弹窗（模型列表过时治理：无档位默认隐藏，显示/启用双开关联动——隐藏即停用）。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NButton, NCard, NCheckbox, NEmpty, NInput, NModal, NPagination, NPopconfirm, NRadio, NRadioGroup, NSwitch, NTabPane, NTabs, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NCheckbox, NEmpty, NInput, NInputNumber, NModal, NPagination, NPopconfirm, NRadio, NRadioGroup, NSwitch, NTabPane, NTabs, NTag, useMessage } from 'naive-ui'
 import { getModels, openAuthorizeUrl, saveTextFile, type OaiModel, type WbAccount } from '../../api'
 import { useWorkbuddyStoreFor, WB_CN_PLATFORM } from '../../stores/workbuddy'
 import { store, useConfigStore } from '../../store'
@@ -385,6 +385,86 @@ async function onJsonFile(ev: Event) {
 // ── 账号动作 ──
 const accounts = computed(() => wb.accounts)
 
+// ── 三需求同批（2026-10-17）：启用开关 / 优先级 / 健康倒计时 ──
+
+/** 启用/停用账号（用户级开关；停用 = 全链路排除；管理操作不受影响）。 */
+async function onToggleEnabled(a: WbAccount, value: string | number | boolean) {
+  try {
+    await wb.setEnabled(a.uid, value === true)
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+// 优先级设置弹窗（《WorkBuddy 反代账号优先级》：1 起、越小越优先、上限 99）
+const showPriorityDlg = ref(false)
+const prioUid = ref('')
+const prioValue = ref<number | null>(1)
+const prioBusy = ref(false)
+const prioAccount = computed<WbAccount | null>(() => wb.accounts.find(a => a.uid === prioUid.value) ?? null)
+
+function openPriorityDlg(a: WbAccount) {
+  prioUid.value = a.uid
+  prioValue.value = a.priority ?? 1
+  showPriorityDlg.value = true
+}
+
+async function onSavePriority() {
+  if (prioValue.value == null || prioBusy.value) return
+  prioBusy.value = true
+  try {
+    await wb.setPriority(prioUid.value, prioValue.value)
+    showPriorityDlg.value = false
+    message.success('优先级已保存')
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    prioBusy.value = false
+  }
+}
+
+// 健康倒计时（健康管理 spec §7-E：对齐 9router CooldownTimer 口径）
+/** 每秒 tick 的「现在」：倒计时倒走、到期自动消失/切换下一条。 */
+const nowTick = ref(Date.now())
+let tickTimer: number | undefined
+
+/** 该号最早恢复时刻（连败挂起 ∪ 全部未到期模型冷却的最早者）；无 → null。
+ * 停用号不显示倒计时（对齐 9router isActive !== false 门控——停用号不出场）。 */
+function cooldownOf(a: WbAccount): { until: number; kind: 'degraded' | 'rate' } | null {
+  if (a.enabled === false) return null
+  const now = nowTick.value
+  let best: { until: number; kind: 'degraded' | 'rate' } | null = null
+  const du = a.degraded_until ?? 0
+  if (du > now) best = { until: du, kind: 'degraded' }
+  for (const cd of Object.values(a.model_cooldowns ?? {})) {
+    const u = cd?.until ?? 0
+    if (u > now && (!best || u < best.until)) best = { until: u, kind: 'rate' }
+  }
+  return best
+}
+
+/** 倒计时格式化（9router 口径）：Xs（<60s）/ Xm Ys（<1h）/ Xh Ym（≥1h）。 */
+function fmtCountdown(ms: number): string {
+  const s = Math.max(1, Math.ceil(ms / 1000))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+}
+
+function cdLabel(a: WbAccount): string {
+  return cooldownOf(a)?.kind === 'degraded' ? '挂起' : '限流'
+}
+
+function cdText(a: WbAccount): string {
+  const cd = cooldownOf(a)
+  return cd ? fmtCountdown(cd.until - nowTick.value) : ''
+}
+
+function cdTitle(a: WbAccount): string {
+  const cd = cooldownOf(a)
+  return cd ? `最晚恢复：${fmtIso(new Date(cd.until).toISOString())}` : ''
+}
+
 // 配额明细弹窗（用户拍板 2026-10-07：配额数据点开弹窗看，不挤卡片行）
 const showQuotaDlg = ref(false)
 /** 弹窗只记 uid；账号数据实时从 store 取（快照引用会让弹窗内「刷新配额」后时间/数据不更新）。 */
@@ -544,13 +624,26 @@ onMounted(() => {
   void wb.load().catch(e => message.error(String(e)))
   void wb.loadIdeState()
   void loadWbModels()
+  // 健康倒计时每秒 tick（对齐 9router CooldownTimer；到期自动消失/切换下一条）
+  tickTimer = window.setInterval(() => {
+    nowTick.value = Date.now()
+  }, 1000)
 })
-// 账号区「添加账号」成功后 / 其它页面同步目录 → 刷新模型列表
+// 账号区变化（添加/删除/停用/启用）→ 刷新模型列表：停用 = 全链路排除，
+// 池空时目录即时为空（BUG-007）——只监听数量会漏掉停用/启用，列表停留在 stale
+// 状态（验收反馈 2026-10-17：需切 tab 才刷新）。签名含启用态，签到/配额等
+// 其它局部更新不触发（避免无谓重拉）。
 watch(
-  () => wb.accounts.length,
+  () => wb.accounts.map(a => `${a.uid}:${a.enabled !== false ? 1 : 0}`).join('|'),
   () => void loadWbModels()
 )
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  stopPolling()
+  if (tickTimer !== undefined) {
+    clearInterval(tickTimer)
+    tickTimer = undefined
+  }
+})
 </script>
 
 <template>
@@ -596,13 +689,28 @@ onUnmounted(stopPolling)
           v-for="a in accounts"
           :key="a.uid"
           class="acct-card"
+          :class="{ 'acct-disabled': a.enabled === false }"
         >
           <div class="acct-head">
+            <NSwitch
+              size="small"
+              :value="a.enabled !== false"
+              :disabled="wb.busyUid === a.uid"
+              title="停用后请求不再走该账号（管理操作不受影响）"
+              @update:value="v => onToggleEnabled(a, v)"
+            />
             <span
               class="acct-name"
               :title="a.uid"
               >{{ a.nickname || a.uid }}</span
             >
+            <NTag
+              v-if="a.enabled === false"
+              size="small"
+              :bordered="false"
+            >
+              已停用
+            </NTag>
             <NTag
               v-if="supportsCheckin"
               size="small"
@@ -678,6 +786,18 @@ onUnmounted(stopPolling)
           </div>
           <div class="acct-meta">
             <span v-if="supportsCheckin">连签 {{ a.checkin.streak_days ?? 0 }} 天</span>
+            <span
+              class="prio-link"
+              title="优先级：1 起、越小越优先；同优先级内轮询（点击设置）"
+              @click="openPriorityDlg(a)"
+              >优先级 {{ a.priority ?? 1 }} ›</span
+            >
+            <span
+              v-if="cooldownOf(a)"
+              class="cd-timer mono"
+              :title="cdTitle(a)"
+              >⏱ {{ cdLabel(a) }} {{ cdText(a) }}</span
+            >
             <span
               v-if="a.quota.total"
               class="mono quota-link"
@@ -966,6 +1086,43 @@ onUnmounted(stopPolling)
             @click="showLoginDlg = false"
           >
             关闭
+          </NButton>
+        </div>
+      </template>
+    </NModal>
+
+    <!-- 优先级设置弹窗（《WorkBuddy 反代账号优先级》：1 起、越小越优先、上限 99） -->
+    <NModal
+      v-model:show="showPriorityDlg"
+      preset="card"
+      :title="`优先级 · ${prioAccount?.nickname || prioAccount?.uid || ''}`"
+      :style="{ width: '320px' }"
+    >
+      <div class="prio-body">
+        <NInputNumber
+          v-model:value="prioValue"
+          :min="1"
+          :max="99"
+          size="small"
+          style="width: 150px"
+        />
+        <span class="q-dim">1 起、越小越优先；同优先级内轮询（默认 1）。</span>
+      </div>
+      <template #footer>
+        <div class="prio-footer">
+          <NButton
+            size="small"
+            @click="showPriorityDlg = false"
+          >
+            取消
+          </NButton>
+          <NButton
+            size="small"
+            type="primary"
+            :loading="prioBusy"
+            @click="onSavePriority"
+          >
+            确定
           </NButton>
         </div>
       </template>
@@ -1344,6 +1501,32 @@ onUnmounted(stopPolling)
   flex-wrap: wrap;
   color: var(--cp-dim);
   font-size: 12px;
+}
+/* 停用态卡片淡化（对齐 9router opacity-60；管理操作按钮保持可用） */
+.acct-disabled {
+  opacity: 0.6;
+}
+.prio-link {
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.prio-link:hover {
+  color: var(--cp-cyan);
+}
+/* 健康倒计时（9router 口径：橙色等宽小字；到期自动消失） */
+.cd-timer {
+  color: #f0a020;
+}
+/* 优先级设置弹窗 */
+.prio-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.prio-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .mono {
   font-family: var(--cp-mono, monospace);

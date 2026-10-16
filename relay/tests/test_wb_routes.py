@@ -484,3 +484,120 @@ def test_ta3_routes_unaffected(client):
     assert client.get("/v1/service", headers=_auth()).status_code == 200
     # /v1/platforms 未挤占 OpenAI 路径
     assert client.get("/v1/models", headers=_auth()).status_code in (200, 503)
+
+
+# ─────────── 三需求同批（2026-10-17）：端点 / 字段透出 / 错误映射 / 门控 ───────────
+
+
+async def test_set_priority_via_routes(client):
+    """priority 端点：200 落盘 / 404 / 400（bool 与越界拒绝）。"""
+    await store.upsert_account("workbuddy", {"uid": "u_p", "access_token": "at"})
+    r = client.post("/v1/platforms/workbuddy/accounts/u_p/priority",
+                    headers=_auth(), json={"priority": 7})
+    assert r.status_code == 200
+    assert r.json()["priority"] == 7
+    acc = await store.find_account("workbuddy", "u_p")
+    assert acc["priority"] == 7
+    assert client.post("/v1/platforms/workbuddy/accounts/u_missing/priority",
+                       headers=_auth(), json={"priority": 1}).status_code == 404
+    for bad in (0, 100, "1", True, None):
+        r = client.post("/v1/platforms/workbuddy/accounts/u_p/priority",
+                        headers=_auth(), json={"priority": bad})
+        assert r.status_code == 400
+
+
+async def test_set_enabled_via_routes(client):
+    """enabled 端点：200 落盘（幂等）/ 404 / 400（严格 bool——1/0 拒绝）。"""
+    await store.upsert_account("workbuddy", {"uid": "u_e", "access_token": "at"})
+    r = client.post("/v1/platforms/workbuddy/accounts/u_e/enabled",
+                    headers=_auth(), json={"enabled": False})
+    assert r.status_code == 200
+    assert r.json()["enabled"] is False
+    acc = await store.find_account("workbuddy", "u_e")
+    assert acc["enabled"] is False
+    r = client.post("/v1/platforms/workbuddy/accounts/u_e/enabled",
+                    headers=_auth(), json={"enabled": True})
+    assert r.status_code == 200 and r.json()["enabled"] is True
+    assert client.post("/v1/platforms/workbuddy/accounts/u_missing/enabled",
+                       headers=_auth(), json={"enabled": False}).status_code == 404
+    for bad in (1, 0, "false", None):
+        r = client.post("/v1/platforms/workbuddy/accounts/u_e/enabled",
+                        headers=_auth(), json={"enabled": bad})
+        assert r.status_code == 400
+
+
+async def test_accounts_expose_governance_fields(client):
+    """AccountView 透出 priority/enabled/degraded_until/model_cooldowns；不含 token；
+    已过期冷却条目惰性清理、内部 hits 不透出。"""
+    await store.upsert_account("workbuddy", {
+        "uid": "u_gov", "access_token": "AT_SECRET", "refresh_token": "RT_SECRET",
+        "priority": 3, "enabled": False,
+        "degraded_until": 4_000_000_000_000,
+        "model_cooldowns": {
+            "glm-5.3": {"until": 4_000_000_000_000, "reason": "6004", "hits": 2},
+            "old-model": {"until": 1, "reason": "11102"},
+        },
+    })
+    r = client.get("/v1/platforms/workbuddy/accounts", headers=_auth())
+    assert r.status_code == 200
+    assert "AT_SECRET" not in r.text and "RT_SECRET" not in r.text
+    acc = r.json()["accounts"][0]
+    assert acc["priority"] == 3
+    assert acc["enabled"] is False
+    assert acc["degraded_until"] == 4_000_000_000_000
+    cds = acc["model_cooldowns"]
+    assert cds["glm-5.3"]["reason"] == "6004"
+    assert "hits" not in cds["glm-5.3"]
+    assert "old-model" not in cds  # 已过期条目惰性清理
+
+
+def test_upstream_error_mappings_governance():
+    """AllAccountsSuspendedError → 429 + Retry-After；ModelUnavailableError →
+    400 + code=model_unavailable（spec §4 / §8-A）。"""
+    from relay.platforms.workbuddy.chat import (
+        AllAccountsSuspendedError,
+        ModelUnavailableError,
+    )
+    from relay.routes import _upstream_error_response
+
+    resp = _upstream_error_response(AllAccountsSuspendedError("全池挂起", retry_after_s=42))
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == "42"
+
+    resp = _upstream_error_response(ModelUnavailableError("模型全锁", accounts=3,
+                                                          unlock_at_ms=123))
+    assert resp.status_code == 400
+    body = json.loads(resp.body)
+    assert body["error"]["code"] == "model_unavailable"
+
+
+async def test_availability_respects_disabled(client):
+    """门控：全停用 ≈ 池空（provider_available False / _any_platform_available 跳过该池；
+    双池另一池正常时服务仍可用）。"""
+    from relay import adapter_registry
+    from relay.routes import _any_platform_available
+
+    await store.upsert_account("workbuddy", {"uid": "u_a", "access_token": "at"})
+    assert await adapter_registry.provider_available("wbcn") is True
+    assert await _any_platform_available() is True
+    await store.update_account("workbuddy", "u_a", {"enabled": False})
+    assert await adapter_registry.provider_available("wbcn") is False
+    assert await _any_platform_available() is False
+    await store.upsert_account("workbuddy-global", {"uid": "u_g", "access_token": "at"})
+    assert await _any_platform_available() is True
+    await store.update_account("workbuddy-global", "u_g", {"enabled": False})
+    assert await _any_platform_available() is False
+
+
+async def test_governance_endpoints_generalized_global_realm(client):
+    """泛化端点双域：国际版路径的 enabled/priority 同样生效。"""
+    await store.upsert_account("workbuddy-global",
+                               {"uid": "u_g", "access_token": "at"})
+    r = client.post("/v1/platforms/workbuddy-global/accounts/u_g/enabled",
+                    headers=_auth(), json={"enabled": False})
+    assert r.status_code == 200 and r.json()["enabled"] is False
+    r = client.post("/v1/platforms/workbuddy-global/accounts/u_g/priority",
+                    headers=_auth(), json={"priority": 3})
+    assert r.status_code == 200 and r.json()["priority"] == 3
+    acc = await store.find_account("workbuddy-global", "u_g")
+    assert acc["enabled"] is False and acc["priority"] == 3
