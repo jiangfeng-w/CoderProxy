@@ -330,8 +330,12 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo
         .spawn()
         .map_err(|e| format!("启动本地服务失败，请检查程序是否完整: {e}"))?;
 
-    // 读线程：逐行扫 stdout，命中 [relay-ready] 即通知主线程
+    // 读线程：逐行扫 stdout，命中 [relay-ready] 即通知主线程；**之后继续消费**，
+    // 以便把 sidecar 意外退出（Terminated）转成「就绪失效」——否则壳会一直以为
+    // 服务在跑，GUI 只能刷「服务请求失败」而无法自辨（BUG-009）。
+    let sidecar_pid = child.pid();
     let (tx, ready_rx) = channel();
+    let exit_handle = app.clone();
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         while let Some(ev) = rx.blocking_recv() {
@@ -343,14 +347,16 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo
                             buf.clear();
                             if let Some(info) = parse_ready(&line) {
                                 let _ = tx.send(info);
-                                return;
                             }
                         } else {
                             buf.push(b);
                         }
                     }
                 }
-                CommandEvent::Terminated(_) => return,
+                CommandEvent::Terminated(_) => {
+                    handle_sidecar_exit(&exit_handle, sidecar_pid);
+                    return;
+                }
                 _ => {}
             }
         }
@@ -367,6 +373,12 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo
                 }
                 *state.job.lock().unwrap() = Some(j);
             }
+            // 就绪行只保证 relay「已报就绪」，不保证内核已开始接受连接（history：该行
+            // 曾打在任何 socket listen 之前，见 BUG-009）——置 ready 前先探测到端口可连，
+            // 使 relay_status.running 与「能连上」等价。超时仍置就绪（保持原行为）并告警。
+            if !wait_port_connectable(info.port, Duration::from_secs(2)) {
+                eprintln!("[shell] sidecar 已报就绪但 127.0.0.1:{} 尚不可连（等 2s 超时，仍置为就绪）", info.port);
+            }
             *state.sidecar.lock().unwrap() = Some(child);
             *state.ready.lock().unwrap() = Some(info.clone());
             println!("[shell] sidecar 就绪 port={}", info.port);
@@ -381,6 +393,52 @@ fn spawn_with_port(app: &tauri::AppHandle, state: &AppState) -> Result<ReadyInfo
             Err("服务意外退出".to_string())
         }
     }
+}
+
+/// 等 `127.0.0.1:{port}` 可连（短重试；成功即返回 true）。
+///
+/// 只用于「置就绪前的可用性确认」：壳的所有转发都走 127.0.0.1（见 `relay` 命令），
+/// 故以回环可连为准。有界重试（间隔 20ms），判不出也不阻塞启动流程。
+fn wait_port_connectable(port: u16, timeout: Duration) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// sidecar 意外退出：**让就绪状态失效**（BUG-009）。
+///
+/// 原实现里读线程收到就绪行即结束，之后进程死了壳也不知情——`ready` 永久留着，
+/// GUI 只能一直刷「服务请求失败」，且没有恢复路径（除手动重启应用）。现在退出事件
+/// 抵达即清 `ready`（→ `relay_status` 报 running:false，顶栏显示「已停止」，用户可点
+/// 「重启服务」恢复），并回收作业对象（兜底 onefile 子进程）。
+///
+/// pid 对不上（重启后旧进程的迟到事件）直接忽略，不误清新实例的就绪态。
+fn handle_sidecar_exit(app: &tauri::AppHandle, pid: u32) {
+    let state = app.state::<AppState>();
+    {
+        let mut guard = state.sidecar.lock().unwrap();
+        if let Some(child) = guard.as_ref() {
+            if child.pid() != pid {
+                return; // 非当前 sidecar（旧进程迟到事件）→ 忽略
+            }
+            *guard = None;
+        }
+    }
+    if let Some(job) = state.job.lock().unwrap().take() {
+        drop(job);
+    }
+    *state.ready.lock().unwrap() = None;
+    eprintln!("[shell] sidecar 已退出（pid={pid}），就绪状态已失效（可点「重启服务」恢复）");
 }
 
 /// 停掉当前 sidecar 并清空就绪状态。
@@ -414,12 +472,19 @@ async fn relay(
     if !path.starts_with("/v1/") {
         return Err(format!("不支持的请求路径: {path}"));
     }
-    let ready = state
-        .ready
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "服务尚未就绪，请稍候再试".to_string())?;
+    let ready = match state.ready.lock().unwrap().clone() {
+        Some(r) => r,
+        None => {
+            // 区分「还在启动」与「已退出」：后者在 GUI 上应引导用户点「重启服务」，
+            // 而不是让它以为再等等就好（BUG-009）。
+            let msg = if state.sidecar.lock().unwrap().is_some() {
+                "服务尚未就绪，请稍候再试"
+            } else {
+                "本地服务已停止，请点右上角「重启服务」"
+            };
+            return Err(msg.to_string());
+        }
+    };
 
     let method = match method.to_uppercase().as_str() {
         "GET" => reqwest::Method::GET,

@@ -121,18 +121,19 @@ async def _any_platform_available() -> bool:
 
 @app.on_event("startup")
 async def _on_startup() -> None:
-    """sidecar 就绪协议：向 stdout 打一行机器可读就绪信息（GUI 侧解析端口/key）。
+    """启动期准备：日志库建库 / schema 自省补列（落 settings.data_dir）。
 
-    flush=True：sidecar 场景 stdout 是管道（非 tty），块缓冲会吞掉就绪行，
-    必须显式刷新，否则 Tauri 壳解析不到端口。
+    **本事件不打就绪行**（本地修订，BUG-009，2026-10-16）：FastAPI startup 事件早于
+    uvicorn 的 `listen()`（lifespan startup 先于 `loop.create_server`），在此打印
+    `[relay-ready]` 会让壳提前置「已就绪」而端口尚不可连 → GUI 落在该窗口的请求
+    满屏报 `服务请求失败: error sending request for url`。现由 `relay.cli` 在
+    `uvicorn.Server.started`（= 全部 socket 已 listen）之后打印，硬不变式：
+    **就绪 ⇒ 端口可连**。
     """
     try:
         await db.ensure_initialized()  # M6：建库 + schema 自省补列（落 settings.data_dir）
     except Exception as exc:  # noqa: BLE001（日志库故障不阻断起服，仅告警）
         logger.warning("[relay] 日志库初始化失败: %s", exc)
-    print(f"[relay-ready] port={settings.relay_port} "
-          f"api_key={settings.relay_api_key or storage.relay_api_key()} "
-          f"tool_mode={settings.tool_mode}", flush=True)
 
 
 # ─────────────────────────── provider 构造 ───────────────────────────

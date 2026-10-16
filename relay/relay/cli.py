@@ -16,6 +16,10 @@ connect 快速跳过活监听、独占绑定找第一个空位（窗口 PORT_SCA
 后把已绑定 socket 交 uvicorn（探测→绑定无空窗）。只有配置端口落盘，实际端口
 不落盘。
 
+就绪口径（BUG-009，2026-10-16 本地修订）：`[relay-ready]` 只在 uvicorn 真正
+listen 之后打印（硬不变式：**就绪 ⇒ 端口可连**）——原实现在 FastAPI startup
+事件里打印，早于 listen ~150–200ms，GUI 落在该窗口的请求会满屏假报错。
+
 环境变量见 relay/config.py；依赖自举见 docs/README.md「自举环境」。
 """
 from __future__ import annotations
@@ -223,11 +227,48 @@ def _cmd_run(args) -> int:
     # 预绑定 socket 交 uvicorn（内部自行 listen；localhost = 回环双栈多枚 socket）
     server = uvicorn.Server(uvicorn.Config("relay.routes:app", log_level="info"))
     try:
-        server.run(sockets=listen_socks)
+        asyncio.run(_serve_announcing_ready(server, listen_socks, _print_ready_line))
     finally:
         for s in listen_socks:
             s.close()
     return 0
+
+
+def _print_ready_line() -> None:
+    """sidecar 就绪协议行（GUI 壳只解析 `port`；`api_key`/`tool_mode` 为协议兼容附加字段）。
+
+    本地修订（BUG-009，2026-10-16）：原在本函数外的 `routes._on_startup`（FastAPI
+    startup 事件）打印，而那早于 uvicorn 的 `listen()`（lifespan startup 先于
+    `loop.create_server`）→ 壳置「就绪」后仍有 ~150–200ms 端口连不上，落在窗口里的
+    GUI 请求全部报 `服务请求失败: error sending request for url`（安装版实测满屏红）。
+    现改由 `_serve_announcing_ready` 在 `server.started`（= 全部 socket 已 listen）之后调用。
+    """
+    from relay import storage
+    from relay.config import settings
+
+    print(f"[relay-ready] port={settings.relay_port} "
+          f"api_key={settings.relay_api_key or storage.relay_api_key()} "
+          f"tool_mode={settings.tool_mode}", flush=True)
+
+
+async def _serve_announcing_ready(server, listen_socks, announce=_print_ready_line) -> None:
+    """跑 uvicorn，并在**真正 listen 之后**才 announce 就绪（硬不变式：就绪 ⇒ 端口可连）。
+
+    `uvicorn.Server.started` 在 `startup()` 末尾置位——此时 lifespan 已跑完、每个
+    socket 都已过 `loop.create_server`（即 listen），故以它为锚点无空窗。启动失败
+    （bind 报错等）时 `started` 恒 False、`serve()` 抛错原样上抛，就绪行不发 → 壳侧
+    60s 超时报「服务启动超时」，比「报了就绪却连不上」可诊断。
+    """
+    task = asyncio.create_task(server.serve(sockets=listen_socks))
+    try:
+        while not server.started and not task.done():
+            await asyncio.sleep(0.01)
+        if server.started:
+            announce()
+        await task
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 def _cmd_login(args) -> int:

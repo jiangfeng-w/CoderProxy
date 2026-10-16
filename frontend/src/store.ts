@@ -15,6 +15,9 @@ export const useRuntimeStore = defineStore('runtime', {
     auth: { status: 'not_logged_in' } as AuthStatus,
     /** 对 agent 的 OpenAI /v1 服务是否可用（relay 侧：已登录 且 未手动停止）。 */
     serviceEnabled: false,
+    /** 服务开关是否已拿到首个应答。false = 未知态（启动/重启窗口内查询会失败），
+     * 顶栏此时不显示「已停止」，避免把未知误报成故障（BUG-009）。 */
+    serviceChecked: false,
     view: 'overview' as string,
     /** 模型连通状态：success / failure / testing（无记录 = 未测试）。跨页面共享，
      * 不持久化；与白名单启用无关——启用与否看 model_whitelist（isEnabled）。

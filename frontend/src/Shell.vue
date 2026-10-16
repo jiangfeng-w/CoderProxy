@@ -74,6 +74,9 @@ function serviceStatusText(): string {
   // 首启门控窗口内 relay 未就绪 →「启动中…」（与页面占位符语义一致）；
   // 门控放行后回归原语义——未运行即「已停止」（sidecar 真故障时不永久误显启动中）。
   if (!bootRevealed.value && !store.relay.running) return '启动中…'
+  // 服务开关未拿到首个应答前是未知态，不显示「已停止」（BUG-009：启动/重启窗口内
+  // 该查询会失败，原先直接落到「已停止」，把「还没测出来」误报成故障）。
+  if (store.relay.running && !store.serviceChecked) return '启动中…'
   return serviceRunning.value ? '运行中' : '已停止'
 }
 
@@ -135,8 +138,9 @@ async function pollStatus() {
   }
   try {
     store.serviceEnabled = (await serviceStatus()).enabled
+    store.serviceChecked = true
   } catch {
-    /* 服务开关查询失败（进程未就绪/未登录等），保持上次值 */
+    /* 服务开关查询失败（进程未就绪/未登录等），保持上次值（含未知态） */
   }
   // 登录态由「未登录 → 已登录」转变（含浏览器授权完成后轮询到）：自动同步一次模型目录
   if (store.auth.status === 'logged_in' && lastAuthStatus !== 'logged_in') {
