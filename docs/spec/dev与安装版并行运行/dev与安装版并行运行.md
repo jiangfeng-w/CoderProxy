@@ -135,7 +135,7 @@
 - [x] dev 首启从 3601 起扫：安装版在跑时 dev 落 3602（或第一个空位），两 GUI 顶栏各显示各自实际端口；dev GUI 改端口 → 重启保持；安装版保持 3601 不受影响 —— 实测：dev 落 3602（banner 打印「端口 3601 已被占用，自动顺延至 3602」），顶栏读 `[relay-ready]` 端口自动正确
 - [x] 占用顺延：3601 被无关进程占用 → relay 自动顺延 3602，配置页出现「配置 3601 / 实际 3602」提示行，agent 用实际端口可正常请求；占用情形不变时重启落点稳定 —— API 实测 `GET /v1/auth/config` = `{port: 3601, listen_port: 3602, base_url: http://127.0.0.1:3602/v1}`（前端按此渲染提示行）；冒烟「A 重启落点稳定 3601」通过
 - [x] dev 双开 → 第二实例聚焦第一实例（dev 内单实例仍生效）；安装版双开行为不变（`m5_single_instance_test.ps1` 口径） —— 实测：直起 `target\debug\coderproxy-desktop.exe` 第二实例后进程数仍为 1、未出现第三个 relay 端口
-- [x] release 零回归：不加 overlay 构建后 identifier 仍 `com.coderproxy.desktop`（产物核对）；打包冒烟照跑 —— identifier 仅存在于 overlay（打包命令只传 `tauri.conf.json`），本次未重打安装包（随用户打包时机）
+- [x] release 零回归：不加 overlay 构建后 identifier 仍 `com.coderproxy.desktop`（产物核对）；打包冒烟照跑 —— **安装包已重打（2026-10-16 21:40）**：`src-tauri/target/release/bundle/nsis/CoderProxy_0.1.0_x64-setup.exe`（33.5 MB）；产物核对：release 壳二进制内**无** `com.coderproxy.desktop.dev`（overlay 未泄漏）；打包冒烟：隔离数据目录直接跑打包 sidecar → `[relay-ready] port=13690`、`127.0.0.1` + `[::1]` 双栈监听、`/v1/auth/config` 返回 `base_url = http://localhost:13690/v1`（默认主机新口径随包生效）；打进包的 sidecar 与 `src-tauri/binaries/` 哈希一致。**未安装**（按手册：安装时机由用户掌握）
 - [x] relay 单测：端口装载优先级四元用例（`--port` / 磁盘 / env / 默认；env 值不落盘）+ `get_saved_port` 边界 + 顺延用例（起点被占 → 下一空位；窗口全占 → 报错；TIME_WAIT 残留不误判） —— `relay/tests/test_port_scan.py` 14 例（含独占绑定兜底「探测漏报仍不顺延错」、窗口全占、非法起点）；全量 pytest **590 passed** 零回归
 
 ## 5. 实施步骤（commit 序列）
@@ -148,4 +148,4 @@
 
 > **完成回填（2026-10-16）**：① `7d5b808` dev 身份隔离（overlay + 开发规则并行启动命令）；② `de820f7` relay 端口自动顺延（storage / cli / routes / 前端 / 单测，壳零改动）；③ 本条为台账收尾。
 > 支撑脚本：本目录 [`冒烟-端口顺延.py`](冒烟-端口顺延.py)——双实例并存 / 起点被占顺延 / 重启落点稳定 / `--port` 落盘，共 11 项断言全 PASS（本机回环，**无上游请求**）。
-> 未随本次做：sidecar 重打（已执行，含新端口逻辑）与安装包重打（随用户打包时机）。
+> 本次已做：sidecar 重打（2026-10-16 21:34，含端口顺延 + 默认主机 localhost）与**安装包重打**（21:40 产出 `CoderProxy_0.1.0_x64-setup.exe` + 产物冒烟，见 §4 最后一项）；**未安装**——安装由用户自行掌握时机（会杀掉运行中的应用、中断 agent 请求）。
