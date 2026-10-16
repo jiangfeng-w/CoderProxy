@@ -24,6 +24,11 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def url_host(host: str) -> str:
+    """URL 主机段：IPv6 字面量需加方括号（`http://[::1]:3601/v1`），IPv4/主机名原样。"""
+    return f"[{host}]" if ":" in host else host
+
+
 @dataclass
 class Settings:
     # 服务

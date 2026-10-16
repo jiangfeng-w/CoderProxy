@@ -83,9 +83,75 @@ async def test_get_saved_port_boundaries(port_storage):
 
 def test_probe_host_maps_wildcard():
     assert cli._probe_host("0.0.0.0") == "127.0.0.1"
-    assert cli._probe_host("::") == "127.0.0.1"
     assert cli._probe_host("") == "127.0.0.1"
+    assert cli._probe_host("*") == "127.0.0.1"
+    assert cli._probe_host("::") == "::1"
     assert cli._probe_host("127.0.0.1") == "127.0.0.1"
+    assert cli._probe_host("::1") == "::1"
+
+
+def _ipv6_available() -> bool:
+    try:
+        socket.socket(socket.AF_INET6, socket.SOCK_STREAM).close()
+        return True
+    except OSError:
+        return False
+
+
+def _free_port(family: int, bind_host: str) -> int:
+    s = socket.socket(family, socket.SOCK_STREAM)
+    s.bind((bind_host, 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_pick_listen_socket_ipv4_wildcard_host():
+    port = _free_port(socket.AF_INET, "127.0.0.1")
+    sock, picked = cli.pick_listen_socket("0.0.0.0", port)
+    try:
+        assert picked == port
+        assert sock.family == socket.AF_INET
+    finally:
+        sock.close()
+
+
+@pytest.mark.skipif(not _ipv6_available(), reason="本机无 IPv6")
+def test_pick_listen_socket_ipv6_hosts():
+    """IPv6 字面量主机名（:: / ::1）必须可绑——历史坑：写死 AF_INET 会误报「均被占用」。"""
+    port = _free_port(socket.AF_INET6, "::1")
+    sock, picked = cli.pick_listen_socket("::1", port)
+    try:
+        assert picked == port
+        assert sock.family == socket.AF_INET6
+    finally:
+        sock.close()
+    sock, picked = cli.pick_listen_socket("::", port)
+    try:
+        assert picked == port  # 端口空间与 IPv4 独立，可复用同一号
+        assert sock.family == socket.AF_INET6
+    finally:
+        sock.close()
+
+
+def test_bind_backstops_probe_blind_spot():
+    """探测盲区兜底：活监听的 accept 队列被打满时 connect 会超时（判「不占用」，
+    本机实测），但独占绑定必然失败 → 扫描仍会跳过该口（不劫持、不误用）。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    try:
+        cli._probe_occupied("127.0.0.1", port)  # 无断言：是否超时取决于队列状态
+        cli._probe_occupied("127.0.0.1", port)
+        assert cli._bind_exclusive("127.0.0.1", port) is None
+        sock, picked = cli.pick_listen_socket("127.0.0.1", port)
+        try:
+            assert picked != port
+        finally:
+            sock.close()
+    finally:
+        s.close()
 
 
 def test_probe_occupied_true_for_listener_false_when_quiet():

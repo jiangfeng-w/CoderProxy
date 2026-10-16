@@ -51,7 +51,7 @@ from app.models.schemas import ChatRequest
 
 from relay import (adapter_registry, auth_flow, db, model_ref, oai_adapter, protocol_adapter,
                    providers_custom, storage, tool_disguise, tool_inventory)
-from relay.config import settings
+from relay.config import settings, url_host
 from relay.middleware import require_api_key
 from relay.monitor import monitor
 from relay.platforms.routes import router as platforms_router
@@ -989,7 +989,7 @@ async def auth_config():
     """
     configured_port = settings.relay_port_configured or settings.relay_port
     return {
-        "base_url": f"http://{settings.relay_host}:{settings.relay_port}/v1",
+        "base_url": f"http://{url_host(settings.relay_host)}:{settings.relay_port}/v1",
         "host": settings.relay_host,
         "port": configured_port,
         "listen_port": settings.relay_port,

@@ -51,8 +51,30 @@ def _setup_logging(level: int = logging.INFO) -> None:
 
 
 def _probe_host(host: str) -> str:
-    """连接探测用的目标地址：通配监听地址换回环（0.0.0.0/::/* → 127.0.0.1）。"""
-    return "127.0.0.1" if host in ("", "0.0.0.0", "::", "*") else host
+    """连接探测用的目标地址：通配监听地址换回环（0.0.0.0/空/`*` → 127.0.0.1；`::` → `::1`）。"""
+    if host in ("", "0.0.0.0", "*"):
+        return "127.0.0.1"
+    if host == "::":
+        return "::1"
+    return host
+
+
+def _addr_info(host: str, port: int, *, passive: bool):
+    """解析监听/探测地址：**由 getaddrinfo 决定地址族**（IPv4 / IPv6 / 主机名都支持）。
+
+    历史坑（2026-10-16 自查修复）：原先写死 AF_INET，`RELAY_HOST=::` / `::1` 时
+    探测与绑定全失败 → 误报「端口均被占用」且起不来（旧路径由 uvicorn 绑，IPv6 正常）。
+    取首个 IPv4 结果优先（与默认口径一致），没有 IPv4 再退回其它族（如纯 IPv6 字面量）。
+    """
+    try:
+        infos = socket.getaddrinfo(host or None, port, type=socket.SOCK_STREAM,
+                                   flags=socket.AI_PASSIVE if passive else 0)
+    except OSError:
+        return None
+    for info in infos:
+        if info[0] == socket.AF_INET:
+            return info
+    return infos[0] if infos else None
 
 
 def _probe_occupied(host: str, port: int, timeout: float = _PORT_PROBE_TIMEOUT_S) -> bool:
@@ -61,11 +83,16 @@ def _probe_occupied(host: str, port: int, timeout: float = _PORT_PROBE_TIMEOUT_S
     未连通不反推「空闲」：本机实测（2026-10-16）连接未监听端口既可能是被拒，
     也可能被本机安全软件静默丢 SYN 而超时——超时与「空闲」不可区分，故只把
     「连通」当正向证据用于快速跳过，真正的空闲由 _bind_exclusive 落实。
+    地址解不出（非法主机名等）时按「不占用」处理，交给独占绑定兜底报错。
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    info = _addr_info(_probe_host(host), port, passive=False)
+    if info is None:
+        return False
+    family, socktype, proto, _, sockaddr = info
+    with socket.socket(family, socktype, proto) as s:
         s.settimeout(timeout)
         try:
-            s.connect((_probe_host(host), port))
+            s.connect(sockaddr)
         except OSError:
             return False
         return True
@@ -79,10 +106,15 @@ def _bind_exclusive(host: str, port: int) -> socket.socket | None:
        = 劫持对方端口；不加则任何活监听都以 WSAEADDRINUSE/WSAEACCES 失败。
     ② TIME_WAIT 残留不影响独占绑定（服务端 TIME_WAIT 场景实测绑定仍 ok），
        故无需为「快速重启」牺牲排他性。
+    地址族由 _addr_info 决定（IPv6 字面量也能绑）；解不出地址返回 None（视作占用）。
     """
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    info = _addr_info(host, port, passive=True)
+    if info is None:
+        return None
+    family, socktype, proto, _, sockaddr = info
+    s = socket.socket(family, socktype, proto)
     try:
-        s.bind((host, port))
+        s.bind(sockaddr)
     except OSError:
         s.close()
         return None
@@ -128,7 +160,7 @@ async def _resolve_port_start(explicit: int | None, env_or_default: int) -> int:
 
 
 def _cmd_run(args) -> int:
-    from relay.config import settings
+    from relay.config import settings, url_host
     from relay.storage import (apply_persisted_config, ensure_initialized,
                                save_api_key, save_tool_mode)
 
@@ -168,7 +200,8 @@ def _cmd_run(args) -> int:
     import uvicorn
 
     # flush=True：被 GUI sidecar spawn 时 stdout 是管道，块缓冲会吞掉 banner
-    print(f"* Relay 已就绪: http://{settings.relay_host}:{settings.relay_port}/v1", flush=True)
+    print(f"* Relay 已就绪: http://{url_host(settings.relay_host)}:{settings.relay_port}/v1",
+          flush=True)
     print(f"* API Key   : {settings.relay_api_key or '(环境变量 RELAY_API_KEY)'}", flush=True)
     print("* 模型列表  : GET  /v1/models", flush=True)
     print("* 聊天      : POST /v1/chat/completions", flush=True)
@@ -238,10 +271,10 @@ def _cmd_sync(args) -> int:
 
 
 def _cmd_config(args) -> int:
-    from relay.config import settings
+    from relay.config import settings, url_host
     from relay.storage import relay_api_key
 
-    print(f"base_url = http://{settings.relay_host}:{settings.relay_port}/v1")
+    print(f"base_url = http://{url_host(settings.relay_host)}:{settings.relay_port}/v1")
     print(f"api_key  = {relay_api_key()}")
     print(f"tool_mode= {settings.tool_mode}")
     return 0

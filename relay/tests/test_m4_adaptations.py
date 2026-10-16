@@ -241,6 +241,15 @@ def test_config_post_requires_auth(client):
     assert client.post("/v1/auth/config", json={"tool_mode": "strict"}).status_code == 401
 
 
+def test_config_base_url_brackets_ipv6_host(client, monkeypatch):
+    """IPv6 主机（RELAY_HOST=::）的 base_url 必须带方括号——否则 agent 拿到
+    `http://:::3601/v1` 无法解析（本次端口顺延让 IPv6 真正可用后显形）。"""
+    monkeypatch.setattr(settings, "relay_host", "::")
+    body = client.get("/v1/auth/config", headers=_auth()).json()
+    assert body["host"] == "::"
+    assert body["base_url"] == f"http://[::]:{settings.relay_port}/v1"
+
+
 def test_config_post_invalid(client):
     assert client.post("/v1/auth/config", json={"tool_mode": "bogus"}, headers=_auth()).status_code == 400
     assert client.post("/v1/auth/config", json={"model_whitelist": "nope"}, headers=_auth()).status_code == 400
